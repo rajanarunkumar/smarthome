@@ -177,3 +177,8 @@ button { cursor: pointer; }
 }
 .key-row input.country { flex: 0 0 4em; text-transform: uppercase; text-align: center; }
 .key-row .pill { flex: none; }
+.inline.actions { flex-wrap: wrap; }
+.inline.actions > * { flex: 1 1 auto; }
+.pill:disabled { opacity: .45; cursor: not-allowed; }
+.name.small { font-size: 15px; }
+.sub-value { font-variant-numeric: tabular-nums; color: var(--muted); }

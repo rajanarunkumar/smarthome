@@ -15,10 +15,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .adapters.base import Adapter
+from .adapters.dyson_adapter import DysonAdapter
+from .adapters.ecovacs_adapter import EcovacsAdapter
 from .adapters.govee_adapter import GoveeAdapter
 from .adapters.hue_adapter import HueAdapter
 from .adapters.kasa_adapter import KasaAdapter
 from .adapters.lgtv_adapter import LgTvAdapter
+from .adapters.pentair_adapter import PentairAdapter
 from .adapters.sonos_adapter import SonosAdapter
 from .adapters.thinq_adapter import ThinQAdapter
 from .auth import SESSION_COOKIE, Auth
@@ -42,7 +45,11 @@ class Hub:
         self.govee = GoveeAdapter(self.secrets)
         self.lgtv = LgTvAdapter(self.secrets)
         self.thinq = ThinQAdapter(self.secrets)
-        self.adapters: list[Adapter] = [self.kasa, self.hue, self.sonos, self.govee, self.lgtv, self.thinq]
+        self.dyson = DysonAdapter(self.secrets)
+        self.ecovacs = EcovacsAdapter(self.secrets)
+        self.pentair = PentairAdapter(self.secrets)
+        self.adapters: list[Adapter] = [self.kasa, self.hue, self.sonos, self.govee, self.lgtv, self.thinq,
+                                        self.dyson, self.ecovacs, self.pentair]
         self._by_prefix = {p: a for a in self.adapters for p in a.prefixes}
 
     def adapter_for(self, item_id: str) -> Adapter:
@@ -464,6 +471,60 @@ async def connect_thinq(request: Request, body: ThinQIn):
 @app.delete("/api/thinq/account")
 async def disconnect_thinq(request: Request):
     await hub_of(request).thinq.disconnect()
+    return {"ok": True}
+
+
+class EmailIn(BaseModel):
+    email: str = Field(min_length=3, max_length=254, pattern=r"^[^@\s]+@[^@\s]+$")
+    country: str = Field("US", pattern=r"^[A-Za-z]{2}$")
+
+
+class CodeIn(BaseModel):
+    code: str = Field(min_length=4, max_length=10, pattern=r"^\d+$")
+    password: str = Field(min_length=1, max_length=200)
+
+
+@app.post("/api/dyson/code")
+async def dyson_send_code(request: Request, body: EmailIn):
+    return await hub_of(request).dyson.send_code(body.email, body.country)
+
+
+@app.post("/api/dyson/account")
+async def dyson_verify(request: Request, body: CodeIn):
+    return await hub_of(request).dyson.verify_code(body.code, body.password)
+
+
+@app.delete("/api/dyson/account")
+async def dyson_disconnect(request: Request):
+    await hub_of(request).dyson.disconnect()
+    return {"ok": True}
+
+
+class LoginIn(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=1, max_length=200)
+    country: str = Field("US", pattern=r"^[A-Za-z]{2}$")
+
+
+@app.post("/api/ecovacs/account")
+async def ecovacs_connect(request: Request, body: LoginIn):
+    return await hub_of(request).ecovacs.connect(body.email, body.password, body.country)
+
+
+@app.delete("/api/ecovacs/account")
+async def ecovacs_disconnect(request: Request):
+    await hub_of(request).ecovacs.disconnect()
+    return {"ok": True}
+
+
+@app.post("/api/pentair/account")
+async def pentair_connect(request: Request, body: LoginIn):
+    return await hub_of(request).pentair.connect(body.email, body.password)
+
+
+@app.delete("/api/pentair/account")
+async def pentair_disconnect(request: Request):
+    await hub_of(request).pentair.disconnect()
     return {"ok": True}
 
 

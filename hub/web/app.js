@@ -14,9 +14,9 @@ const view = $("#view");
 const sheet = $("#sheet");
 const DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const DAY_LABEL = { mon: "Mon", tue: "Tue", wed: "Wed", thu: "Thu", fri: "Fri", sat: "Sat", sun: "Sun" };
-const BRAND = { kasa: "Kasa", hue: "Hue", sonos: "Sonos", lg: "LG", govee: "Govee", thinq: "LG ThinQ" };
+const BRAND = { kasa: "Kasa", hue: "Hue", sonos: "Sonos", lg: "LG", govee: "Govee", thinq: "LG ThinQ", dyson: "Dyson", ecovacs: "Ecovacs", pentair: "Pentair" };
 // These brands have no rename API, so the hub keeps the name.
-const HUB_NAMED = new Set(["govee", "lg", "thinq"]);
+const HUB_NAMED = new Set(["govee", "lg", "thinq", "dyson", "ecovacs", "pentair"]);
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -110,7 +110,8 @@ function deviceSub(d) {
   if (!d.online) parts.push("Not responding");
   else if (d.kind === "speaker") parts.push(d.playing ? (d.media ? `Playing ${d.media}` : "Playing") : "Paused");
   else if (d.kind === "tv") parts.push(d.on ? (d.media ? `On · ${d.media}` : "On") : "Off");
-  else if (d.kind === "appliance") parts.push(d.media || (d.on == null ? "Idle" : d.on ? "On" : "Off"));
+  else if (["appliance", "purifier", "pool"].includes(d.kind)) parts.push(d.media || (d.on == null ? "Idle" : d.on ? "On" : "Off"));
+  else if (d.kind === "vacuum") parts.push([d.media, d.battery != null ? `${d.battery}% battery` : ""].filter(Boolean).join(" · "));
   else if (d.on && d.brightness) parts.push(`${d.brightness}%`);
   else parts.push(d.on ? "On" : "Off");
   return parts.join(" · ");
@@ -217,6 +218,21 @@ function openDevice(id) {
       <span class="switch"><input type="checkbox" id="f-mute" ${d.muted ? "checked" : ""}><span></span></span></label>` : ""}
     ${caps.has("source") && d.sources.length ? `<label class="field"><span>Input or app</span><select id="f-src">
       ${d.source ? "" : `<option value="">Choose…</option>`}${d.sources.map((x) => `<option value="${esc(x.id)}" ${x.id === d.source ? "selected" : ""}>${esc(x.label)}</option>`).join("")}</select></label>` : ""}
+    ${caps.has("actions") && d.actions.length ? `<div class="field"><span>${esc(d.media || "Controls")}</span>
+      <div class="inline actions">${d.actions.map((a) => {
+        const locked = a.id === "START" && d.ready === false;
+        return `<button class="pill ${a.id === "START" || a.id === "clean" || a.id === "resume" ? "primary" : ""}" data-action="${esc(a.id)}" ${locked ? "disabled" : ""}>${esc(a.label)}</button>`;
+      }).join("")}</div>
+      ${d.ready === false ? `<p class="note">To start it from here, choose the cycle and press <b>Remote Start</b> on the machine. LG requires this so a machine can't be started by accident. Pause and power off always work.</p>` : ""}
+      ${d.ready === true ? `<p class="note">Remote Start is on. The cycle chosen on the machine will run.</p>` : ""}</div>` : ""}
+    ${d.delay_max ? `<div class="field"><span>Delayed start</span><div class="inline">
+      <input type="number" id="f-delay" min="1" max="${d.delay_max}" value="3" aria-label="Hours from now" ${d.ready ? "" : "disabled"}>
+      <button class="pill" id="f-delay-go" ${d.ready ? "" : "disabled"}>Start in hours</button></div></div>` : ""}
+    ${caps.has("level") ? `<label class="field"><span>Fan speed <b id="f-level-v">${d.level ?? "Auto"}</b></span>
+      <input type="range" id="f-level" min="1" max="${d.level_max ?? 10}" value="${d.level ?? 5}"></label>` : ""}
+    ${d.details.length ? `<div class="field"><span>Readings</span><div class="card">${d.details.map((x) => `
+      <div class="row"><span class="main"><span class="name small">${esc(x.label)}</span></span><span class="sub-value">${esc(x.value)}</span></div>`).join("")}</div></div>` : ""}
+    ${d.battery != null ? `<p class="note">Battery ${d.battery}%</p>` : ""}
     ${caps.has("brightness") ? `<label class="field"><span>Brightness <b id="f-bri-v">${d.brightness ?? 100}%</b></span>
       <input type="range" id="f-bri" min="1" max="100" value="${d.brightness ?? 100}"></label>` : ""}
     ${caps.has("color") ? `<label class="field"><span>Color</span><input type="color" id="f-color" value="${esc(d.color || "#ffffff")}"></label>` : ""}
@@ -251,6 +267,19 @@ function openDevice(id) {
     send({ volume: Number(e.target.value) });
   });
   $("#f-mute", sheet)?.addEventListener("change", (e) => send({ muted: e.target.checked }));
+  $("#f-level", sheet)?.addEventListener("input", (e) => {
+    $("#f-level-v", sheet).textContent = e.target.value;
+    send({ level: Number(e.target.value) });
+  });
+  const act = async (body, btn, done) => {
+    if (btn) btn.disabled = true;
+    try { await api("POST", `/api/devices/${encodeURIComponent(id)}/state`, body); toast(done); sheet.close(); }
+    catch (err) { toast(err.message); if (btn) btn.disabled = false; }
+  };
+  sheet.querySelectorAll("[data-action]").forEach((btn) => btn.addEventListener("click",
+    () => act({ action: btn.dataset.action }, btn, `${btn.textContent}: sent`)));
+  $("#f-delay-go", sheet)?.addEventListener("click", (e) =>
+    act({ delay_start_hours: Number($("#f-delay", sheet).value) }, e.target, "Delayed start set"));
   $("#f-src", sheet)?.addEventListener("change", (e) => e.target.value && send({ source: e.target.value }));
   sheet.querySelectorAll("[data-play]").forEach((btn) => btn.addEventListener("click", async () => {
     const playback = btn.dataset.play;
@@ -418,6 +447,19 @@ function renderSettings() {
   const lg = state.status?.lg || {};
   const count = (brand) => state.status?.[brand]?.devices ?? 0;
   const govee = state.status?.govee || {};
+  const dyson = state.status?.dyson || {};
+  const ecovacs = state.status?.ecovacs || {};
+  const pentair = state.status?.pentair || {};
+  const accountCard = (name, st, form, about, connectedText) => `
+    <div class="section-title"><span>${esc(name)}</span></div>
+    <div class="card">${st.available === false ? `
+      <div class="row"><div class="main"><span class="name">Not available</span>
+        <span class="sub wrap">${name === "Ecovacs" ? "Needs Python 3.13 on the hub Mac." : "Its library isn't installed."} See the README.</span></div></div>`
+      : st.connected ? `
+      <div class="row"><div class="main"><span class="name">Connected</span><span class="sub wrap">${connectedText}</span></div>
+        <button class="pill danger" id="${name.toLowerCase()}-off">Disconnect</button></div>` : `
+      <div class="row"><div class="main"><span class="name">Not connected</span><span class="sub wrap">${about}</span></div></div>${form}`}
+    </div>`;
   const thinq = state.status?.thinq || {};
   const fmtDate = (s) => s ? new Date(s * 1000).toLocaleDateString() : "never";
   const keys = state.passkeys.map((p) => `
@@ -465,7 +507,7 @@ function renderSettings() {
     <div class="section-title"><span>LG ThinQ appliances</span></div>
     <div class="card">${thinq.connected ? `
       <div class="row"><div class="main"><span class="name">Connected (${esc(thinq.country)})</span>
-        <span class="sub wrap">${count("thinq")} appliance(s). Laundry, dishwashers and ovens are shown read-only.</span></div>
+        <span class="sub wrap">${count("thinq")} appliance(s). Washers and dryers start only after Remote Start is pressed on the machine.</span></div>
         <button class="pill danger" id="thinq-off">Disconnect</button></div>` : `
       <div class="row"><div class="main"><span class="name">Not connected</span>
         <span class="sub wrap">Sign in at <b>connect-pat.lgthinq.com</b> with your LG account, choose <b>Add new token</b>, tick every permission, and paste the token here.</span></div></div>
@@ -473,6 +515,29 @@ function renderSettings() {
         <input type="text" id="thinq-country" value="US" maxlength="2" aria-label="Country code" class="country">
         <button class="pill primary" id="thinq-on">Connect</button></div>`}
     </div>
+
+    ${accountCard("Dyson", dyson, dyson.waiting_for_code ? `
+      <div class="row key-row"><input type="text" inputmode="numeric" id="dyson-code" placeholder="Code from Dyson's email" autocomplete="one-time-code">
+        <input type="password" id="dyson-pw" placeholder="MyDyson password" autocomplete="off">
+        <button class="pill primary" id="dyson-verify">Connect</button></div>` : `
+      <div class="row key-row"><input type="email" id="dyson-email" placeholder="MyDyson email" autocomplete="off">
+        <input type="text" id="dyson-country" class="country" value="US" maxlength="2" aria-label="Country code">
+        <button class="pill primary" id="dyson-send">Email me a code</button></div>`,
+      "Purifiers and fans, controlled directly on your Wi‑Fi. Dyson emails you a code; the hub keeps only each device's local key, not your password.",
+      `${dyson.online ?? 0} of ${count("dyson")} on the network`)}
+    ${accountCard("Ecovacs", ecovacs, `
+      <div class="row key-row"><input type="email" id="ecovacs-email" placeholder="Ecovacs email" autocomplete="off">
+        <input type="password" id="ecovacs-pw" placeholder="Password" autocomplete="off">
+        <input type="text" id="ecovacs-country" class="country" value="US" maxlength="2" aria-label="Country code">
+        <button class="pill primary" id="ecovacs-on">Connect</button></div>`,
+      "Deebot robot vacuums: clean, pause, return to the dock, battery. The hub keeps a hash of the password, not the password.",
+      `${count("ecovacs")} robot(s)`)}
+    ${accountCard("Pentair", pentair, `
+      <div class="row key-row"><input type="email" id="pentair-email" placeholder="Pentair Home email" autocomplete="off">
+        <input type="password" id="pentair-pw" placeholder="Password" autocomplete="off">
+        <button class="pill primary" id="pentair-on">Connect</button></div>`,
+      "Pool equipment from the Pentair Home app, view only: Pentair offers no way for other apps to change settings.",
+      `${count("pentair")} device(s), view only`)}
 
     <div class="section-title"><span>Found automatically</span></div>
     <div class="card">
@@ -513,6 +578,16 @@ function renderSettings() {
     (r) => `Govee connected: ${r.devices} device(s)`);
   accountButton("#thinq-on", () => api("POST", "/api/thinq/account", { token: $("#thinq-token").value.trim(), country: $("#thinq-country").value.trim().toUpperCase() || "US" }),
     (r) => `LG ThinQ connected: ${r.devices} appliance(s)`);
+  const val = (sel) => $(sel)?.value.trim();
+  accountButton("#dyson-send", () => api("POST", "/api/dyson/code", { email: val("#dyson-email"), country: (val("#dyson-country") || "US").toUpperCase() }),
+    () => "Check your email for Dyson's code");
+  accountButton("#dyson-verify", () => api("POST", "/api/dyson/account", { code: val("#dyson-code"), password: $("#dyson-pw").value }),
+    (r) => `Dyson connected: ${r.devices} device(s)`);
+  accountButton("#ecovacs-on", () => api("POST", "/api/ecovacs/account", { email: val("#ecovacs-email"), password: $("#ecovacs-pw").value, country: (val("#ecovacs-country") || "US").toUpperCase() }),
+    (r) => `Ecovacs connected: ${r.devices} robot(s)`);
+  accountButton("#pentair-on", () => api("POST", "/api/pentair/account", { email: val("#pentair-email"), password: $("#pentair-pw").value }),
+    (r) => `Pentair connected: ${r.devices} device(s)`);
+  for (const b of ["dyson", "ecovacs", "pentair"]) accountButton(`#${b}-off`, () => api("DELETE", `/api/${b}/account`), () => `${BRAND[b]} disconnected`);
   accountButton("#govee-off", () => api("DELETE", "/api/govee/account"), () => "Govee account disconnected");
   accountButton("#thinq-off", () => api("DELETE", "/api/thinq/account"), () => "LG ThinQ disconnected");
   $("#lg-pair")?.addEventListener("click", async (e) => {

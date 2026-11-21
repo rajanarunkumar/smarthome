@@ -7,3 +7,6 @@ webauthn>=2.0
 pyjwt[crypto]>=2.8
 soco>=0.30
 aiowebostv>=1.0; python_version >= "3.12"  # LG TV support
+libdyson-neon>=1.6  # Dyson
+pypentair>=0.5  # Pentair Home
+deebot-client>=17.0; python_version >= "3.13"  # Ecovacs

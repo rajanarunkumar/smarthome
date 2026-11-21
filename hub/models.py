@@ -23,7 +23,7 @@ class Device(BaseModel):
     brand: str
     name: str
     model: str | None = None
-    kind: Literal["plug", "dimmer", "light", "speaker", "tv", "appliance"]
+    kind: Literal["plug", "dimmer", "light", "speaker", "tv", "appliance", "vacuum", "purifier", "pool"]
     room_id: int | None = None
     online: bool = True
     on: bool | None = None
@@ -39,6 +39,14 @@ class Device(BaseModel):
     media: str | None = None           # what's playing, the TV's app, or an appliance's status
     source: str | None = None          # current input / app id
     sources: list[dict[str, str]] = []  # [{"id": ..., "label": ...}]
+    # Appliances and robots: buttons such as Start / Pause / Dock, [{"id": ..., "label": ...}]
+    actions: list[dict[str, str]] = []
+    ready: bool | None = None          # LG laundry: Remote Start is on at the machine
+    delay_max: int | None = None       # LG laundry: longest delayed start, in hours
+    battery: int | None = None
+    level: int | None = None           # fan speed and similar 1..level_max settings
+    level_max: int | None = None
+    details: list[dict[str, str]] = []  # read-only readings, [{"label": ..., "value": ...}]
     capabilities: list[str] = []
 
 
@@ -51,6 +59,9 @@ class StateIn(BaseModel):
     muted: bool | None = None
     playback: Literal["play", "pause", "next", "previous"] | None = None
     source: str | None = Field(None, min_length=1, max_length=128)
+    action: str | None = Field(None, pattern=r"^[A-Za-z_]{2,24}$")
+    delay_start_hours: int | None = Field(None, ge=1, le=24)
+    level: int | None = Field(None, ge=1, le=10)
 
 
 class DevicePatch(BaseModel):

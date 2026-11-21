@@ -76,7 +76,7 @@ Scanned from a Mac on the home Wi-Fi on 2026-11-21 (two passes plus the ARP tabl
 
 ## The hub (phase 1: built)
 
-`hub/` is a Python server (FastAPI) with a web app for the iPhone. It currently covers **Kasa**, **Hue**, **Sonos**, **LG webOS TV** and **Govee** over the local network, plus optional **Govee** and **LG ThinQ** accounts:
+`hub/` is a Python server (FastAPI) with a web app for the iPhone. It currently covers **Kasa**, **Hue**, **Sonos**, **LG webOS TV** and **Govee** over the local network, plus accounts for **Govee**, **LG ThinQ**, **Dyson**, **Ecovacs** and **Pentair Home**:
 
 | Brand | What the hub can do | Setup |
 |---|---|---|
@@ -86,9 +86,13 @@ Scanned from a Mac on the home Wi-Fi on 2026-11-21 (two passes plus the ARP tabl
 | LG TV | On/off, volume, mute, input (HDMI…) or app, play/pause | Settings → LG TV → Connect, then **Accept** on the TV. For turning the TV *on*, enable **Turn on via Wi‑Fi** on the TV (Settings → General → Devices → TV Management / External Devices). Needs Python 3.12+. |
 | Govee | On/off, brightness, color, white | In the Govee app, turn on **LAN Control** for each light (device → settings). Not every model supports it. |
 | Govee account (optional) | Adds Govee lights without LAN Control, Govee plugs, and the device names from the Govee app. A light that answers on the LAN is still controlled locally. | In the Govee Home app: Profile → Settings → **Apply for API Key** (arrives by email). Paste it in hub **Settings → Govee account**. |
-| LG ThinQ (optional) | Washer, dryer, fridge, dishwasher, oven and other ThinQ appliances, with status such as "Running · 32 min left". AC, air purifiers, (de)humidifiers and fans can be turned on and off. Laundry, dishwashers and ovens are **read-only**: the hub never starts or stops them. | At **connect-pat.lgthinq.com**, sign in with your LG account, **Add new token** with every permission ticked, and paste it in hub **Settings → LG ThinQ appliances** with your country code. |
+| LG ThinQ (optional) | Washer, dryer, fridge, dishwasher, oven and other ThinQ appliances, with status such as "Running · 32 min left". AC, air purifiers, (de)humidifiers and fans turn on and off. **Washers and dryers:** start, pause, power off, wake up and delayed start. Starting only works after **Remote Start** is pressed on the machine (LG's safety rule). LG's API can't choose the wash course, so pick it on the machine before pressing Remote Start. Dishwashers and ovens are read-only. | At **connect-pat.lgthinq.com**, sign in with your LG account, **Add new token** with every permission ticked, and paste it in hub **Settings → LG ThinQ appliances** with your country code. |
 
-Govee, LG TV and LG ThinQ have no way to rename a device from outside their apps, so names you give those in the hub are kept in the hub. Account keys are saved only in `~/.smarthome/secrets.json` on the Mac and are never sent back to the web app.
+| Dyson | Purifiers and fans: on/off, fan speed, auto, oscillation, night mode, temperature, humidity, PM2.5 and filter life. Controlled directly on the Wi‑Fi. | Settings → **Dyson**: enter the MyDyson email, then the code Dyson emails and the password. Only each device's local key is saved. |
+| Ecovacs | Deebot robots: clean, pause, resume, return to dock, battery. | Settings → **Ecovacs** with the Ecovacs app email and password (only a hash is saved). Needs Python 3.13+. |
+| Pentair Home | Pool equipment readings (pump running, speed, power…), **view only**: Pentair has no public way for other apps to control Pentair Home devices. | Settings → **Pentair** with the Pentair Home email and password (only login tokens are saved). |
+
+Govee, LG TV, LG ThinQ, Dyson, Ecovacs and Pentair have no way to rename a device from outside their apps, so names you give those in the hub are kept in the hub. Account keys are saved only in `~/.smarthome/secrets.json` on the Mac and are never sent back to the web app.
 
 
 - **Rooms tab:** every device grouped by room, power switches, "all on/off" per room. Tap a device to rename it (the name is written back to the brand), move it to a room, or set brightness, color and white temperature.
@@ -99,7 +103,7 @@ Govee, LG TV and LG ThinQ have no way to rename a device from outside their apps
 ### Run it
 
 ```bash
-python3.12 -m venv .venv && . .venv/bin/activate   # 3.11 works too, without LG TV support
+python3.13 -m venv .venv && . .venv/bin/activate   # brew install python@3.13. Older Python works without LG TV (needs 3.12) and Ecovacs (needs 3.13)
 pip install -r requirements.txt
 python -m hub            # listens on this Mac only (127.0.0.1:8420)
 tailscale serve --bg 8420   # once: publishes it at https://<mac>.<tailnet>.ts.net to your own devices

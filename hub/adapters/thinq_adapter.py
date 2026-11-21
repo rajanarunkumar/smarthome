@@ -4,9 +4,12 @@ Needs a free Personal Access Token: sign in at https://connect-pat.lgthinq.com
 with your LG account, choose "Add new token", tick every permission, and paste
 the token into the hub's Settings → LG ThinQ. It is saved only on this Mac.
 
-Laundry, dishwashers, ovens and cooktops are shown read-only: the hub never
-starts or stops them. Climate devices (AC, air purifier, dehumidifier,
-humidifier, fans) can be turned on and off.
+Climate devices (AC, air purifier, dehumidifier, humidifier, fans) can be
+turned on and off. Washers and dryers can be started, paused, powered off and
+given a delayed start, following LG's own safety rule: a cycle can only be
+started after someone presses Remote Start on the machine. LG's API has no way
+to choose the wash course; set it on the machine before pressing Remote Start.
+Dishwashers, ovens and cooktops stay read-only.
 """
 
 from __future__ import annotations
@@ -66,6 +69,12 @@ TYPES = {
 }
 
 
+LAUNDRY = {"DEVICE_WASHER", "DEVICE_DRYER", "DEVICE_WASHTOWER_WASHER", "DEVICE_WASHTOWER_DRYER",
+           "DEVICE_WASHCOMBO_MAIN", "DEVICE_WASHCOMBO_MINI", "DEVICE_STYLER"}
+ACTION_LABELS = {"START": "Start", "STOP": "Pause", "POWER_OFF": "Power off", "WAKE_UP": "Wake up"}
+NEEDS_REMOTE_START = {"START"}
+
+
 def region_of(country: str) -> str:
     country = country.upper()
     return "aic" if country in _AIC else "kic" if country in _KIC else "eic"
@@ -89,6 +98,33 @@ def power_key(status: Any) -> tuple[str, bool] | None:
             if key.endswith("OperationMode") and value in ("POWER_ON", "POWER_OFF"):
                 return key, value == "POWER_ON"
     return None
+
+
+def laundry_controls(profile: Any) -> dict | None:
+    """From a device profile: the operation key, the modes LG accepts, and the delay range.
+
+    Multi-part machines (a WashTower reported as one device) return None: the
+    hub shows their status but can't tell which half a command is for.
+    """
+    props = (profile or {}).get("property")
+    if not isinstance(props, dict):
+        return None
+    out: dict[str, Any] = {"key": None, "modes": [], "delay": None}
+    for key, spec in (props.get("operation") or {}).items():
+        if key.endswith("OperationMode") and isinstance(spec, dict) and "w" in spec.get("mode", []):
+            values = (spec.get("value") or {}).get("w") or []
+            out["key"] = key
+            out["modes"] = [v for v in ACTION_LABELS if v in values]
+    delay = (props.get("timer") or {}).get("relativeHourToStart")
+    if isinstance(delay, dict) and "w" in delay.get("mode", []):
+        rng = (delay.get("value") or {}).get("w") or {}
+        if rng.get("max"):
+            out["delay"] = (int(rng.get("min") or 1), int(rng["max"]))
+    return out if out["key"] else None
+
+
+def remote_start_on(status: Any) -> bool:
+    return any((p.get("remoteControlEnable") or {}).get("remoteControlEnabled") for p in _parts(status))
 
 
 def summarize(status: Any) -> str | None:
@@ -133,6 +169,7 @@ class ThinQAdapter(Adapter):
         self._devices: dict[str, dict] = {}    # LG device id -> device record
         self._status: dict[str, Any] = {}
         self._status_at: dict[str, float] = {}
+        self._profiles: dict[str, Any] = {}
         self._listed = 0.0
 
     @property
@@ -200,9 +237,22 @@ class ThinQAdapter(Adapter):
             log.warning("ThinQ status for %s failed: %s", dev_id, exc.message)
             self._status.pop(dev_id, None)
 
+    def _dtype(self, dev_id: str) -> str:
+        return ((self._devices.get(dev_id) or {}).get("deviceInfo") or {}).get("deviceType") or ""
+
+    async def _profile(self, dev_id: str) -> Any:
+        if dev_id not in self._profiles:
+            try:
+                self._profiles[dev_id] = await self._call("GET", f"/devices/{dev_id}/profile")
+            except HubError as exc:
+                log.warning("ThinQ profile for %s failed: %s", dev_id, exc.message)
+                return None
+        return self._profiles[dev_id]
+
     async def devices(self) -> list[Device]:
         devices = await self._list()
-        await asyncio.gather(*(self._refresh(d) for d in devices))
+        laundry = [d for d in devices if self._dtype(d) in LAUNDRY]
+        await asyncio.gather(*(self._refresh(d) for d in devices), *(self._profile(d) for d in laundry))
         out = []
         for dev_id, rec in devices.items():
             info = rec.get("deviceInfo") or {}
@@ -210,11 +260,21 @@ class ThinQAdapter(Adapter):
             label, switchable = TYPES.get(dtype, (_words(dtype.removeprefix("DEVICE_")), False))
             status = self._status.get(dev_id)
             power = power_key(status) if switchable else None
+            extra: dict[str, Any] = {}
+            controls = laundry_controls(self._profiles.get(dev_id)) if dtype in LAUNDRY else None
+            if controls:
+                ready = remote_start_on(status)
+                extra = dict(
+                    ready=ready,
+                    actions=[{"id": m, "label": ACTION_LABELS[m]} for m in controls["modes"]],
+                    delay_max=controls["delay"][1] if controls["delay"] else None,
+                )
             out.append(Device(
                 id=f"thinq:{dev_id}", brand=self.brand, kind="appliance",
                 name=info.get("alias") or label, model=f"{label} · {info.get('modelName') or ''}".strip(" ·"),
                 online=status is not None, on=power[1] if power else None, media=summarize(status),
-                capabilities=["onoff"] if power else [],
+                capabilities=(["onoff"] if power else []) + (["actions"] if controls else []),
+                **extra,
             ))
         return out
 
@@ -222,18 +282,50 @@ class ThinQAdapter(Adapter):
         return {f"thinq:{d}": (r.get("deviceInfo") or {}).get("alias") or "LG appliance"
                 for d, r in self._devices.items()}
 
+    async def _control(self, dev_id: str, payload: dict) -> None:
+        await self._call("POST", f"/devices/{dev_id}/control", headers={"x-conditional-control": "true"},
+                         json=payload)
+        self._status_at.pop(dev_id, None)
+
+    async def _laundry(self, dev_id: str, state: StateIn) -> None:
+        controls = laundry_controls(await self._profile(dev_id))
+        if controls is None:
+            raise HubError(400, "This LG machine can't be controlled from the hub. Use the ThinQ app.")
+        # Always check the latest state: Remote Start turns itself off after a while.
+        self._status_at.pop(dev_id, None)
+        await self._refresh(dev_id)
+        ready = remote_start_on(self._status.get(dev_id))
+        if state.delay_start_hours is not None:
+            if controls["delay"] is None:
+                raise HubError(400, "This machine doesn't support a delayed start.")
+            low, high = controls["delay"]
+            if not low <= state.delay_start_hours <= high:
+                raise HubError(400, f"Delayed start must be {low} to {high} hours on this machine.")
+            if not ready:
+                raise HubError(409, "Press Remote Start on the machine first, then try again.")
+            await self._control(dev_id, {"timer": {"relativeHourToStart": state.delay_start_hours}})
+        action = (state.action or "").upper() or None
+        if action is None:
+            return
+        if action not in controls["modes"]:
+            raise HubError(400, f"This machine doesn't accept {ACTION_LABELS.get(action, action)} right now.")
+        if action in NEEDS_REMOTE_START and not ready:
+            raise HubError(409, "Press Remote Start on the machine first, then try again.")
+        await self._control(dev_id, {"operation": {controls["key"]: action}})
+
     async def set_state(self, device_id: str, state: StateIn) -> None:
         dev_id = device_id.split(":", 1)[1]
         rec = self._devices.get(dev_id)
         if rec is None:
             raise HubError(404, f"Unknown LG appliance {device_id}")
+        if self._dtype(dev_id) in LAUNDRY:
+            await self._laundry(dev_id, state)
+            return
         _, switchable = TYPES.get((rec.get("deviceInfo") or {}).get("deviceType"), ("", False))
         power = power_key(self._status.get(dev_id)) if switchable else None
         if state.on is None or power is None:
             raise HubError(400, "The hub only turns LG climate devices on and off. Use the ThinQ app for this one.")
-        await self._call("POST", f"/devices/{dev_id}/control", headers={"x-conditional-control": "true"},
-                         json={"operation": {power[0]: "POWER_ON" if state.on else "POWER_OFF"}})
-        self._status_at.pop(dev_id, None)
+        await self._control(dev_id, {"operation": {power[0]: "POWER_ON" if state.on else "POWER_OFF"}})
 
     async def status(self) -> dict:
         return {"connected": self.active, "country": self.config.get("country"), "devices": len(self._devices)}

@@ -128,7 +128,14 @@ def test_thinq_summaries():
     assert region_of("us") == "aic" and region_of("KR") == "kic" and region_of("DE") == "eic"
 
 
-def thinq_server(sent):
+WASHER_PROFILE = {"property": {
+    "operation": {"washerOperationMode": {"type": "enum", "mode": ["w"],
+                                          "value": {"w": ["START", "STOP", "POWER_OFF", "WAKE_UP"]}}},
+    "timer": {"relativeHourToStart": {"type": "range", "mode": ["r", "w"], "value": {"w": {"min": 3, "max": 19}}}},
+}}
+
+
+def thinq_server(sent, washer_status):
     devices = [
         {"deviceId": "w1", "deviceInfo": {"deviceType": "DEVICE_WASHER", "modelName": "WM4000", "alias": "Washer"}},
         {"deviceId": "a1", "deviceInfo": {"deviceType": "DEVICE_AIR_CONDITIONER", "modelName": "LW1022", "alias": "Bedroom AC"}},
@@ -141,32 +148,55 @@ def thinq_server(sent):
         path = request.url.path
         if path == "/devices":
             return httpx.Response(200, json={"response": devices})
+        if path.endswith("/profile"):
+            return httpx.Response(200, json={"response": WASHER_PROFILE if "/w1/" in path else {}})
         if path.endswith("/state"):
-            return httpx.Response(200, json={"response": WASHER if "/w1/" in path else AC})
+            return httpx.Response(200, json={"response": washer_status if "/w1/" in path else AC})
         sent.append((path, request.headers.get("x-conditional-control"), json.loads(request.content)))
         return httpx.Response(200, json={"response": {}})
     return handler
 
 
-def test_thinq_connect_list_and_safe_control(tmp_path, monkeypatch):
+def test_thinq_climate_power_and_laundry_safety(tmp_path, monkeypatch):
     from hub.adapters import thinq_adapter
     sent = []
+    washer_status = {**WASHER, "remoteControlEnable": {"remoteControlEnabled": False}}
     real = httpx.AsyncClient
     monkeypatch.setattr(thinq_adapter.httpx, "AsyncClient",
-                        lambda **kw: real(transport=httpx.MockTransport(thinq_server(sent)), **kw))
+                        lambda **kw: real(transport=httpx.MockTransport(thinq_server(sent, washer_status)), **kw))
     adapter = ThinQAdapter(Secrets(tmp_path / "secrets.json"))
 
     async def run():
         assert await adapter.connect("t" * 40, "us") == {"connected": True, "devices": 2}
         devices = {d.name: d for d in await adapter.devices()}
         washer, ac = devices["Washer"], devices["Bedroom AC"]
-        assert (washer.kind, washer.media, washer.capabilities, washer.on) == ("appliance", "Running · 32 min left", [], None)
+        assert (washer.media, washer.ready, washer.delay_max) == ("Running · 32 min left", False, 19)
+        assert [a["id"] for a in washer.actions] == ["START", "STOP", "POWER_OFF", "WAKE_UP"]
         assert (ac.on, ac.capabilities, ac.model) == (True, ["onoff"], "Air conditioner · LW1022")
         await adapter.set_state(ac.id, StateIn(on=False))
-        with pytest.raises(HubError):  # the hub never starts or stops laundry
-            await adapter.set_state(washer.id, StateIn(on=True))
+
+        # Remote Start is off at the machine: starting is refused, pausing and power off are fine.
+        for blocked in (StateIn(action="START"), StateIn(delay_start_hours=5)):
+            with pytest.raises(HubError) as err:
+                await adapter.set_state(washer.id, blocked)
+            assert err.value.status == 409 and "Remote Start" in err.value.message
+        await adapter.set_state(washer.id, StateIn(action="STOP"))
+
+        # Someone pressed Remote Start on the washer.
+        washer_status["remoteControlEnable"]["remoteControlEnabled"] = True
+        await adapter.set_state(washer.id, StateIn(action="START"))
+        await adapter.set_state(washer.id, StateIn(delay_start_hours=5))
+        with pytest.raises(HubError):  # outside this washer's 3-19 hour range
+            await adapter.set_state(washer.id, StateIn(delay_start_hours=2))
+        with pytest.raises(HubError):  # not a mode this washer accepts
+            await adapter.set_state(washer.id, StateIn(action="RINSE"))
         await adapter.close()
 
     asyncio.run(run())
     assert adapter.secrets.get("thinq")["country"] == "US"
-    assert sent == [("/devices/a1/control", "true", {"operation": {"airConOperationMode": "POWER_OFF"}})]
+    assert sent == [
+        ("/devices/a1/control", "true", {"operation": {"airConOperationMode": "POWER_OFF"}}),
+        ("/devices/w1/control", "true", {"operation": {"washerOperationMode": "STOP"}}),
+        ("/devices/w1/control", "true", {"operation": {"washerOperationMode": "START"}}),
+        ("/devices/w1/control", "true", {"timer": {"relativeHourToStart": 5}}),
+    ]
