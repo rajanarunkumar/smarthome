@@ -1,41 +1,58 @@
 # smarthome
 
-The goal is to control every smart device from **one iPhone app**, with all of them still working in **Google Home and Alexa**.
+A self-built hub that controls every smart device in the house from **one iPhone app**, while **Alexa, Google Home and Siri** keep working as voice front ends.
 
-## Recommendation: Home Assistant as the hub, plus Matter where you can
+## Approach
 
 ```
-                 ┌──────────── iPhone: Home Assistant app (one app for everything)
-                 │
-  Hue ─┐         │            ┌──► Alexa        (voice, Echo devices)
-  Govee ┤        ▼            ├──► Google Home  (voice, Nest devices)
-  Kasa ─┼──► Home Assistant ──┤
-  Leviton┤   (small box at    └──► Apple Home   (optional, via HomeKit Bridge → Siri)
-  Smart Life┤ home, local)
-  LG ───┤
-  Sony ─┘
+ iPhone web app ─┐                         ┌─► Hue Bridge     (local API; schedules run on the bridge)
+ Siri Shortcuts ─┤                         ├─► Kasa plugs     (local protocol; schedules run on the plug)
+ Alexa skill ────┼─►  hub on the MacBook  ─┼─► Leviton, Lennox (HomeKit, local)      ┐
+ Google project ─┘    (Python, this repo)  ├─► Leviton Matter, Nest Thermostat (Matter)├ planned
+                                           ├─► LG TV, Sonos   (local)                ┘
+                                           └─► Govee, Smart Life, Ring, Nest cams (cloud APIs)  planned
 ```
 
-**Why not just Google Home, Alexa or Apple Home?** Each of them misses some of your devices or controls them only through slow cloud "skills". Home Assistant has an integration for every brand you listed, runs most of them **locally** (fast, and still works when the internet is down), and then **publishes one clean device list** to Alexa and Google Home. You rename or group a device once and every app sees the change.
+Decisions so far:
 
-**Why not write a custom iPhone app?** Hue, Govee, Kasa, Leviton, Tuya, LG and Sony each have different APIs and logins, and the APIs change. Home Assistant already maintains all of these integrations and includes a polished iOS app with widgets, Apple Watch support, Siri Shortcuts and location-based automations. If you want a custom look later, a dashboard can be built *on top of* Home Assistant.
+- **Self-built, no extra hardware or paid services.** The hub is our own code; each brand's protocol comes from a well-maintained open-source library (`python-kasa`, Hue's local API, `aiohomekit`, `python-matter-server`, `aiowebostv`, `soco`, `ring_doorbell`).
+- **The hub is the source of truth for names and rooms.** Renaming a device in the app writes the name back to the brand (so the Hue and Kasa apps show it too). Rooms live in the hub; Hue rooms are imported on first pairing.
+- **Schedules are stored in each brand's own system** wherever its API allows it, so they keep running when the MacBook is asleep and show up in the brand's app. The hub also reads schedules made in the brand apps, so everything appears in one list.
+- **Live state is two-way.** Changes made from a brand app, a wall switch or a voice assistant show up in the hub's app within seconds.
+- **Voice:** Alexa and Google Home reach the hub through our own private Alexa skill and Google smart-home project (planned). Siri reaches it through a Shortcut and, later, a HomeKit bridge. Ring stays linked to Alexa directly through Amazon's own Ring skill.
+
+### Where each brand's schedules can live
+
+| Brand | Native schedules from the hub | Runs on |
+|---|---|---|
+| Hue | ✅ Bridge schedules (hub-created); Hue app automations listed and can be switched on/off | Hue Bridge |
+| Kasa | ✅ Rules on the plug (verified on the HS103 and KP405) | The plug |
+| Sonos | ✅ Alarms (planned) | The speaker |
+| Smart Life (Tuya) | ⚠️ Cloud timers, needs a free Tuya developer project | Tuya cloud |
+| Lennox E30 | ⚠️ Can switch between the thermostat's schedules | Thermostat |
+| Govee | ❌ Not in the public API; investigating the app's private API | Hub |
+| Leviton, LG TV | ❌ No API | Hub |
+| Ring | Modes (Home/Away/Disarmed) only, via the unofficial library | Hub |
+| Nest Thermostat | ❌ Keep Nest's own schedule; the hub can change temperature and mode | Thermostat |
 
 ## Your devices
 
-| Brand | Best way into Home Assistant | Local? | Matter option | Notes |
+| Brand | How the hub connects | Local? | Matter option | Notes |
 |---|---|---|---|---|
-| Philips **Hue** | Hue integration (auto-discovered bridge) | ✅ | Bridge v2 supports Matter | Keep the bridge. It is the most reliable option for Hue. |
-| **Govee** | Govee Lights Local (enable *LAN Control* in the Govee app); Matter for newer models | ✅ (LAN models) | Newer models | Older models without LAN support need the cloud API key integration. |
-| TP-Link **Kasa** | TP-Link Smart Home integration | ✅ | KP125M / EP25-class plugs | Kasa accounts are being merged into the Tapo app. The HA integration covers both. |
-| **Leviton** Decora Smart | 2nd-gen Wi-Fi models (D215S switch, D26HD dimmer): **HomeKit Controller**, local. Matter models: Matter integration | ✅ | Yes (Matter line) | The scan found both kinds. The HomeKit ones are unpaired, so HA can adopt them directly with the 8-digit code on the device. The Matter ones are already in Alexa; share them to HA with Alexa's "pair with another app" (multi-admin) without resetting them. |
-| **Smart Life** (Tuya) | Tuya integration (cloud); optional *LocalTuya* or *Tuya Local* (HACS) for local control | ☁️ / ✅ | Rare | This is usually the weakest link, so replace it with Matter devices over time. |
-| **LG** (ThinQ appliances, webOS TV) | LG ThinQ integration plus LG webOS TV integration | TV ✅ / appliances ☁️ | Some newer ThinQ | The TV can also be added to Apple Home via AirPlay/HomeKit. No ThinQ appliances answered the scan; they are cloud-only. |
-| **Sony** (Bravia TV, speakers) | Sony Bravia TV integration (enable *Remote start* and set a PSK on the TV); Google Cast | ✅ | – | Google TV models also appear in Google Home natively. Not seen in the scan; it was probably off. |
-| **Lennox** iComfort E30 thermostat *(found by scan)* | **HomeKit Controller** (the E30 advertises HomeKit and is unpaired), or the *Lennox S30/E30* HACS integration for more sensors and modes | ✅ | – | Both options are local. Use the HomeKit pairing code shown in the thermostat's settings. |
-| **Sonos** (Beam, Amp) *(found by scan)* | Sonos integration (auto-discovered) | ✅ | – | Also does AirPlay 2 and Spotify Connect. HA can use them for announcements. |
-| **Amazon Echo** *(found by scan)* | Not needed as a device. Optional *Alexa Media Player* (HACS) for announcements | ☁️ | Matter controller; two Echos are Thread border routers | Stays as the Alexa voice front end. Your Leviton Matter switches are currently paired to Alexa. |
-| **Google Nest** (Hubs, Home, Mini) *(found by scan)* | Google Cast integration (media, TTS announcements) | ✅ | Matter controller | Stays as the Google voice front end and displays. |
-| **Apple TV** 4K *(found by scan)* | Apple TV integration | ✅ | Matter/HomeKit home hub | Needed only if you use Apple Home or Siri via HomeKit Bridge. |
+| Philips **Hue** | Bridge local API (CLIP v2), paired with the link button | ✅ | Bridge v2 supports Matter | **Built.** Colors, white temperature, brightness, Hue scenes (including dynamic), schedules. |
+| TP-Link **Kasa** | `python-kasa`, local protocol, no login | ✅ | KP125M / EP25-class plugs | **Built.** On/off, dimming (KP405), schedules. |
+| **Leviton** Decora Smart | 2nd-gen Wi-Fi models (D215S, D26HD): HomeKit, local, using the 8-digit code on each device. Matter models: share them from Alexa ("pair with another app") without resetting | ✅ | Yes | Planned. The five HomeKit ones are unpaired. |
+| **Govee** | LAN API (turn on *LAN Control* per device) for color; cloud API key for Govee's own scenes | ✅ / ☁️ | Newer models | Planned. None answered the scan yet. |
+| **Smart Life** (Tuya) | Tuya cloud API; local keys optional | ☁️ / ✅ | Rare | Planned. Replace with Matter devices over time. |
+| **LG** (ThinQ appliances, webOS TV) | `aiowebostv` for the TV (accept a prompt on the TV); ThinQ personal access token for appliances | TV ✅ / appliances ☁️ | Some newer ThinQ | Planned. |
+| **Sony** (Bravia TV) | Bravia IP control with a pre-shared key set on the TV | ✅ | – | Planned. Not seen in the scan; it was probably off. |
+| **Lennox** iComfort E30 thermostat | HomeKit (unpaired; code in the thermostat's settings) | ✅ | – | Planned. |
+| **Sonos** (Beam, Amp) | `soco`, local | ✅ | – | Planned. |
+| **Ring** (doorbells) | Unofficial `ring_doorbell` library (Ring login + 2FA once, refresh token kept on the hub) for events, snapshots, lights, siren, alarm modes | ☁️ | – | Planned. **Stays linked to Alexa** through the Ring skill for announcements and live view. |
+| **Nest** (thermostat, cams, doorbell, Protect) | Thermostat: Matter, shared from Google Home. Cams and doorbell: Google Device Access ($5 one-time). Protect: no API | ✅ / ☁️ | Thermostat | Planned. |
+| **Amazon Echo** | Voice front end. Hub reaches Alexa through its own private skill | ☁️ | Matter controller; two Echos are Thread border routers | Leviton Matter devices are paired here today. |
+| **Google Nest** speakers and displays | Voice front end. Hub reaches Google through its own smart-home project | ✅ | Matter controller | |
+| **Apple TV** 4K | Home hub for Siri and Apple Home when the hub exposes a HomeKit bridge | ✅ | Matter/HomeKit home hub | |
 
 ## Scan results
 
@@ -57,18 +74,37 @@ Scanned from a Mac on the home Wi-Fi on 2026-11-21 (two passes plus the ARP tabl
 
 **Not seen:** Govee, Smart Life (Tuya), Sony Bravia and LG ThinQ appliances. Govee answers only after *LAN Control* is turned on per device in the Govee app. Smart Life and ThinQ are cloud-only. The Bravia was probably off.
 
-## Setup steps
+## The hub (phase 1: built)
 
-1. **Run the scanner** (below) to find every device on your Wi-Fi, including brands not in this list.
-2. **Get a hub.** A Home Assistant Green is the simplest option. A Raspberry Pi 5 or a spare mini PC also works. Add a Thread/Matter radio (for example a Home Assistant Connect ZBT‑1/ZBT‑2) if you plan to buy Matter-over-Thread devices.
-3. **Install the Home Assistant iPhone app** (App Store: *Home Assistant*), then finish onboarding. Most devices on the network are auto-discovered.
-4. **Add each brand** using the table above. Prefer local integrations where possible.
-5. **Connect to Alexa and Google Home.**
-   - *Easy:* a Home Assistant Cloud (Nabu Casa) subscription. It links Alexa and Google in a few taps and gives secure remote access to the iPhone app.
-   - *Free:* the manual Alexa Smart Home skill and Google Assistant setup using your own domain and certificates. This takes more work.
-   - In the Alexa and Google apps, **unlink the individual brand skills** (Hue, Govee, Kasa…) after Home Assistant is connected. Otherwise every device appears twice.
-6. *(Optional)* Turn on **HomeKit Bridge** in Home Assistant to get Siri, Apple Home and Control Center tiles too.
-7. **Going forward:** buy **Matter** devices. They pair into Home Assistant, Alexa, Google and Apple at the same time (multi-admin), with no brand app or account needed.
+`hub/` is a Python server (FastAPI) with a web app for the iPhone. It currently covers **Kasa** and **Hue**:
+
+- **Rooms tab:** every device grouped by room, power switches, "all on/off" per room. Tap a device to rename it (the name is written back to the brand), move it to a room, or set brightness, color and white temperature.
+- **Scenes tab:** your Hue scenes by room, including dynamic scenes.
+- **Schedules tab:** one list of every schedule, whether made here or in the brand's app, labelled with where it runs. New schedules are saved on the plug or bridge itself.
+- **Settings tab:** Hue Bridge pairing and room management.
+
+### Run it
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+python -m hub            # prints a link with the access token; open it once on each device
+```
+
+On the iPhone (same Wi-Fi), open the printed `http://<mac-name>.local:8420/#token=…` link in Safari, then **Share → Add to Home Screen**. To pair Hue, press the round button on the Hue Bridge, then tap **Settings → Pair** within 30 seconds.
+
+Private data lives in `~/.smarthome/` (the access token, Hue key and the rooms database), never in this repo.
+
+Tests: `pip install -r requirements-dev.txt && python -m pytest tests`.
+
+## Roadmap
+
+1. ~~Core hub, Kasa and Hue, native schedules~~ (done)
+2. **Sign-in:** Google sign-in plus Face ID / Touch ID (passkeys), over HTTPS through Tailscale. Replaces the access-token link.
+3. **More devices:** Leviton and Lennox (HomeKit), Leviton Matter and Nest Thermostat (Matter), LG TV, Sonos, Govee, Ring.
+4. **Siri:** a "schedule" Shortcut that turns spoken requests into hub schedules, then a HomeKit bridge for direct Siri control.
+5. **Alexa and Google:** private skill and smart-home project, so both show the hub's names and rooms.
+6. **Govee private API** investigation for timers.
 
 ## Device scanner
 
