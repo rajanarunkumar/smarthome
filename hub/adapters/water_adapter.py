@@ -52,6 +52,20 @@ def daily_usage(items: list[dict]) -> list[tuple[str, float]]:
     return sorted(out)
 
 
+def hourly_usage(items: list[dict]) -> list[tuple[str, float]]:
+    """[('YYYY-MM-DDTHH', amount)] from hourly items like {"consDate": "2026-11-20T05:00:00", "cons": 12}."""
+    out = []
+    for item in items:
+        stamp, amount = str(item.get("consDate") or item.get("date") or ""), item.get("cons")
+        if len(stamp) < 13:
+            continue
+        try:
+            out.append((stamp[:10] + "T" + stamp[11:13], float(amount)))
+        except (TypeError, ValueError):
+            continue
+    return sorted(out)
+
+
 def unit_of(items: list[dict]) -> str:
     unit = next((i.get("units") for i in items if i.get("units")), None)
     return str(unit).lower() if unit else "gal"
@@ -157,6 +171,26 @@ class WaterAdvisorAdapter(Adapter):
                 media=f"Latest day {yesterday:,.0f} {unit}" if yesterday is not None else "No usage data yet",
             ))
         return out
+
+    async def history(self, days: int = 14) -> tuple[list[tuple[str, float]], list[tuple[str, float]]]:
+        """(daily rows, hourly rows) for all meters added together, for the analytics history."""
+        await self._refresh()
+        end = date.today()
+        start = end - timedelta(days=days)
+        daily: dict[str, float] = {}
+        hourly: dict[str, float] = {}
+        for meter in self._meters:
+            count = str(meter.get("meterCount"))
+            for day, amount in daily_usage(self._usage.get(count, [])):
+                daily[day] = daily.get(day, 0) + amount
+            try:
+                items = _items(await self._get(f"/consumption/hourly/{count}/{start.isoformat()}/{end.isoformat()}"))
+            except HubError as exc:
+                log.warning("Hourly water for meter %s failed: %s", count, exc.message)
+                continue
+            for hour, amount in hourly_usage(items):
+                hourly[hour] = hourly.get(hour, 0) + amount
+        return sorted(daily.items()), sorted(hourly.items())
 
     def names(self) -> dict[str, str]:
         return {f"water:{m.get('meterCount')}": "Water" for m in self._meters}

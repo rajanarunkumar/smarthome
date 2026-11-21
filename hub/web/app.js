@@ -70,7 +70,7 @@ document.querySelectorAll(".tabs button").forEach((btn) =>
 function switchTab(tab) {
   state.tab = tab;
   document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
-  $("#title").textContent = { rooms: "Home", scenes: "Scenes", schedules: "Schedules", settings: "Settings" }[tab];
+  $("#title").textContent = { rooms: "Home", scenes: "Scenes", schedules: "Schedules", insights: "Insights", settings: "Settings" }[tab];
   render(true);
 }
 
@@ -86,6 +86,7 @@ async function render(fetch = false) {
       }
       renderSchedules();
     }
+    if (state.tab === "insights") await renderInsights(fetch || !state.insights);
     if (state.tab === "settings") {
       if (fetch) {
         state.status = await api("GET", "/api/status");
@@ -244,10 +245,13 @@ function openDevice(id) {
         <div class="row ${z.running ? "running" : ""}">
           <input type="text" class="zone-name" data-zone-name="${esc(z.id)}" value="${esc(z.name || "")}" placeholder="Zone ${esc(z.id)}" aria-label="Name for zone ${esc(z.id)}" maxlength="24">
           <span class="sub-value">Zone ${esc(z.id)}</span>
+          <input type="number" class="zone-area" data-zone-area="${esc(z.id)}" value="${z.area_sqft ?? ""}" min="0" placeholder="sq ft" aria-label="Area of zone ${esc(z.id)} in square feet">
+          ${z.schedule ? `<button class="pill" data-zone-sched="${esc(z.id)}" title="${esc(`${z.schedule.minutes} min at ${z.schedule.starts.join(", ") || "no start times"}`)}">Schedule</button>` : ""}
           <button class="pill ${z.running ? "danger" : "primary"}" data-zone="${esc(z.id)}">${z.running ? "Stop" : "Run"}</button>
         </div>`).join("")}</div></div>
       <label class="field"><span>Rain delay</span><select id="f-raindelay">${[0, 1, 2, 3, 5, 7, 14].map((n) => `<option value="${n}" ${n === (d.rain_delay ?? 0) ? "selected" : ""}>${n ? `${n} day${n > 1 ? "s" : ""}` : "Off"}</option>`).join("")}</select></label>
-      ${d.details.length ? "" : `<p class="note">The controller's own programs appear here when it reports them.</p>`}` : ""}
+      ${d.details.length ? "" : `<p class="note">The controller's own programs appear here when it reports them.</p>`}
+      <div class="field"><span>Smart programs (run by the hub)</span><div id="f-programs"><p class="note">Loading…</p></div></div>` : ""}
     ${caps.has("lock") ? `<div class="field"><span>${esc(d.media || "")}</span><div class="inline">
       <button class="pill primary" id="f-lock" ${d.online ? "" : "disabled"}>Lock</button>
       <button class="pill danger" id="f-unlock" ${d.online ? "" : "disabled"}>Unlock</button></div>
@@ -320,6 +324,13 @@ function openDevice(id) {
   }));
   $("#f-raindelay", sheet)?.addEventListener("change", (e) =>
     act({ rain_delay_days: Number(e.target.value) }, null, Number(e.target.value) ? `Rain delay: ${e.target.value} day(s)` : "Rain delay off"));
+  sheet.querySelectorAll("[data-zone-area]").forEach((input) => input.addEventListener("change", async () => {
+    try { await api("PUT", `/api/rainbird/zones/${input.dataset.zoneArea}`, { area_sqft: Number(input.value) || null }); toast("Zone area saved"); }
+    catch (err) { toast(err.message); }
+  }));
+  sheet.querySelectorAll("[data-zone-sched]").forEach((btn) => btn.addEventListener("click", () =>
+    openZoneSchedule(d, d.zones.find((z) => z.id === btn.dataset.zoneSched))));
+  if (caps.has("zones")) loadPrograms(d);
   sheet.querySelectorAll("[data-zone-name]").forEach((input) => input.addEventListener("change", async () => {
     try { await api("PUT", `/api/rainbird/zones/${input.dataset.zoneName}`, { name: input.value.trim() }); toast("Zone renamed"); }
     catch (err) { toast(err.message); }
@@ -900,3 +911,100 @@ setInterval(() => {
   if (document.hidden || sheet.open || state.tab !== "rooms" || !state.signedIn) return;
   loadDevices().then(renderRooms).catch(() => {});
 }, 5000);
+
+
+// ---------- sprinklers: smart programs and zone schedules ----------
+const dayChips = (name, chosen) => `<div class="chips">${DAYS.map((x) => `
+  <label class="chip"><input type="checkbox" name="${name}" value="${x}" ${chosen.includes(x) ? "checked" : ""}><span>${DAY_LABEL[x]}</span></label>`).join("")}</div>`;
+const checkedDays = (name) => [...sheet.querySelectorAll(`input[name=${name}]:checked`)].map((i) => i.value);
+
+async function loadPrograms(device) {
+  const box = $("#f-programs", sheet);
+  try {
+    const { programs, decisions } = await api("GET", "/api/irrigation/programs");
+    if (!box.isConnected) return;
+    const zoneName = (id) => device.zones.find((z) => z.id === String(id))?.label || `Zone ${id}`;
+    box.innerHTML = `${programs.length ? `<div class="card">${programs.map((p) => `
+      <div class="row prog"><div class="main"><span class="name">${esc(p.name)}</span>
+        <span class="sub wrap" title="${esc(p.zones.filter((z) => z.minutes).map((z) => `${zoneName(z.zone)} ${z.minutes} min`).join(", "))}">${esc(p.starts.map(fmtTime).join(", "))} · ${esc(fmtDays(p.days))} · ${p.zones.filter((z) => z.minutes).length} zones, ${p.zones.reduce((a, z) => a + z.minutes, 0)} min${p.smart ? " · adjusts for weather" : ""}</span></div>
+        <button class="pill" data-prog-run="${p.id}">Run now</button>
+        <button class="pill" data-prog-edit="${p.id}">Edit</button>
+        <label class="switch" aria-label="Program on or off"><input type="checkbox" data-prog-toggle="${p.id}" ${p.enabled ? "checked" : ""}><span></span></label>
+      </div>`).join("")}</div>` : `<p class="note">None yet. A smart program skips watering after rain and shortens it in cool weather. If you use one, turn the controller's own programs off in the Rain Bird app so the lawn isn't watered twice.</p>`}
+      <button class="pill primary" id="prog-new">New smart program</button>
+      ${decisions.length ? `<p class="note">Recent: ${decisions.slice(0, 3).map((x) => `${esc(x.at.replace("T", " "))}: ${esc(x.reason)}`).join("<br>")}</p>` : ""}`;
+    $("#prog-new", sheet).addEventListener("click", () => openProgramEditor(device, null));
+    box.querySelectorAll("[data-prog-edit]").forEach((b) => b.addEventListener("click", () =>
+      openProgramEditor(device, programs.find((p) => p.id === Number(b.dataset.progEdit)))));
+    box.querySelectorAll("[data-prog-run]").forEach((b) => b.addEventListener("click", async () => {
+      b.disabled = true;
+      try { const r = await api("POST", `/api/irrigation/programs/${b.dataset.progRun}/run`, { smart: true }); toast(r.reason); }
+      catch (err) { toast(err.message); }
+      b.disabled = false;
+    }));
+    box.querySelectorAll("[data-prog-toggle]").forEach((t) => t.addEventListener("change", async () => {
+      const p = programs.find((x) => x.id === Number(t.dataset.progToggle));
+      try { await api("PUT", `/api/irrigation/programs/${p.id}`, { ...p, enabled: t.checked }); }
+      catch (err) { toast(err.message); t.checked = !t.checked; }
+    }));
+  } catch (err) { box.innerHTML = `<p class="note">${esc(err.message)}</p>`; }
+}
+
+function openProgramEditor(device, program) {
+  const p = program || { name: "Lawn", starts: ["05:00"], days: ["mon", "wed", "fri"], smart: true, enabled: true,
+    zones: device.zones.map((z) => ({ zone: Number(z.id), minutes: 10 })) };
+  const minutesFor = (id) => p.zones.find((z) => String(z.zone) === String(id))?.minutes ?? 0;
+  openSheet(program ? `Edit ${program.name}` : "New smart program", `
+    <label class="field"><span>Name</span><input type="text" id="pg-name" value="${esc(p.name)}" maxlength="32"></label>
+    <div class="field"><span>Start times</span><div class="inline">
+      <input type="time" id="pg-start1" value="${esc(p.starts[0] || "05:00")}">
+      <input type="time" id="pg-start2" value="${esc(p.starts[1] || "")}" aria-label="Second start time (optional)"></div></div>
+    <div class="field"><span>Days</span>${dayChips("pg-day", p.days)}</div>
+    <div class="field"><span>Minutes per zone at peak summer (0 skips the zone)</span><div class="card">${device.zones.map((z) => `
+      <div class="row"><span class="main"><span class="name small">${esc(z.label)}</span></span>
+        <input type="number" class="zone-area" data-pg-zone="${esc(z.id)}" min="0" max="120" value="${minutesFor(z.id)}" aria-label="Minutes for ${esc(z.label)}"></div>`).join("")}</div></div>
+    <label class="field inline"><span>Adjust for weather (skip after rain, shorten when cool)</span>
+      <span class="switch"><input type="checkbox" id="pg-smart" ${p.smart ? "checked" : ""}><span></span></span></label>
+    <div class="inline"><button class="pill primary" id="pg-save">Save</button>
+      ${program ? `<button class="pill danger" id="pg-del">Delete</button>` : ""}</div>
+    <p class="note">Runs one zone after another. Like other hub schedules, it needs the Mac awake.</p>`);
+  $("#pg-save", sheet).addEventListener("click", async (e) => {
+    const body = {
+      name: $("#pg-name", sheet).value.trim() || "Smart program",
+      starts: [$("#pg-start1", sheet).value, $("#pg-start2", sheet).value].filter(Boolean),
+      days: checkedDays("pg-day"),
+      zones: [...sheet.querySelectorAll("[data-pg-zone]")].map((i) => ({ zone: Number(i.dataset.pgZone), minutes: Number(i.value) || 0 })),
+      smart: $("#pg-smart", sheet).checked, enabled: program ? program.enabled : true,
+    };
+    if (!body.days.length) return toast("Pick at least one day");
+    e.target.disabled = true;
+    try {
+      await api(program ? "PUT" : "POST", program ? `/api/irrigation/programs/${program.id}` : "/api/irrigation/programs", body);
+      toast("Program saved"); sheet.close();
+    } catch (err) { toast(err.message); e.target.disabled = false; }
+  });
+  $("#pg-del", sheet)?.addEventListener("click", async (e) => {
+    if (e.target.dataset.armed !== "1") { e.target.dataset.armed = "1"; e.target.textContent = "Tap again to delete"; return; }
+    try { await api("DELETE", `/api/irrigation/programs/${program.id}`); toast("Program deleted"); sheet.close(); }
+    catch (err) { toast(err.message); }
+  });
+}
+
+function openZoneSchedule(device, zone) {
+  const sc = zone.schedule || { minutes: 10, starts: ["05:00"], days: [] };
+  openSheet(`${zone.label}: schedule`, `
+    <p class="note">This is saved on the controller itself, so it runs even when the Mac is off.</p>
+    <label class="field"><span>Minutes</span><input type="number" id="zs-min" min="0" max="199" value="${sc.minutes}"></label>
+    <label class="field"><span>Start times (up to 6, comma-separated, 10-minute steps)</span>
+      <input type="text" id="zs-starts" value="${esc(sc.starts.join(", "))}" placeholder="05:00, 18:30"></label>
+    <div class="field"><span>Days</span>${dayChips("zs-day", sc.days)}</div>
+    <button class="pill primary" id="zs-save">Save to controller</button>`);
+  $("#zs-save", sheet).addEventListener("click", async (e) => {
+    const starts = $("#zs-starts", sheet).value.split(",").map((x) => x.trim()).filter(Boolean);
+    e.target.disabled = true;
+    try {
+      await api("PUT", `/api/rainbird/zones/${zone.id}/schedule`, { minutes: Number($("#zs-min", sheet).value) || 0, starts, days: checkedDays("zs-day") });
+      toast("Saved and confirmed on the controller"); sheet.close();
+    } catch (err) { toast(err.message); e.target.disabled = false; }
+  });
+}

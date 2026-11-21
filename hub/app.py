@@ -30,8 +30,11 @@ from .adapters.thinq_adapter import ThinQAdapter
 from .adapters.water_adapter import WaterAdvisorAdapter
 from .auth import SESSION_COOKIE, Auth
 from .config import Secrets, data_dir
+from . import weather as weather_api
+from .history import HistoryStore, build_insights
+from .irrigation import SmartPrograms
 from .scheduler import HubScheduler
-from .models import Device, DevicePatch, HubError, Schedule, ScheduleIn, StateIn
+from .models import DAYS, Device, DevicePatch, HubError, Schedule, ScheduleIn, StateIn
 
 log = logging.getLogger("hub")
 WEB_DIR = Path(__file__).parent / "web"
@@ -63,6 +66,42 @@ class Hub:
         self.scheduler = HubScheduler(self.store.db, self._apply)
         self.adapters.append(self.scheduler)
         self.last_devices: dict[str, Device] = {}
+        self.history = HistoryStore(self.store.db)
+        self.rainbird.on_run = self.history.log_run
+        self.irrigation = SmartPrograms(self.store.db, self.history, self.rainbird)
+        self._collector: asyncio.Task | None = None
+
+    async def collect_once(self) -> list[str]:
+        """Pull weather and water history into the database. Returns what failed, if anything."""
+        problems = []
+        location = self.secrets.get("location")
+        if location:
+            try:
+                self.history.put_weather(await weather_api.daily(location["latitude"], location["longitude"]))
+            except HubError as exc:
+                problems.append(f"weather: {exc.message}")
+        if self.water.active:
+            try:
+                daily, hourly = await self.water.history(days=14)
+                self.history.put_water_daily(daily)
+                self.history.put_water_hourly(hourly)
+            except HubError as exc:
+                problems.append(f"water: {exc.message}")
+        return problems
+
+    async def _collect_loop(self) -> None:
+        while True:
+            try:
+                problems = await self.collect_once()
+                for p in problems:
+                    log.warning("History: %s", p)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("History collector: %s", exc)
+            await asyncio.sleep(3 * 3600)
+
+    def start_background(self) -> None:
+        self.irrigation.start()
+        self._collector = asyncio.create_task(self._collect_loop())
         self._by_prefix = {p: a for a in self.adapters for p in a.prefixes}
 
     async def _apply(self, device_id: str, state: StateIn) -> None:
@@ -123,7 +162,11 @@ async def lifespan(app: FastAPI):
             await adapter.start()
         except Exception as exc:  # noqa: BLE001 - one brand failing must not stop the hub
             log.warning("%s did not start: %s", adapter.label, exc)
+    hub.start_background()
     yield
+    hub.irrigation.close()
+    if hub._collector:
+        hub._collector.cancel()
     for adapter in hub.adapters:
         await adapter.close()
 
@@ -603,13 +646,116 @@ async def rainbird_disconnect(request: Request):
 
 
 class ZoneNameIn(BaseModel):
-    name: str = Field("", max_length=24)
+    name: str | None = Field(None, max_length=24)
+    area_sqft: float | None = Field(None, ge=0, le=100000)
 
 
 @app.put("/api/rainbird/zones/{zone}")
 async def rainbird_zone_name(request: Request, zone: int, body: ZoneNameIn):
-    hub_of(request).rainbird.name_zone(zone, body.name)
+    rb = hub_of(request).rainbird
+    if "name" in body.model_fields_set:
+        rb.name_zone(zone, body.name or "")
+    if "area_sqft" in body.model_fields_set:
+        rb.set_zone_area(zone, body.area_sqft)
     return {"ok": True}
+
+
+HHMM = r"^([01]\d|2[0-3]):[0-5]\d$"
+
+
+class ZoneScheduleIn(BaseModel):
+    minutes: int = Field(ge=0, le=199)
+    starts: list[str] = Field(max_length=6)
+    days: list[str] = []
+
+
+@app.put("/api/rainbird/zones/{zone}/schedule")
+async def rainbird_zone_schedule(request: Request, zone: int, body: ZoneScheduleIn):
+    import re
+    if any(not re.match(HHMM, s) for s in body.starts) or any(d not in DAYS for d in body.days):
+        raise HubError(400, "Use HH:MM start times and day names like mon, tue.")
+    return await hub_of(request).rainbird.set_zone_schedule(zone, body.minutes, body.starts, body.days)
+
+
+# Smart watering programs (run by the hub)
+class ZoneMinutes(BaseModel):
+    zone: int = Field(ge=1, le=64)
+    minutes: int = Field(ge=0, le=120)
+
+
+class ProgramIn(BaseModel):
+    name: str = Field("Smart program", min_length=1, max_length=32)
+    starts: list[str] = Field(min_length=1, max_length=4)
+    days: list[str] = Field(min_length=1)
+    zones: list[ZoneMinutes] = Field(min_length=1)
+    enabled: bool = True
+    smart: bool = True
+
+
+def _program_dict(body: ProgramIn) -> dict:
+    import re
+    if any(not re.match(HHMM, s) for s in body.starts) or any(d not in DAYS for d in body.days):
+        raise HubError(400, "Use HH:MM start times and day names like mon, tue.")
+    return body.model_dump()
+
+
+@app.get("/api/irrigation/programs")
+async def list_programs(request: Request):
+    hub = hub_of(request)
+    return {"programs": hub.irrigation.programs(), "decisions": hub.irrigation.decisions()}
+
+
+@app.post("/api/irrigation/programs")
+async def add_program(request: Request, body: ProgramIn):
+    return hub_of(request).irrigation.save(_program_dict(body))
+
+
+@app.put("/api/irrigation/programs/{program_id}")
+async def edit_program(request: Request, program_id: int, body: ProgramIn):
+    return hub_of(request).irrigation.save(_program_dict(body), program_id)
+
+
+@app.delete("/api/irrigation/programs/{program_id}")
+async def delete_program(request: Request, program_id: int):
+    hub_of(request).irrigation.delete(program_id)
+    return {"ok": True}
+
+
+@app.post("/api/irrigation/programs/{program_id}/run")
+async def run_program(request: Request, program_id: int, smart: bool = Body(True, embed=True)):
+    from datetime import datetime
+    hub = hub_of(request)
+    program = next((p for p in hub.irrigation.programs() if p["id"] == program_id), None)
+    if program is None:
+        raise HubError(404, "Unknown program")
+    return hub.irrigation.start_program(program, datetime.now(), smart=smart)
+
+
+# Insights: water, sprinklers and weather together
+class LocationIn(BaseModel):
+    query: str = Field(min_length=2, max_length=80)
+
+
+@app.put("/api/location")
+async def set_location(request: Request, body: LocationIn):
+    hub = hub_of(request)
+    location = await weather_api.geocode(body.query)
+    hub.secrets.set("location", location)
+    problems = await hub.collect_once()
+    return {**location, "problems": problems}
+
+
+@app.post("/api/insights/refresh")
+async def refresh_insights(request: Request):
+    return {"problems": await hub_of(request).collect_once()}
+
+
+@app.get("/api/insights")
+async def insights(request: Request, days: int = 30):
+    hub = hub_of(request)
+    days = max(7, min(days, 90))
+    data = build_insights(hub.history, hub.rainbird.zone_label, hub.rainbird.zone_areas(), days)
+    return {**data, "location": hub.secrets.get("location")}
 
 
 @app.get("/api/pentair/fields")

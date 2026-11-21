@@ -15,7 +15,7 @@ from hub.models import HubError, StateIn
 def program(name="A", freq="CUSTOM", days=("MONDAY", "FRIDAY", "WEDNESDAY"), starts=(dtime(5, 0), dtime(18, 30)),
             minutes=(10, 15, 20), period=None):
     return SimpleNamespace(
-        name=name, frequency=SimpleNamespace(name=freq), period=period, starts=list(starts),
+        name=name, program=0, frequency=SimpleNamespace(name=freq), period=period, starts=list(starts),
         days_of_week=[SimpleNamespace(name=d) for d in days],
         durations=[SimpleNamespace(duration=timedelta(minutes=m)) for m in minutes])
 
@@ -44,7 +44,7 @@ class FakeController:
         self.st = state(irrigation_state=1, active_station=2, remaining_runtime=300)
 
     async def get_combined_controller_state(self): return self.st
-    async def get_schedule(self): return SimpleNamespace(programs=[program()])
+    async def get_schedule(self): return SimpleNamespace(programs=[program()], zone_schedules={})
     async def irrigate_zone(self, zone, minutes): self.calls.append(("run", zone, minutes))
     async def stop_irrigation(self): self.calls.append(("stop",))
     async def set_rain_delay(self, days): self.calls.append(("delay", days))
@@ -77,3 +77,60 @@ def test_commands(adapter):
         asyncio.run(adapter.set_state(rainbird_adapter.DEVICE_ID, StateIn(zone=9, minutes=5)))
     with pytest.raises(HubError):  # nothing to do
         asyncio.run(adapter.set_state(rainbird_adapter.DEVICE_ID, StateIn()))
+
+
+class ZoneScheduledController(FakeController):
+    """An ESP-RZXe style controller that stores one schedule per zone (or garbles it, to test the check)."""
+
+    def __init__(self, garble=False):
+        super().__init__()
+        self.saved = {1: self._zs(10, [dtime(5, 0)], ["MONDAY"])}
+        self.garble = garble
+
+    @staticmethod
+    def _zs(minutes, starts, days):
+        return SimpleNamespace(duration=timedelta(minutes=minutes), starts=starts,
+                               days_of_week=[SimpleNamespace(name=d) for d in days], frequency=SimpleNamespace(name="CUSTOM"))
+
+    async def get_schedule(self):
+        return SimpleNamespace(programs=[], zone_schedules=self.saved)
+
+    async def set_zone_schedule(self, zone, duration, starts, frequency, days):
+        minutes = int(duration.total_seconds() // 60) + (5 if self.garble else 0)
+        self.saved[zone] = self._zs(minutes, starts, [d.name for d in days])
+
+
+def test_zone_schedule_is_written_and_confirmed(adapter):
+    adapter._ctl = ZoneScheduledController()
+    asyncio.run(adapter.devices())  # reads the zone schedules
+    assert adapter.zone_scheduled
+    saved = asyncio.run(adapter.set_zone_schedule(1, 25, ["18:30", "05:00"], ["wed", "mon"]))
+    assert saved == {"minutes": 25, "starts": ["05:00", "18:30"], "days": ["mon", "wed"], "frequency": "CUSTOM"}
+
+
+def test_zone_schedule_mismatch_is_reported(adapter):
+    adapter._ctl = ZoneScheduledController(garble=True)
+    asyncio.run(adapter.devices())
+    with pytest.raises(HubError) as err:
+        asyncio.run(adapter.set_zone_schedule(1, 25, ["05:00"], ["mon"]))
+    assert "saved something different" in err.value.message
+
+
+def test_program_based_controller_refuses_zone_schedules(adapter):
+    asyncio.run(adapter.devices())  # FakeController reports programs, no zone schedules
+    with pytest.raises(HubError) as err:
+        asyncio.run(adapter.set_zone_schedule(1, 10, ["05:00"], ["mon"]))
+    assert "smart program" in err.value.message
+
+
+def test_runs_are_logged_when_the_zone_changes(adapter):
+    from datetime import datetime
+    logged = []
+    adapter.on_run = lambda started, zone, minutes, source: logged.append((zone, round(minutes), source))
+    t0 = datetime(2026, 7, 20, 5, 0)
+    adapter.observe(state(irrigation_state=1, active_station=1), t0)
+    adapter.observe(state(irrigation_state=1, active_station=1), t0 + timedelta(minutes=10))
+    adapter.observe(state(irrigation_state=1, active_station=2), t0 + timedelta(minutes=20))
+    adapter._hub_started[2] = __import__("time").monotonic()
+    adapter.observe(state(), t0 + timedelta(minutes=32))
+    assert logged == [(1, 20, "controller"), (2, 12, "hub")]

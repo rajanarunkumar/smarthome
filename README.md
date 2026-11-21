@@ -133,6 +133,27 @@ Tests: `pip install -r requirements-dev.txt && python -m pytest tests`.
 
 Kasa and Hue schedules are saved on the plug or bridge and run even when the Mac is off. Every other device with an on/off (the Pentair pump, Govee, Dyson, Sonos, the LG TV, Ecovacs) can now be scheduled too, at set times. Those schedules run **in the hub**, so the Mac must be awake: System Settings → Energy → turn on "Prevent automatic sleeping when the display is off". The Schedules tab labels them **Hub (this Mac)**. Locks can't be scheduled.
 
+## Watering insights (Insights tab)
+
+The hub keeps three histories in `~/.smarthome/hub.db` and lines them up by day and hour:
+
+- **Sprinkler runs:** the hub checks the Rain Bird controller every 30 seconds and logs every zone run (zone, start, minutes), whether the controller's own programs, the hub, or the Rain Bird app started it. History starts when the hub starts watching.
+- **Water use:** daily and hourly gallons from My Water Advisor, collected every 3 hours.
+- **Weather:** daily rain, evaporation (FAO‑56 reference ET) and the high for your location, from [Open‑Meteo](https://open-meteo.com) (free, no account). Set the location in Insights ("McKinney, TX").
+
+From those it works out:
+
+- **Gallons per minute for each zone.** Each hour with watering gives one equation: water above that hour's normal household use = Σ (zone minutes × zone flow). A least-squares fit over those hours separates zones that run back to back. A zone needs at least 3 such hours, and zones that always run together in the same proportions aren't guessed. Needs the water meter's **hourly** data.
+- **Daily split** of water into sprinklers vs everything else.
+- **What the lawn needed:** last 7 days of evaporation × 0.7 (warm-season turf) − 80% of rain, compared with what each zone got. Enter each zone's area (sq ft) in the Sprinklers screen to get inch-based advice ("Zone 4: overwatered, try 32 min a week instead of 60").
+- **Rain skips** from recent and forecast rain, and **leak warnings** when water keeps flowing between 1 and 5 AM with no watering.
+
+### Rain Bird programs
+
+- **Any controller:** run one of its programs now, from the Sprinklers screen.
+- **ESP‑RZXe and ST8** (controllers that schedule each zone separately): edit each zone's minutes, start times (up to 6, in 10-minute steps) and days. The hub writes it to the controller and reads it back to confirm, so it runs even when the Mac is off.
+- **ESP‑TM2, ESP‑ME3 and other program-based (A/B/C) controllers:** no library can write their programs, so use **smart programs** instead. They're run by the hub: start times, days and minutes per zone (set for peak summer). At each start the hub skips after 0.5 in of rain in two days or 0.25 in forecast for the day, otherwise scales every zone by last week's evaporation vs peak summer (30–120%). Every decision is logged with its reason. Turn the controller's own programs off in the Rain Bird app if you use these, and keep the Mac awake.
+
 ## Atmos Energy
 
 Atmos has no API and no maintained library; Opower doesn't cover it. Options, from easiest:

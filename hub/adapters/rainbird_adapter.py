@@ -16,7 +16,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any
+from datetime import datetime, timedelta
+from datetime import time as dtime
+from typing import Any, Callable
 
 from ..config import Secrets
 from ..models import Device, HubError, StateIn
@@ -41,6 +43,10 @@ except ImportError:  # pragma: no cover
     class RainbirdAuthException(RainbirdApiException):
         pass
 
+WATCH_SECONDS = 30
+HUB_RUN_WINDOW = 4 * 3600  # a run counts as hub-started if the hub asked for that zone this recently
+DAY_NAMES = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"]
+HUB_DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 DAY_ABBR = {"MONDAY": "Mon", "TUESDAY": "Tue", "WEDNESDAY": "Wed", "THURSDAY": "Thu", "FRIDAY": "Fri",
             "SATURDAY": "Sat", "SUNDAY": "Sun"}
 
@@ -61,6 +67,17 @@ def describe_program(program: Any) -> dict[str, str] | None:
         days = {"ODD": "Odd days", "EVEN": "Even days"}.get(freq, freq.title())
     times = ", ".join(s.strftime("%-I:%M %p") for s in starts)
     return {"label": f"Program {program.name}", "value": f"{times} · {days or 'No days'} · {total} min"}
+
+
+def zone_schedule_dict(zs: Any) -> dict:
+    """A controller zone schedule (ESP-RZXe / ST8) as plain data for the app."""
+    freq = getattr(zs.frequency, "name", str(zs.frequency))
+    return {
+        "minutes": int(zs.duration.total_seconds() // 60),
+        "starts": [s.strftime("%H:%M") for s in (zs.starts or []) if s is not None],
+        "days": [HUB_DAYS[DAY_NAMES.index(d.name)] for d in (zs.days_of_week or []) if d.name in DAY_NAMES],
+        "frequency": freq,
+    }
 
 
 def status_text(state: Any, zone_label) -> str:
@@ -91,7 +108,15 @@ class RainBirdAdapter(Adapter):
         self._state_at = float("-inf")  # never
         self._programs: list[dict[str, str]] = []
         self._programs_at = float("-inf")
+        self._program_ids: list[int] = []
+        self._zone_scheds: dict[int, dict] = {}
         self._lock = asyncio.Lock()
+        # Watering log: called with (started, zone, minutes, source) when a run ends.
+        self.on_run: Callable[[datetime, int, float, str], None] | None = None
+        self._running: tuple[int, datetime] | None = None
+        self._hub_started: dict[int, float] = {}
+        self._sequence: asyncio.Task | None = None
+        self._watcher: asyncio.Task | None = None
 
     @property
     def config(self) -> dict:
@@ -100,6 +125,36 @@ class RainBirdAdapter(Adapter):
     @property
     def active(self) -> bool:
         return AVAILABLE and bool(self.config.get("host"))
+
+    async def start(self) -> None:
+        self._watcher = asyncio.create_task(self._watch())
+
+    async def _watch(self) -> None:
+        """Poll the controller so every run is logged, even ones started by its own programs."""
+        while True:
+            if self.active:
+                try:
+                    async with self._lock:
+                        ctl = await self._controller()
+                        self._state = await ctl.get_combined_controller_state()
+                        self._state_at = time.monotonic()
+                    self.observe(self._state, datetime.now())
+                except Exception as exc:  # noqa: BLE001 - keep watching
+                    log.debug("Rain Bird watch: %s", exc)
+                    await self.close()
+            await asyncio.sleep(WATCH_SECONDS)
+
+    def observe(self, state: Any, now: datetime) -> None:
+        """Turn controller states into runs: when the active zone changes, the previous run ended."""
+        zone = state.active_station if state.irrigation_state else 0
+        current = self._running
+        if current and current[0] == zone:
+            return
+        if current and self.on_run:
+            started_zone, started = current
+            hub = time.monotonic() - self._hub_started.pop(started_zone, float("-inf")) < HUB_RUN_WINDOW
+            self.on_run(started, started_zone, (now - started).total_seconds() / 60, "hub" if hub else "controller")
+        self._running = (zone, now) if zone else None
 
     def zone_label(self, zone: int) -> str:
         name = (self.config.get("zone_names") or {}).get(str(zone))
@@ -156,6 +211,8 @@ class RainBirdAdapter(Adapter):
                 try:
                     schedule = await ctl.get_schedule()
                     self._programs = [p for p in (describe_program(x) for x in schedule.programs) if p]
+                    self._program_ids = [x.program for x in schedule.programs if describe_program(x)]
+                    self._zone_scheds = {z: zone_schedule_dict(zs) for z, zs in (schedule.zone_schedules or {}).items()}
                 except Exception as exc:  # noqa: BLE001 - older controllers can't report programs
                     log.info("Rain Bird programs unavailable: %s", exc)
                     self._programs = []
@@ -175,8 +232,13 @@ class RainBirdAdapter(Adapter):
             id=DEVICE_ID, brand=self.brand, kind="sprinkler", name="Sprinklers", model=self._model,
             on=bool(running), media=status_text(st, self.zone_label),
             zones=[{"id": str(z), "label": self.zone_label(z), "running": z == running,
-                    "name": (self.config.get("zone_names") or {}).get(str(z), "")} for z in self._zones],
-            rain_delay=st.delay_setting, details=self._programs, capabilities=["zones"],
+                    "name": (self.config.get("zone_names") or {}).get(str(z), ""),
+                    "area_sqft": (self.config.get("zone_areas") or {}).get(str(z)),
+                    "schedule": self._zone_scheds.get(z)} for z in self._zones],
+            actions=[{"id": f"program_{pid}", "label": f"Run {p['label']} now"}
+                     for pid, p in zip(self._program_ids, self._programs)],
+            rain_delay=st.delay_setting, details=self._programs,
+            capabilities=["zones"] + (["actions"] if self._program_ids else []),
         )]
 
     def names(self) -> dict[str, str]:
@@ -188,9 +250,17 @@ class RainBirdAdapter(Adapter):
             if state.zone is not None:
                 if state.zone not in self._zones:
                     raise HubError(400, f"Zone {state.zone} isn't set up on this controller.")
+                self._hub_started[state.zone] = time.monotonic()
                 await ctl.irrigate_zone(state.zone, state.minutes or 10)
             elif state.action == "stop" or state.on is False:
+                if self._sequence and not self._sequence.done():
+                    self._sequence.cancel()
                 await ctl.stop_irrigation()
+            elif state.action and state.action.startswith("program_"):
+                program = int(state.action.split("_", 1)[1])
+                if program not in self._program_ids:
+                    raise HubError(400, "That program isn't set up on the controller.")
+                await ctl.set_program(program)
             elif state.rain_delay_days is not None:
                 await ctl.set_rain_delay(state.rain_delay_days)
             else:
@@ -199,8 +269,71 @@ class RainBirdAdapter(Adapter):
             raise HubError(502, f"The controller didn't accept that: {exc}") from exc
         self._state_at = float("-inf")  # never
 
+    def set_zone_area(self, zone: int, area_sqft: float | None) -> None:
+        cfg = dict(self.config)
+        areas = dict(cfg.get("zone_areas") or {})
+        if area_sqft:
+            areas[str(zone)] = float(area_sqft)
+        else:
+            areas.pop(str(zone), None)
+        self.secrets.set("rainbird", {**cfg, "zone_areas": areas})
+
+    def zone_areas(self) -> dict[int, float]:
+        return {int(z): a for z, a in (self.config.get("zone_areas") or {}).items()}
+
+    @property
+    def zone_scheduled(self) -> bool:
+        """ESP-RZXe / ST8 style: each zone has its own schedule the hub can write."""
+        return bool(self._zone_scheds)
+
+    async def set_zone_schedule(self, zone: int, minutes: int, starts: list[str], days: list[str]) -> dict:
+        if zone not in self._zones:
+            raise HubError(404, f"Zone {zone} isn't set up on this controller.")
+        if not self.zone_scheduled:
+            raise HubError(400, "This controller uses programs (A, B, C…) that the Rain Bird library can't write. "
+                                "Use a smart program in the hub instead.")
+        if len(starts) > 6:
+            raise HubError(400, "A zone can have at most 6 start times.")
+        from pyrainbird.const import DayOfWeek, ProgramFrequency
+
+        start_times = sorted(dtime.fromisoformat(s) for s in starts)
+        week = {getattr(DayOfWeek, DAY_NAMES[HUB_DAYS.index(d)]) for d in days}
+        ctl = await self._controller()
+        try:
+            await ctl.set_zone_schedule(zone, timedelta(minutes=minutes), start_times,
+                                        ProgramFrequency.CUSTOM, week)
+            saved = (await ctl.get_schedule()).zone_schedules.get(zone)
+        except RainbirdApiException as exc:
+            raise HubError(502, f"The controller didn't accept the schedule: {exc}") from exc
+        self._programs_at = float("-inf")
+        result = zone_schedule_dict(saved) if saved else None
+        # Start times are stored in 10-minute steps, so compare what was asked to what came back.
+        wanted = {"minutes": minutes, "days": sorted(days, key=HUB_DAYS.index)}
+        if result is None or result["minutes"] != wanted["minutes"] or \
+                sorted(result["days"], key=HUB_DAYS.index) != wanted["days"]:
+            raise HubError(502, "The controller saved something different from what was sent. "
+                                "Check the schedule in the Rain Bird app.")
+        return result
+
+    def run_sequence(self, zones: list[tuple[int, int]], source: str = "hub") -> None:
+        """Run zones one after another (a smart program). Stop cancels it."""
+        if self._sequence and not self._sequence.done():
+            self._sequence.cancel()
+
+        async def go() -> None:
+            for zone, minutes in zones:
+                if minutes <= 0:
+                    continue
+                self._hub_started[zone] = time.monotonic()
+                async with self._lock:
+                    ctl = await self._controller()
+                    await ctl.irrigate_zone(zone, minutes)
+                await asyncio.sleep(minutes * 60 + 20)
+
+        self._sequence = asyncio.create_task(go())
+
     async def status(self) -> dict:
-        return {"connected": self.active, "available": AVAILABLE, "devices": 1 if self.active else 0,
+        return {"connected": self.active, "available": AVAILABLE, "zone_scheduled": self.zone_scheduled, "devices": 1 if self.active else 0,
                 "zones": len(self._zones), "host": self.config.get("host")}
 
     async def close(self) -> None:
