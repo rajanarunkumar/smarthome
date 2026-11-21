@@ -156,6 +156,10 @@ button { cursor: pointer; }
 .chip input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
 .temp-range { background: linear-gradient(90deg, #a9c8ff, #fff4e0, #ffb057); border-radius: 99px; height: 8px; }
 
+.login { display: flex; flex-direction: column; gap: 12px; max-width: 360px; margin: 12vh auto 0; text-align: center; }
+.pill.big { padding: 13px 18px; font-size: 17px; border-radius: 14px; }
+.tabs[hidden] { display: none; }
+
 .toast {
   position: fixed; left: 50%; bottom: calc(84px + env(safe-area-inset-bottom)); transform: translateX(-50%);
   background: var(--ink); color: var(--bg); padding: 10px 14px; border-radius: 12px; font-size: 14px;

@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from .adapters.hue_adapter import HueAdapter
 from .adapters.kasa_adapter import KasaAdapter
+from .auth import SESSION_COOKIE, Auth
 from .config import Secrets, data_dir
 from .models import Device, DevicePatch, HubError, Schedule, ScheduleIn, StateIn
 
@@ -29,6 +30,7 @@ class Hub:
 
         self.secrets = Secrets()
         self.store = Store(data_dir() / "hub.db")
+        self.auth = Auth(self.secrets, self.store.db)
         self.kasa = KasaAdapter()
         self.hue = HueAdapter(self.secrets)
 
@@ -91,13 +93,47 @@ def hub_of(request: Request) -> Hub:
     return request.app.state.hub
 
 
+PUBLIC_PATHS = {
+    "/api/health",
+    "/api/auth/me",
+    "/api/auth/google/start",
+    "/api/auth/google",
+    "/api/auth/passkey/login/options",
+    "/api/auth/passkey/login",
+    "/api/auth/logout",
+}
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+def _deny(status: int, message: str) -> JSONResponse:
+    return JSONResponse({"detail": message}, status_code=status)
+
+
 @app.middleware("http")
-async def require_token(request: Request, call_next):
-    if request.url.path.startswith("/api/") and request.url.path != "/api/health":
-        expected = request.app.state.hub.secrets.access_token()
-        given = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
-        if not hmac.compare_digest(given, expected):
-            return JSONResponse({"detail": "Missing or wrong access token"}, status_code=401)
+async def authenticate(request: Request, call_next):
+    """Web app: session cookie (Google or Face ID). Scripts: Bearer API token."""
+    path = request.url.path
+    if not path.startswith("/api/"):
+        return await call_next(request)
+    hub: Hub = request.app.state.hub
+    request.state.user = None
+
+    authorization = request.headers.get("authorization", "")
+    if authorization.startswith("Bearer "):
+        if not hmac.compare_digest(authorization[7:].strip(), hub.secrets.access_token()):
+            return _deny(401, "Wrong API token")
+        request.state.user = {"email": None, "method": "api-token"}
+    else:
+        session = hub.auth.session(request.cookies.get(SESSION_COOKIE))
+        # Cookie-authenticated or sign-in requests that change state must come
+        # from the hub's own pages (cross-site request forgery protection).
+        if request.method not in SAFE_METHODS and (session or path in PUBLIC_PATHS):
+            if request.headers.get("origin") not in hub.auth.origins:
+                return _deny(403, "Request from an address that isn't allowed")
+        request.state.user = session
+
+    if path not in PUBLIC_PATHS and request.state.user is None:
+        return _deny(401, "Sign in required")
     return await call_next(request)
 
 
@@ -120,7 +156,11 @@ async def health():
 @app.get("/api/status")
 async def status(request: Request):
     hub = hub_of(request)
-    return {"hue": await hub.hue.status(), "kasa": {"devices": len(hub.kasa.names())}}
+    return {
+        "hue": await hub.hue.status(),
+        "kasa": {"devices": len(hub.kasa.names())},
+        "user": (request.state.user or {}).get("email"),
+    }
 
 
 # Devices
@@ -251,6 +291,108 @@ async def toggle_schedule(request: Request, schedule_id: str, body: EnabledIn):
 async def delete_schedule(request: Request, schedule_id: str):
     await hub_of(request).adapter_for(schedule_id).delete_schedule(schedule_id)
     return {"ok": True}
+
+
+# Sign-in
+def _origin(request: Request) -> str:
+    return hub_of(request).auth.check_origin(request.headers.get("origin"))
+
+
+def _signed_in(request: Request, email: str, method: str) -> JSONResponse:
+    hub = hub_of(request)
+    token = hub.auth.create_session(email, method)
+    response = JSONResponse({"ok": True, "email": email})
+    response.set_cookie(
+        SESSION_COOKIE, token, max_age=hub.auth.session_seconds, path="/",
+        httponly=True, samesite="strict", secure=_origin(request).startswith("https://"),
+    )
+    return response
+
+
+def _email(request: Request) -> str:
+    user = request.state.user or {}
+    if not user.get("email"):
+        raise HubError(403, "Sign in with Google or Face ID first.")
+    return user["email"]
+
+
+@app.get("/api/auth/me")
+async def auth_me(request: Request):
+    hub = hub_of(request)
+    user = request.state.user
+    email = (user or {}).get("email")
+    return {
+        "signed_in": bool(user),
+        "email": email,
+        "method": (user or {}).get("method"),
+        "google": bool(hub.auth.config.get("google_client_id")),
+        "passkeys": len(hub.auth.passkeys(email)) if email else 0,
+    }
+
+
+@app.post("/api/auth/google/start")
+async def google_start(request: Request):
+    return {"url": hub_of(request).auth.google_start(_origin(request))}
+
+
+class GoogleIn(BaseModel):
+    id_token: str = Field(min_length=20, max_length=8192)
+    state: str = Field(min_length=8, max_length=64)
+
+
+@app.post("/api/auth/google")
+async def google_finish(request: Request, body: GoogleIn):
+    email = await hub_of(request).auth.google_finish(_origin(request), body.id_token, body.state)
+    return _signed_in(request, email, "google")
+
+
+class PasskeyIn(BaseModel):
+    challenge_id: str = Field(max_length=64)
+    credential: dict
+    label: str = Field("", max_length=40)
+
+
+@app.post("/api/auth/passkey/login/options")
+async def passkey_login_options(request: Request):
+    return hub_of(request).auth.login_options(_origin(request))
+
+
+@app.post("/api/auth/passkey/login")
+async def passkey_login(request: Request, body: PasskeyIn):
+    email = hub_of(request).auth.login_finish(_origin(request), body.challenge_id, body.credential)
+    return _signed_in(request, email, "passkey")
+
+
+@app.post("/api/auth/passkey/register/options")
+async def passkey_register_options(request: Request):
+    return hub_of(request).auth.register_options(_email(request), _origin(request))
+
+
+@app.post("/api/auth/passkey/register")
+async def passkey_register(request: Request, body: PasskeyIn):
+    hub_of(request).auth.register_finish(
+        _email(request), _origin(request), body.challenge_id, body.credential, body.label
+    )
+    return {"ok": True}
+
+
+@app.get("/api/auth/passkeys")
+async def list_passkeys(request: Request):
+    return hub_of(request).auth.passkeys(_email(request))
+
+
+@app.delete("/api/auth/passkeys/{passkey_id}")
+async def delete_passkey(request: Request, passkey_id: str):
+    hub_of(request).auth.delete_passkey(_email(request), passkey_id)
+    return {"ok": True}
+
+
+@app.post("/api/auth/logout")
+async def logout(request: Request):
+    hub_of(request).auth.end_session(request.cookies.get(SESSION_COOKIE))
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return response
 
 
 # Hue pairing

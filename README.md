@@ -88,19 +88,29 @@ Scanned from a Mac on the home Wi-Fi on 2026-11-21 (two passes plus the ARP tabl
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-python -m hub            # prints a link with the access token; open it once on each device
+python -m hub            # listens on this Mac only (127.0.0.1:8420)
+tailscale serve --bg 8420   # once: publishes it at https://<mac>.<tailnet>.ts.net to your own devices
 ```
 
-On the iPhone (same Wi-Fi), open the printed `http://<mac-name>.local:8420/#token=…` link in Safari, then **Share → Add to Home Screen**. To pair Hue, press the round button on the Hue Bridge, then tap **Settings → Pair** within 30 seconds.
+On the iPhone (Tailscale on), open the `https://…ts.net` address in Safari, **Sign in with Google**, accept **Use Face ID next time**, then **Share → Add to Home Screen**. To pair Hue, press the round button on the Hue Bridge, then tap **Settings → Pair** within 30 seconds.
 
-Private data lives in `~/.smarthome/` (the access token, Hue key and the rooms database), never in this repo.
+### Sign-in
+
+- **Google** (OpenID Connect, redirect flow) for the first sign-in on a device. Only allow-listed Google accounts get in.
+- **Face ID / Touch ID** passkeys after that. Sessions last 12 hours, then one Face ID tap.
+- **API token** (`Authorization: Bearer …`) for scripts such as Siri Shortcuts, which can't do Face ID.
+- Requests that change anything must come from one of the hub's own addresses (CSRF protection).
+
+Settings live in `~/.smarthome/secrets.json` under `auth`: `google_client_id`, `allowed_emails`, `origins` and `session_hours`. In Google Cloud, the OAuth client (type *Web application*) needs each origin as an **Authorized JavaScript origin** and each origin plus `/` as an **Authorized redirect URI**.
+
+Private data lives in `~/.smarthome/` (sign-in settings, API token, Hue key, sessions, passkeys and the rooms database), never in this repo.
 
 Tests: `pip install -r requirements-dev.txt && python -m pytest tests`.
 
 ## Roadmap
 
 1. ~~Core hub, Kasa and Hue, native schedules~~ (done)
-2. **Sign-in:** Google sign-in plus Face ID / Touch ID (passkeys), over HTTPS through Tailscale. Replaces the access-token link.
+2. ~~**Sign-in:** Google sign-in plus Face ID / Touch ID (passkeys), over HTTPS through Tailscale~~ (done)
 3. **More devices:** Leviton and Lennox (HomeKit), Leviton Matter and Nest Thermostat (Matter), LG TV, Sonos, Govee, Ring.
 4. **Siri:** a "schedule" Shortcut that turns spoken requests into hub schedules, then a HomeKit bridge for direct Siri control.
 5. **Alexa and Google:** private skill and smart-home project, so both show the hub's names and rooms.

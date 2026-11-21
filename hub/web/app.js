@@ -1,17 +1,12 @@
 "use strict";
 
-// ---------- access token ----------
-const TOKEN_KEY = "hub-token";
-function readToken() {
-  const fromHash = new URLSearchParams(location.hash.slice(1)).get("token");
-  if (fromHash) {
-    try { localStorage.setItem(TOKEN_KEY, fromHash); } catch {}
-    history.replaceState(null, "", location.pathname);
-    return fromHash;
-  }
-  try { return localStorage.getItem(TOKEN_KEY) || ""; } catch { return ""; }
-}
-let token = readToken();
+// The old token sign-in is replaced by Google + Face ID; forget any stored token.
+try { localStorage.removeItem("hub-token"); } catch {}
+const PASSKEY_HINT = "hub-passkey-on-this-device";
+const hint = {
+  get: () => { try { return localStorage.getItem(PASSKEY_HINT) === "1"; } catch { return false; } },
+  set: (on) => { try { on ? localStorage.setItem(PASSKEY_HINT, "1") : localStorage.removeItem(PASSKEY_HINT); } catch {} },
+};
 
 // ---------- helpers ----------
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -26,10 +21,11 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 async function api(method, path, body) {
   const res = await fetch(path, {
     method,
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  if (res.status === 401) { showLogin(); throw new Error("Access token needed"); }
+  if (res.status === 401 && !path.startsWith("/api/auth/")) { state.signedIn = false; showLogin(); throw new Error("Sign in required"); }
   const data = res.headers.get("content-type")?.includes("json") ? await res.json() : null;
   if (!res.ok) {
     const detail = data?.detail;
@@ -55,7 +51,7 @@ function debounce(fn, ms) {
 function setSync(text) { $("#sync").textContent = text; }
 
 // ---------- state ----------
-const state = { tab: "rooms", devices: [], rooms: [], scenes: [], schedules: [], errors: [], hue: null };
+const state = { tab: "rooms", devices: [], rooms: [], scenes: [], schedules: [], errors: [], hue: null, signedIn: false, me: null, passkeys: [] };
 
 async function loadDevices() {
   const data = await api("GET", "/api/devices");
@@ -88,9 +84,16 @@ async function render(fetch = false) {
       }
       renderSchedules();
     }
-    if (state.tab === "settings") { if (fetch) { state.hue = (await api("GET", "/api/status")).hue; await loadDevices(); } renderSettings(); }
+    if (state.tab === "settings") {
+      if (fetch) {
+        state.hue = (await api("GET", "/api/status")).hue;
+        state.passkeys = state.me?.email ? await api("GET", "/api/auth/passkeys") : [];
+        await loadDevices();
+      }
+      renderSettings();
+    }
   } catch (err) {
-    if (token) view.innerHTML = `<div class="error">${esc(err.message)}</div>`;
+    if (state.signedIn) view.innerHTML = `<div class="error">${esc(err.message)}</div>`;
   }
 }
 
@@ -372,7 +375,24 @@ function openNewSchedule() {
 // ---------- settings ----------
 function renderSettings() {
   const hue = state.hue || {};
-  view.innerHTML = `
+  const fmtDate = (s) => s ? new Date(s * 1000).toLocaleDateString() : "never";
+  const keys = state.passkeys.map((p) => `
+      <div class="row"><div class="main">
+        <span class="name">${esc(p.label)}</span>
+        <span class="sub">Added ${esc(fmtDate(p.created))} · last used ${esc(fmtDate(p.last_used))}</span></div>
+        <button class="pill danger" data-del-passkey="${esc(p.id)}">Remove</button></div>`).join("");
+  const account = state.me?.email ? `
+    <div class="section-title"><span>Account</span></div>
+    <div class="card">
+      <div class="row"><div class="main"><span class="name">${esc(state.me.email)}</span>
+        <span class="sub">Signed in with ${state.me.method === "passkey" ? "Face ID" : "Google"}</span></div>
+        <button class="pill" id="sign-out">Sign out</button></div>
+      ${keys}
+      <div class="row"><div class="main"><span class="name">Face ID on this device</span>
+        <span class="sub">${hint.get() ? "Turned on" : "Sign in with one tap next time"}</span></div>
+        ${hint.get() ? "" : `<button class="pill primary" id="add-passkey">Turn on</button>`}</div>
+    </div>` : "";
+  view.innerHTML = account + `
     <div class="section-title"><span>Philips Hue</span></div>
     <div class="card"><div class="row"><div class="main">
       <span class="name">${hue.paired ? "Hue Bridge paired" : "Hue Bridge not paired"}</span>
@@ -392,6 +412,11 @@ function renderSettings() {
       <button class="pill primary" id="add-room" style="flex:none">Add room</button></div>
     <p class="note">Rooms live in this hub. Hue rooms are imported the first time the bridge is paired.</p>`;
 
+  $("#sign-out")?.addEventListener("click", signOut);
+  $("#add-passkey")?.addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    if (await registerPasskey()) render(true); else e.target.disabled = false;
+  });
   $("#hue-pair").addEventListener("click", async (e) => {
     e.target.disabled = true;
     try { await api("POST", "/api/hue/pair"); toast("Hue Bridge paired"); render(true); }
@@ -407,7 +432,13 @@ function renderSettings() {
 view.addEventListener("click", async (e) => {
   const ren = e.target.closest("[data-rename-room]");
   const del = e.target.closest("[data-del-room]");
+  const delKey = e.target.closest("[data-del-passkey]");
   try {
+    if (delKey && confirm("Remove this Face ID passkey? You can sign in with Google and add it again.")) {
+      await api("DELETE", `/api/auth/passkeys/${encodeURIComponent(delKey.dataset.delPasskey)}`);
+      if (state.passkeys.length <= 1) hint.set(false);
+      render(true);
+    }
     if (ren) {
       const room = state.rooms.find((r) => r.id === Number(ren.dataset.renameRoom));
       const name = prompt("Room name", room?.name || "");
@@ -419,24 +450,168 @@ view.addEventListener("click", async (e) => {
   } catch (err) { toast(err.message); }
 });
 
-// ---------- login ----------
-function showLogin() {
-  view.innerHTML = `
-    <p class="note">Open the link printed when the hub started, or paste its access token here.</p>
-    <div class="field inline"><input type="text" id="tok" placeholder="Access token" autocomplete="off">
-      <button class="pill primary" id="tok-save" style="flex:none">Connect</button></div>`;
-  $("#tok-save").addEventListener("click", () => {
-    token = $("#tok").value.trim();
-    try { localStorage.setItem(TOKEN_KEY, token); } catch {}
-    render(true);
+// ---------- sign-in: Google + Face ID (passkeys) ----------
+const b64ToBuf = (s) => {
+  const b = s.replace(/-/g, "+").replace(/_/g, "/");
+  return Uint8Array.from(atob(b + "=".repeat((4 - (b.length % 4)) % 4)), (c) => c.charCodeAt(0)).buffer;
+};
+const bufToB64 = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const canPasskey = () => !!window.PublicKeyCredential;
+
+// Safari only allows Face ID straight from a tap, so challenges are fetched ahead of time.
+let loginChallenge = null;
+async function prefetchLoginChallenge() {
+  try { loginChallenge = await api("POST", "/api/auth/passkey/login/options"); } catch { loginChallenge = null; }
+}
+
+async function passkeySignIn() {
+  if (!loginChallenge) await prefetchLoginChallenge();
+  const { challenge_id, options } = loginChallenge || {};
+  loginChallenge = null;
+  if (!options) return toast("Couldn't reach the hub");
+  try {
+    const cred = await navigator.credentials.get({
+      publicKey: {
+        ...options,
+        challenge: b64ToBuf(options.challenge),
+        allowCredentials: (options.allowCredentials || []).map((c) => ({ ...c, id: b64ToBuf(c.id) })),
+      },
+    });
+    const r = cred.response;
+    await api("POST", "/api/auth/passkey/login", {
+      challenge_id,
+      credential: {
+        id: cred.id, rawId: bufToB64(cred.rawId), type: cred.type,
+        authenticatorAttachment: cred.authenticatorAttachment,
+        clientExtensionResults: cred.getClientExtensionResults(),
+        response: {
+          clientDataJSON: bufToB64(r.clientDataJSON), authenticatorData: bufToB64(r.authenticatorData),
+          signature: bufToB64(r.signature), userHandle: r.userHandle ? bufToB64(r.userHandle) : null,
+        },
+      },
+    });
+    hint.set(true);
+    await afterSignIn(false);
+  } catch (err) {
+    prefetchLoginChallenge();
+    if (err.name !== "NotAllowedError") toast(err.message);
+  }
+}
+
+let registerChallenge = null;
+async function registerPasskey() {
+  const prepared = registerChallenge || await api("POST", "/api/auth/passkey/register/options");
+  registerChallenge = null;
+  const { challenge_id, options } = prepared;
+  try {
+    const cred = await navigator.credentials.create({
+      publicKey: {
+        ...options,
+        challenge: b64ToBuf(options.challenge),
+        user: { ...options.user, id: b64ToBuf(options.user.id) },
+        excludeCredentials: (options.excludeCredentials || []).map((c) => ({ ...c, id: b64ToBuf(c.id) })),
+      },
+    });
+    const r = cred.response;
+    const label = /iPhone|iPad/.test(navigator.userAgent) ? "iPhone" : /Mac/.test(navigator.userAgent) ? "Mac" : "This device";
+    await api("POST", "/api/auth/passkey/register", {
+      challenge_id, label,
+      credential: {
+        id: cred.id, rawId: bufToB64(cred.rawId), type: cred.type,
+        authenticatorAttachment: cred.authenticatorAttachment,
+        clientExtensionResults: cred.getClientExtensionResults(),
+        response: {
+          clientDataJSON: bufToB64(r.clientDataJSON), attestationObject: bufToB64(r.attestationObject),
+          transports: r.getTransports ? r.getTransports() : [],
+        },
+      },
+    });
+    hint.set(true);
+    toast("Face ID is on for this device");
+    return true;
+  } catch (err) {
+    if (err.name === "InvalidStateError") { hint.set(true); toast("Face ID is already on for this device"); return true; }
+    if (err.name !== "NotAllowedError") toast(err.message);
+    return false;
+  }
+}
+
+async function googleSignIn() {
+  try { location.href = (await api("POST", "/api/auth/google/start")).url; }
+  catch (err) { toast(err.message); }
+}
+
+// Google sends the user back to "/" with the result in the URL fragment.
+async function finishGoogleRedirect() {
+  const params = new URLSearchParams(location.hash.slice(1));
+  if (!params.has("id_token") && !params.has("error")) return false;
+  history.replaceState(null, "", location.pathname);
+  if (params.has("error")) { toast("Google sign-in was cancelled"); return false; }
+  try {
+    await api("POST", "/api/auth/google", { id_token: params.get("id_token"), state: params.get("state") });
+    await afterSignIn(true);
+    return true;
+  } catch (err) { showLogin(); toast(err.message); return false; }
+}
+
+async function afterSignIn(offerPasskey) {
+  state.me = await api("GET", "/api/auth/me");
+  state.signedIn = state.me.signed_in;
+  document.querySelector(".tabs").hidden = false;
+  switchTab(state.tab);
+  if (offerPasskey && canPasskey() && !hint.get()) offerFaceId();
+}
+
+async function offerFaceId() {
+  try {
+    if (!(await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable())) return;
+    registerChallenge = await api("POST", "/api/auth/passkey/register/options");
+  } catch { return; }
+  openSheet("Use Face ID next time?", `
+    <p>Sign in with one tap instead of Google. Your face or fingerprint never leaves this device.</p>
+    <div class="inline"><button class="pill" data-close>Not now</button>
+      <button class="pill primary" id="faceid-on">Turn on Face ID</button></div>`);
+  $("#faceid-on", sheet).addEventListener("click", async () => {
+    if (await registerPasskey()) sheet.close();
   });
 }
 
+async function signOut() {
+  try { await api("POST", "/api/auth/logout"); } catch {}
+  state.signedIn = false; state.me = null;
+  showLogin();
+}
+
+function showLogin() {
+  document.querySelector(".tabs").hidden = true;
+  $("#title").textContent = "Home";
+  setSync("");
+  const faceId = canPasskey() && hint.get();
+  view.innerHTML = `
+    <div class="login">
+      <p class="note">Sign in to control your home.</p>
+      ${faceId ? `<button class="pill primary big" id="login-passkey">Sign in with Face ID</button>` : ""}
+      <button class="pill ${faceId ? "" : "primary"} big" id="login-google">Sign in with Google</button>
+      ${canPasskey() && !faceId ? `<button class="pill big" id="login-passkey">Use a passkey</button>` : ""}
+    </div>`;
+  $("#login-google").addEventListener("click", googleSignIn);
+  $("#login-passkey")?.addEventListener("click", passkeySignIn);
+  if (canPasskey()) prefetchLoginChallenge();
+}
+
 // ---------- start ----------
-if (!token) showLogin(); else render(true);
+async function boot() {
+  if (await finishGoogleRedirect()) return;
+  try {
+    state.me = await api("GET", "/api/auth/me");
+    state.signedIn = state.me.signed_in;
+  } catch { state.signedIn = false; }
+  if (state.signedIn) { await afterSignIn(false); } else { showLogin(); }
+}
+boot();
 
 // Keep the Rooms view in step with changes made in brand apps, wall switches or voice.
 setInterval(() => {
-  if (document.hidden || sheet.open || state.tab !== "rooms" || !token) return;
+  if (document.hidden || sheet.open || state.tab !== "rooms" || !state.signedIn) return;
   loadDevices().then(renderRooms).catch(() => {});
 }, 5000);
