@@ -76,7 +76,18 @@ Scanned from a Mac on the home Wi-Fi on 2026-11-21 (two passes plus the ARP tabl
 
 ## The hub (phase 1: built)
 
-`hub/` is a Python server (FastAPI) with a web app for the iPhone. It currently covers **Kasa** and **Hue**:
+`hub/` is a Python server (FastAPI) with a web app for the iPhone. It currently covers **Kasa**, **Hue**, **Sonos**, **LG webOS TV** and **Govee**, all over the local network:
+
+| Brand | What the hub can do | Setup |
+|---|---|---|
+| Kasa | On/off, brightness, rename, schedules on the plug | None: found automatically |
+| Hue | On/off, brightness, color, white, rename, scenes, schedules on the bridge | Settings → Pair (press the bridge button first) |
+| Sonos | Play/pause, next/previous, volume, mute, rename. The switch on the Rooms tab means play/pause. Grouped speakers play and pause together. | None: found automatically |
+| LG TV | On/off, volume, mute, input (HDMI…) or app, play/pause | Settings → LG TV → Connect, then **Accept** on the TV. For turning the TV *on*, enable **Turn on via Wi‑Fi** on the TV (Settings → General → Devices → TV Management / External Devices). Needs Python 3.12+. |
+| Govee | On/off, brightness, color, white | In the Govee app, turn on **LAN Control** for each light (device → settings). Not every model supports it. |
+
+Govee and LG have no way to rename a device from outside their apps, so names you give those in the hub are kept in the hub.
+
 
 - **Rooms tab:** every device grouped by room, power switches, "all on/off" per room. Tap a device to rename it (the name is written back to the brand), move it to a room, or set brightness, color and white temperature.
 - **Scenes tab:** your Hue scenes by room, including dynamic scenes.
@@ -86,7 +97,7 @@ Scanned from a Mac on the home Wi-Fi on 2026-11-21 (two passes plus the ARP tabl
 ### Run it
 
 ```bash
-python3 -m venv .venv && . .venv/bin/activate
+python3.12 -m venv .venv && . .venv/bin/activate   # 3.11 works too, without LG TV support
 pip install -r requirements.txt
 python -m hub            # listens on this Mac only (127.0.0.1:8420)
 tailscale serve --bg 8420   # once: publishes it at https://<mac>.<tailnet>.ts.net to your own devices
@@ -111,7 +122,7 @@ Tests: `pip install -r requirements-dev.txt && python -m pytest tests`.
 
 1. ~~Core hub, Kasa and Hue, native schedules~~ (done)
 2. ~~**Sign-in:** Google sign-in plus Face ID / Touch ID (passkeys), over HTTPS through Tailscale~~ (done)
-3. **More devices:** Leviton and Lennox (HomeKit), Leviton Matter and Nest Thermostat (Matter), LG TV, Sonos, Govee, Ring.
+3. **More devices:** ~~LG TV, Sonos, Govee (LAN)~~ (done). Next: Leviton and Lennox (HomeKit), Leviton Matter and Nest Thermostat (Matter), Ring.
 4. **Siri:** a "schedule" Shortcut that turns spoken requests into hub schedules, then a HomeKit bridge for direct Siri control.
 5. **Alexa and Google:** private skill and smart-home project, so both show the hub's names and rooms.
 6. **Govee private API** investigation for timers.

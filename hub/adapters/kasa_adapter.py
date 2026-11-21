@@ -11,13 +11,16 @@ from kasa import Discover, Module
 
 from ..models import Device, HubError, Schedule, ScheduleIn, StateIn
 from ..schedule_codec import build_kasa_rule, parse_kasa_rule
+from .base import Adapter
 
 log = logging.getLogger(__name__)
 REDISCOVER_SECONDS = 300
 
 
-class KasaAdapter:
+class KasaAdapter(Adapter):
     brand = "kasa"
+    label = "Kasa"
+    prefixes = ("kasa",)
 
     def __init__(self) -> None:
         self._devs: dict[str, KasaDevice] = {}
@@ -25,6 +28,12 @@ class KasaAdapter:
         self._locks: dict[str, asyncio.Lock] = {}
         self._last_discovery = 0.0
         self._discovering = asyncio.Lock()
+
+    async def start(self) -> None:
+        asyncio.create_task(self.discover())
+
+    async def status(self) -> dict:
+        return {"devices": len(self._devs)}
 
     # Discovery and state
     async def discover(self) -> None:
@@ -81,7 +90,7 @@ class KasaAdapter:
             online=self._online.get(did, True),
             on=dev.is_on,
             brightness=dev.modules[Module.Light].brightness if dimmer else None,
-            capabilities=["onoff", "brightness"] if dimmer else ["onoff"],
+            capabilities=["onoff", "brightness", "schedule"] if dimmer else ["onoff", "schedule"],
         )
 
     async def devices(self) -> list[Device]:

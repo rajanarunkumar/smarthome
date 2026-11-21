@@ -23,7 +23,7 @@ class Device(BaseModel):
     brand: str
     name: str
     model: str | None = None
-    kind: Literal["plug", "dimmer", "light"]
+    kind: Literal["plug", "dimmer", "light", "speaker", "tv"]
     room_id: int | None = None
     online: bool = True
     on: bool | None = None
@@ -32,6 +32,13 @@ class Device(BaseModel):
     mirek: int | None = None
     mirek_min: int | None = None
     mirek_max: int | None = None
+    # Speakers and TVs
+    volume: int | None = None
+    muted: bool | None = None
+    playing: bool | None = None
+    media: str | None = None           # what's playing, or the TV's current app
+    source: str | None = None          # current input / app id
+    sources: list[dict[str, str]] = []  # [{"id": ..., "label": ...}]
     capabilities: list[str] = []
 
 
@@ -40,6 +47,10 @@ class StateIn(BaseModel):
     brightness: int | None = Field(None, ge=1, le=100)
     color: str | None = Field(None, pattern=HEX)
     mirek: int | None = Field(None, ge=50, le=1000)
+    volume: int | None = Field(None, ge=0, le=100)
+    muted: bool | None = None
+    playback: Literal["play", "pause", "next", "previous"] | None = None
+    source: str | None = Field(None, min_length=1, max_length=128)
 
 
 class DevicePatch(BaseModel):

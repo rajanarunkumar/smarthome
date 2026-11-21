@@ -21,6 +21,10 @@ class Store:
                 device_id TEXT PRIMARY KEY,
                 room_id   INTEGER REFERENCES rooms(id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS device_names (
+                device_id TEXT PRIMARY KEY,
+                name      TEXT NOT NULL
+            );
             """
         )
         self.db.commit()
@@ -65,4 +69,17 @@ class Store:
                 "ON CONFLICT(device_id) DO UPDATE SET room_id = excluded.room_id",
                 (device_id, room_id),
             )
+        self.db.commit()
+
+    # Names for brands that can't store a name themselves (Govee LAN, LG TV)
+    def device_names(self) -> dict[str, str]:
+        rows = self.db.execute("SELECT device_id, name FROM device_names")
+        return {r["device_id"]: r["name"] for r in rows}
+
+    def set_device_name(self, device_id: str, name: str) -> None:
+        self.db.execute(
+            "INSERT INTO device_names (device_id, name) VALUES (?, ?) "
+            "ON CONFLICT(device_id) DO UPDATE SET name = excluded.name",
+            (device_id, name.strip()),
+        )
         self.db.commit()

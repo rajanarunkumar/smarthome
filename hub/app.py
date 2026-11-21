@@ -14,8 +14,12 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .adapters.base import Adapter
+from .adapters.govee_adapter import GoveeAdapter
 from .adapters.hue_adapter import HueAdapter
 from .adapters.kasa_adapter import KasaAdapter
+from .adapters.lgtv_adapter import LgTvAdapter
+from .adapters.sonos_adapter import SonosAdapter
 from .auth import SESSION_COOKIE, Auth
 from .config import Secrets, data_dir
 from .models import Device, DevicePatch, HubError, Schedule, ScheduleIn, StateIn
@@ -33,17 +37,20 @@ class Hub:
         self.auth = Auth(self.secrets, self.store.db)
         self.kasa = KasaAdapter()
         self.hue = HueAdapter(self.secrets)
+        self.sonos = SonosAdapter()
+        self.govee = GoveeAdapter()
+        self.lgtv = LgTvAdapter(self.secrets)
+        self.adapters: list[Adapter] = [self.kasa, self.hue, self.sonos, self.govee, self.lgtv]
+        self._by_prefix = {p: a for a in self.adapters for p in a.prefixes}
 
-    def adapter_for(self, item_id: str):
-        prefix = item_id.split(":", 1)[0]
-        if prefix == "kasa":
-            return self.kasa
-        if prefix in {"hue", "huev1", "hueapp"}:
-            return self.hue
-        raise HubError(404, f"Unknown item {item_id}")
+    def adapter_for(self, item_id: str) -> Adapter:
+        adapter = self._by_prefix.get(item_id.split(":", 1)[0])
+        if adapter is None:
+            raise HubError(404, f"Unknown item {item_id}")
+        return adapter
 
-    def active_adapters(self):
-        return [self.kasa] + ([self.hue] if self.hue.paired else [])
+    def active_adapters(self) -> list[Adapter]:
+        return [a for a in self.adapters if a.active]
 
     async def devices(self) -> tuple[list[Device], list[str]]:
         adapters = self.active_adapters()
@@ -58,8 +65,10 @@ class Hub:
                 devices.extend(result)
         self._import_hue_rooms()
         rooms = self.store.room_map()
+        local_names = self.store.device_names()
         for d in devices:
             d.room_id = rooms.get(d.id)
+            d.name = local_names.get(d.id, d.name)
         devices.sort(key=lambda d: d.name.lower())
         return devices, errors
 
@@ -73,17 +82,24 @@ class Hub:
             self.store.set_device_room(hub_id, room["id"])
 
     def device_names(self) -> dict[str, str]:
-        return {**self.kasa.names(), **self.hue.names()}
+        names: dict[str, str] = {}
+        for adapter in self.adapters:
+            names.update(adapter.names())
+        return {**names, **self.store.device_names()}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     hub = Hub()
     app.state.hub = hub
-    asyncio.create_task(hub.kasa.discover())
+    for adapter in hub.adapters:
+        try:
+            await adapter.start()
+        except Exception as exc:  # noqa: BLE001 - one brand failing must not stop the hub
+            log.warning("%s did not start: %s", adapter.label, exc)
     yield
-    await hub.kasa.close()
-    await hub.hue.close()
+    for adapter in hub.adapters:
+        await adapter.close()
 
 
 app = FastAPI(title="Smart home hub", lifespan=lifespan)
@@ -156,9 +172,9 @@ async def health():
 @app.get("/api/status")
 async def status(request: Request):
     hub = hub_of(request)
+    brands = await asyncio.gather(*(a.status() for a in hub.adapters))
     return {
-        "hue": await hub.hue.status(),
-        "kasa": {"devices": len(hub.kasa.names())},
+        **{a.brand: s for a, s in zip(hub.adapters, brands)},
         "user": (request.state.user or {}).get("email"),
     }
 
@@ -182,7 +198,12 @@ async def patch_device(request: Request, device_id: str, patch: DevicePatch):
     hub = hub_of(request)
     if "name" in patch.model_fields_set and patch.name:
         # Names are written back to the brand, so its own app shows the same name.
-        await hub.adapter_for(device_id).rename(device_id, patch.name.strip())
+        # Brands without a rename API keep the name in the hub instead.
+        adapter = hub.adapter_for(device_id)
+        if adapter.can_rename:
+            await adapter.rename(device_id, patch.name.strip())
+        else:
+            hub.store.set_device_name(device_id, patch.name)
     if "room_id" in patch.model_fields_set:
         if patch.room_id is not None and hub.store.room(patch.room_id) is None:
             raise HubError(404, "Unknown room")
@@ -235,7 +256,8 @@ async def set_room_state(request: Request, room_id: int, state: StateIn):
 @app.get("/api/scenes")
 async def list_scenes(request: Request):
     hub = hub_of(request)
-    return await hub.hue.scenes() if hub.hue.paired else []
+    results = await asyncio.gather(*(a.scenes() for a in hub.active_adapters()))
+    return [scene for scenes in results for scene in scenes]
 
 
 @app.post("/api/scenes/{scene_id}/activate")
@@ -399,6 +421,16 @@ async def logout(request: Request):
 @app.post("/api/hue/pair")
 async def pair_hue(request: Request):
     return await hub_of(request).hue.pair()
+
+
+# LG TV pairing
+class LgPairIn(BaseModel):
+    host: str | None = Field(None, pattern=r"^\d{1,3}(\.\d{1,3}){3}$")
+
+
+@app.post("/api/lgtv/pair")
+async def pair_lgtv(request: Request, body: LgPairIn = Body(LgPairIn())):
+    return await hub_of(request).lgtv.pair(body.host)
 
 
 app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")

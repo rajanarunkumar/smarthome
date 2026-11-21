@@ -166,3 +166,5 @@ button { cursor: pointer; }
   opacity: 0; pointer-events: none; transition: opacity .2s; max-width: calc(100% - 32px); z-index: 20;
 }
 .toast.show { opacity: 1; }
+
+.inline.media button { font-size: 20px; }

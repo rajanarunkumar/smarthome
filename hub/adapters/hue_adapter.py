@@ -19,6 +19,7 @@ from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZerocon
 from ..color import hex_to_xy, mirek_to_hex, xy_to_hex
 from ..config import Secrets
 from ..models import Device, HubError, Scene, Schedule, ScheduleIn, StateIn, Trigger
+from .base import Adapter
 from ..schedule_codec import HUB_MARK, build_hue_schedule, parse_hue_command, parse_hue_localtime
 
 log = logging.getLogger(__name__)
@@ -50,8 +51,10 @@ async def discover_bridges(timeout: float = 4.0) -> list[dict]:
     return list(found.values())
 
 
-class HueAdapter:
+class HueAdapter(Adapter):
     brand = "hue"
+    label = "Hue"
+    prefixes = ("hue", "huev1", "hueapp")
 
     def __init__(self, secrets: Secrets) -> None:
         self.secrets = secrets
@@ -65,6 +68,10 @@ class HueAdapter:
     @property
     def config(self) -> dict:
         return self.secrets.get("hue") or {}
+
+    @property
+    def active(self) -> bool:
+        return self.paired
 
     @property
     def paired(self) -> bool:
@@ -162,7 +169,7 @@ class HueAdapter:
             if owner_id in room_of_device:
                 self.room_hints[hub_id] = room_of_device[owner_id]
 
-            caps = ["onoff"]
+            caps = ["onoff", "schedule"]
             ct = light.get("color_temperature") or {}
             schema = ct.get("mirek_schema") or {}
             color = None

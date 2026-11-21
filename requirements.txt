@@ -5,3 +5,5 @@ python-kasa>=0.12
 zeroconf>=0.150
 webauthn>=2.0
 pyjwt[crypto]>=2.8
+soco>=0.30
+aiowebostv>=1.0; python_version >= "3.12"  # LG TV support

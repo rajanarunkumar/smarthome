@@ -14,7 +14,9 @@ const view = $("#view");
 const sheet = $("#sheet");
 const DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const DAY_LABEL = { mon: "Mon", tue: "Tue", wed: "Wed", thu: "Thu", fri: "Fri", sat: "Sat", sun: "Sun" };
-const BRAND = { kasa: "Kasa", hue: "Hue" };
+const BRAND = { kasa: "Kasa", hue: "Hue", sonos: "Sonos", lg: "LG", govee: "Govee" };
+// These brands have no rename API, so the hub keeps the name.
+const HUB_NAMED = new Set(["govee", "lg"]);
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -51,7 +53,7 @@ function debounce(fn, ms) {
 function setSync(text) { $("#sync").textContent = text; }
 
 // ---------- state ----------
-const state = { tab: "rooms", devices: [], rooms: [], scenes: [], schedules: [], errors: [], hue: null, signedIn: false, me: null, passkeys: [] };
+const state = { tab: "rooms", devices: [], rooms: [], scenes: [], schedules: [], errors: [], hue: null, status: null, signedIn: false, me: null, passkeys: [] };
 
 async function loadDevices() {
   const data = await api("GET", "/api/devices");
@@ -86,7 +88,8 @@ async function render(fetch = false) {
     }
     if (state.tab === "settings") {
       if (fetch) {
-        state.hue = (await api("GET", "/api/status")).hue;
+        state.status = await api("GET", "/api/status");
+        state.hue = state.status.hue;
         state.passkeys = state.me?.email ? await api("GET", "/api/auth/passkeys") : [];
         await loadDevices();
       }
@@ -105,6 +108,8 @@ function errorsHtml() {
 function deviceSub(d) {
   const parts = [BRAND[d.brand] || d.brand];
   if (!d.online) parts.push("Not responding");
+  else if (d.kind === "speaker") parts.push(d.playing ? (d.media ? `Playing ${d.media}` : "Playing") : "Paused");
+  else if (d.kind === "tv") parts.push(d.on ? (d.media ? `On · ${d.media}` : "On") : "Off");
   else if (d.on && d.brightness) parts.push(`${d.brightness}%`);
   else parts.push(d.on ? "On" : "Off");
   return parts.join(" · ");
@@ -119,7 +124,7 @@ function deviceRow(d) {
         <span class="name">${esc(d.name)}</span>
         <span class="sub">${esc(deviceSub(d))}</span>
       </button>
-      <label class="switch" aria-label="${esc(d.name)} power">
+      <label class="switch" aria-label="${esc(d.name)} ${d.kind === "speaker" ? "play" : "power"}">
         <input type="checkbox" data-power="${esc(d.id)}" ${d.on ? "checked" : ""} ${d.online ? "" : "disabled"}>
         <span></span>
       </label>
@@ -145,7 +150,7 @@ function renderRooms() {
       <div class="card">${unassigned.map(deviceRow).join("")}</div>
       <p class="note">Tap a device to rename it or put it in a room.</p>`;
   }
-  if (!state.devices.length) html = `<p class="empty">Looking for devices… Kasa plugs appear on their own; pair the Hue Bridge in Settings.</p>`;
+  if (!state.devices.length) html = `<p class="empty">Looking for devices… Kasa, Sonos and Govee appear on their own; pair the Hue Bridge and LG TV in Settings.</p>`;
   view.innerHTML = html + errorsHtml();
 }
 
@@ -196,9 +201,21 @@ function openDevice(id) {
     .join("");
   const caps = new Set(d.capabilities);
   openSheet(d.name, `
-    <label class="field"><span>Name (also changes it in the ${esc(BRAND[d.brand] || d.brand)} app)</span>
+    <label class="field"><span>${HUB_NAMED.has(d.brand) ? "Name" : `Name (also changes it in the ${esc(BRAND[d.brand] || d.brand)} app)`}</span>
       <input type="text" id="f-name" value="${esc(d.name)}" maxlength="32"></label>
     <label class="field"><span>Room</span><select id="f-room">${roomOptions}</select></label>
+    ${caps.has("playback") && d.on !== false || d.kind === "speaker" ? `<div class="field"><span>${esc(d.media || (d.kind === "tv" ? "TV" : "Nothing playing"))}</span>
+      <div class="inline media">
+        <button class="pill" data-play="previous" aria-label="Previous">⏮</button>
+        <button class="pill primary" data-play="${d.playing ? "pause" : "play"}" aria-label="Play or pause">${d.playing ? "⏸" : "▶"}</button>
+        <button class="pill" data-play="next" aria-label="Next">⏭</button>
+      </div></div>` : ""}
+    ${caps.has("volume") && d.volume != null ? `<label class="field"><span>Volume <b id="f-vol-v">${d.volume}</b></span>
+      <input type="range" id="f-vol" min="0" max="100" value="${d.volume}"></label>` : ""}
+    ${caps.has("mute") && d.muted != null ? `<label class="field inline"><span>Mute</span>
+      <span class="switch"><input type="checkbox" id="f-mute" ${d.muted ? "checked" : ""}><span></span></span></label>` : ""}
+    ${caps.has("source") && d.sources.length ? `<label class="field"><span>Input or app</span><select id="f-src">
+      ${d.source ? "" : `<option value="">Choose…</option>`}${d.sources.map((x) => `<option value="${esc(x.id)}" ${x.id === d.source ? "selected" : ""}>${esc(x.label)}</option>`).join("")}</select></label>` : ""}
     ${caps.has("brightness") ? `<label class="field"><span>Brightness <b id="f-bri-v">${d.brightness ?? 100}%</b></span>
       <input type="range" id="f-bri" min="1" max="100" value="${d.brightness ?? 100}"></label>` : ""}
     ${caps.has("color") ? `<label class="field"><span>Color</span><input type="color" id="f-color" value="${esc(d.color || "#ffffff")}"></label>` : ""}
@@ -228,6 +245,23 @@ function openDevice(id) {
   });
   $("#f-color", sheet)?.addEventListener("input", (e) => send({ color: e.target.value }));
   $("#f-ct", sheet)?.addEventListener("input", (e) => send({ mirek: Number(e.target.value) }));
+  $("#f-vol", sheet)?.addEventListener("input", (e) => {
+    $("#f-vol-v", sheet).textContent = e.target.value;
+    send({ volume: Number(e.target.value) });
+  });
+  $("#f-mute", sheet)?.addEventListener("change", (e) => send({ muted: e.target.checked }));
+  $("#f-src", sheet)?.addEventListener("change", (e) => e.target.value && send({ source: e.target.value }));
+  sheet.querySelectorAll("[data-play]").forEach((btn) => btn.addEventListener("click", async () => {
+    const playback = btn.dataset.play;
+    try {
+      await api("POST", `/api/devices/${encodeURIComponent(id)}/state`, { playback });
+      if (playback === "play" || playback === "pause") {
+        d.playing = playback === "play";
+        btn.dataset.play = d.playing ? "pause" : "play";
+        btn.textContent = d.playing ? "⏸" : "▶";
+      }
+    } catch (err) { toast(err.message); }
+  }));
 }
 
 // ---------- scenes ----------
@@ -325,7 +359,7 @@ view.addEventListener("click", async (e) => {
 });
 
 function openNewSchedule() {
-  const devices = state.devices.filter((d) => d.online);
+  const devices = state.devices.filter((d) => d.online && d.capabilities.includes("schedule"));
   openSheet("New schedule", `
     <label class="field"><span>Name</span><input type="text" id="s-name" value="Schedule" maxlength="32"></label>
     <div class="field"><span>Devices</span><div class="chips">${devices.map((d) => `
@@ -339,7 +373,7 @@ function openNewSchedule() {
       <input type="number" id="s-offset" value="0" min="-180" max="180" title="Minutes after (negative for before)" hidden></div></div>
     <div class="field"><span>Days</span><div class="chips">${DAYS.map((d) => `
       <label class="chip"><input type="checkbox" name="s-day" value="${d}" checked><span>${DAY_LABEL[d]}</span></label>`).join("")}</div></div>
-    <p class="note">Kasa plugs support times, sunrise and sunset. The Hue Bridge supports set times.</p>
+    <p class="note">Kasa plugs support times, sunrise and sunset. The Hue Bridge supports set times. Sonos, LG and Govee schedules aren't supported yet.</p>
     <button class="pill primary" id="s-save">Save schedule</button>`);
 
   const type = $("#s-type", sheet);
@@ -375,6 +409,8 @@ function openNewSchedule() {
 // ---------- settings ----------
 function renderSettings() {
   const hue = state.hue || {};
+  const lg = state.status?.lg || {};
+  const count = (brand) => state.status?.[brand]?.devices ?? 0;
   const fmtDate = (s) => s ? new Date(s * 1000).toLocaleDateString() : "never";
   const keys = state.passkeys.map((p) => `
       <div class="row"><div class="main">
@@ -399,6 +435,21 @@ function renderSettings() {
       <span class="sub">${hue.paired ? "Lights, scenes and schedules are available." : "Press the round button on the bridge, then tap Pair."}</span>
     </div><button class="pill ${hue.paired ? "" : "primary"}" id="hue-pair">${hue.paired ? "Pair again" : "Pair"}</button></div></div>
 
+    <div class="section-title"><span>LG TV</span></div>
+    <div class="card"><div class="row"><div class="main">
+      <span class="name">${lg.paired ? `Connected${lg.model ? ` (${esc(lg.model)})` : ""}` : "Not connected"}</span>
+      <span class="sub">${lg.available === false ? "Needs Python 3.12 on the hub Mac. See the README."
+        : lg.paired ? (lg.wake_on_lan ? "The hub can turn the TV on and off." : "The hub can turn the TV off. To turn it on too, connect again while the TV is on.")
+        : "Turn the TV on, tap Connect, then choose Accept on the TV with the remote within 30 seconds."}</span>
+    </div>${lg.available === false ? "" : `<button class="pill ${lg.paired ? "" : "primary"}" id="lg-pair">${lg.paired ? "Connect again" : "Connect"}</button>`}</div></div>
+
+    <div class="section-title"><span>Found automatically</span></div>
+    <div class="card">
+      <div class="row"><div class="main"><span class="name">Kasa</span><span class="sub">${count("kasa")} plug(s) and dimmer(s)</span></div></div>
+      <div class="row"><div class="main"><span class="name">Sonos</span><span class="sub">${count("sonos")} speaker(s)</span></div></div>
+      <div class="row"><div class="main"><span class="name">Govee</span><span class="sub">${count("govee")} light(s). A light only shows up after you turn on <b>LAN Control</b> for it in the Govee app.</span></div></div>
+    </div>
+
     <div class="section-title"><span>Rooms</span></div>
     <div class="card">${state.rooms.map((r) => `
       <div class="row">
@@ -421,6 +472,15 @@ function renderSettings() {
     e.target.disabled = true;
     try { await api("POST", "/api/hue/pair"); toast("Hue Bridge paired"); render(true); }
     catch (err) { toast(err.message); e.target.disabled = false; }
+  });
+  $("#lg-pair")?.addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    e.target.textContent = "Accept on the TV…";
+    try {
+      const r = await api("POST", "/api/lgtv/pair", {});
+      toast(r.wake_on_lan ? "LG TV connected" : "LG TV connected (turning it on needs another Connect while it's on)");
+      render(true);
+    } catch (err) { toast(err.message); e.target.disabled = false; e.target.textContent = "Connect"; }
   });
   $("#add-room").addEventListener("click", async () => {
     const name = $("#new-room").value.trim();
