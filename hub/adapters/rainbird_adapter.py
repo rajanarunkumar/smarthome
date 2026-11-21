@@ -80,6 +80,52 @@ def zone_schedule_dict(zs: Any) -> dict:
     }
 
 
+def _runs_on(freq: str, days_of_week, day) -> bool:
+    if freq == "CUSTOM":
+        return DAY_NAMES[day.weekday()] in {d.name for d in (days_of_week or [])}
+    if freq == "ODD":
+        return day.day % 2 == 1 and day.day != 31
+    if freq == "EVEN":
+        return day.day % 2 == 0
+    return False  # cyclic and off programs can't be placed on past dates reliably
+
+
+def scheduled_runs(schedule: Any, first_day, last_day, adjust_pct: int = 100) -> list[dict]:
+    """Runs the controller's programs would have made between two dates (inclusive).
+
+    Program-based controllers run a program's zones back to back from each start
+    time; zone-scheduled ones (ESP-RZXe) run each zone at its own starts.
+    Seasonal adjust scales the minutes, as on the controller.
+    """
+    runs = []
+    day = first_day
+    while day <= last_day:
+        for program in getattr(schedule, "programs", None) or []:
+            freq = getattr(program.frequency, "name", str(program.frequency))
+            if not _runs_on(freq, program.days_of_week, day):
+                continue
+            for start in program.starts or []:
+                if start is None:
+                    continue
+                t = datetime.combine(day, start)
+                for zd in program.durations or []:
+                    minutes = zd.duration.total_seconds() / 60 * adjust_pct / 100
+                    if minutes >= 1:
+                        runs.append({"started": t.isoformat(timespec="minutes"), "zone": zd.zone, "minutes": round(minutes, 1)})
+                        t += timedelta(minutes=minutes)
+        for zone, zs in (getattr(schedule, "zone_schedules", None) or {}).items():
+            freq = getattr(zs.frequency, "name", str(zs.frequency))
+            minutes = zs.duration.total_seconds() / 60
+            if minutes < 1 or not _runs_on(freq, zs.days_of_week, day):
+                continue
+            for start in zs.starts or []:
+                if start is not None:
+                    runs.append({"started": datetime.combine(day, start).isoformat(timespec="minutes"),
+                                 "zone": zone, "minutes": round(minutes, 1)})
+        day += timedelta(days=1)
+    return runs
+
+
 def status_text(state: Any, zone_label) -> str:
     if state.irrigation_state and state.active_station:
         left = f" · {max(1, round(state.remaining_runtime / 60))} min left" if state.remaining_runtime else ""
@@ -110,6 +156,7 @@ class RainBirdAdapter(Adapter):
         self._programs_at = float("-inf")
         self._program_ids: list[int] = []
         self._zone_scheds: dict[int, dict] = {}
+        self._schedule_raw: Any = None
         self._lock = asyncio.Lock()
         # Watering log: called with (started, zone, minutes, source) when a run ends.
         self.on_run: Callable[[datetime, int, float, str], None] | None = None
@@ -210,6 +257,7 @@ class RainBirdAdapter(Adapter):
             if now - self._programs_at > SCHEDULE_SECONDS:
                 try:
                     schedule = await ctl.get_schedule()
+                    self._schedule_raw = schedule
                     self._programs = [p for p in (describe_program(x) for x in schedule.programs) if p]
                     self._program_ids = [x.program for x in schedule.programs if describe_program(x)]
                     self._zone_scheds = {z: zone_schedule_dict(zs) for z, zs in (schedule.zone_schedules or {}).items()}
@@ -268,6 +316,14 @@ class RainBirdAdapter(Adapter):
         except RainbirdApiException as exc:
             raise HubError(502, f"The controller didn't accept that: {exc}") from exc
         self._state_at = float("-inf")  # never
+
+    async def past_runs(self, first_day, last_day) -> list[dict]:
+        """What the controller's programs would have run on past days (for the 4-week backfill)."""
+        await self._refresh()
+        if self._schedule_raw is None:
+            return []
+        adjust = getattr(self._state, "seasonal_adjust", 100) or 100
+        return scheduled_runs(self._schedule_raw, first_day, last_day, adjust)
 
     def set_zone_area(self, zone: int, area_sqft: float | None) -> None:
         cfg = dict(self.config)

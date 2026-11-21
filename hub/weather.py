@@ -45,13 +45,15 @@ async def daily(latitude: float, longitude: float, client: httpx.AsyncClient | N
                 past_days: int = 92) -> list[dict]:
     params = {
         "latitude": latitude, "longitude": longitude, "timezone": "auto",
-        "daily": "precipitation_sum,et0_fao_evapotranspiration,temperature_2m_max",
+        "daily": "precipitation_sum,et0_fao_evapotranspiration,temperature_2m_max,temperature_2m_mean",
         "past_days": past_days, "forecast_days": 3, "precipitation_unit": "inch", "temperature_unit": "fahrenheit",
     }
     owns = client is None
     client = client or httpx.AsyncClient(timeout=20)
     try:
         r = await client.get(FORECAST_URL, params=params)
+        if r.status_code == 429:
+            raise HubError(429, "The weather service is busy. The hub tries again in 3 hours.")
         r.raise_for_status()
         data = r.json()["daily"]
     except (httpx.HTTPError, KeyError, ValueError) as exc:
@@ -60,6 +62,7 @@ async def daily(latitude: float, longitude: float, client: httpx.AsyncClient | N
         if owns:
             await client.aclose()
     today = date.today().isoformat()
-    return [{"day": d, "rain_in": rain, "et0_in": et0, "tmax_f": tmax, "forecast": int(d > today)}
-            for d, rain, et0, tmax in zip(data["time"], data["precipitation_sum"],
-                                          data["et0_fao_evapotranspiration"], data["temperature_2m_max"])]
+    means = data.get("temperature_2m_mean") or [None] * len(data["time"])
+    return [{"day": d, "rain_in": rain, "et0_in": et0, "tmax_f": tmax, "tmean_f": tmean, "forecast": int(d > today)}
+            for d, rain, et0, tmax, tmean in zip(data["time"], data["precipitation_sum"],
+                                                 data["et0_fao_evapotranspiration"], data["temperature_2m_max"], means)]

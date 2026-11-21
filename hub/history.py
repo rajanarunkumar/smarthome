@@ -36,6 +36,9 @@ class HistoryStore:
                 day TEXT PRIMARY KEY, rain_in REAL, et0_in REAL, tmax_f REAL, forecast INTEGER NOT NULL DEFAULT 0);
             """
         )
+        columns = {r[1] for r in db.execute("PRAGMA table_info(weather)")}
+        if "tmean_f" not in columns:  # added for the energy analytics
+            db.execute("ALTER TABLE weather ADD COLUMN tmean_f REAL")
         db.commit()
 
     # Writing
@@ -58,10 +61,24 @@ class HistoryStore:
 
     def put_weather(self, rows: Iterable[dict]) -> None:
         self.db.executemany(
-            "INSERT INTO weather (day, rain_in, et0_in, tmax_f, forecast) VALUES (:day, :rain_in, :et0_in, :tmax_f, :forecast) "
+            "INSERT INTO weather (day, rain_in, et0_in, tmax_f, tmean_f, forecast) "
+            "VALUES (:day, :rain_in, :et0_in, :tmax_f, :tmean_f, :forecast) "
             "ON CONFLICT(day) DO UPDATE SET rain_in = excluded.rain_in, et0_in = excluded.et0_in, "
-            "tmax_f = excluded.tmax_f, forecast = excluded.forecast", list(rows))
+            "tmax_f = excluded.tmax_f, tmean_f = excluded.tmean_f, forecast = excluded.forecast",
+            [{"tmean_f": None, **r} for r in rows])
         self.db.commit()
+
+    def replace_inferred(self, runs: list[dict], first_day: date, last_day: date) -> None:
+        """Swap in runs reconstructed from the controller's programs for days before the hub was watching."""
+        self.db.execute("DELETE FROM watering WHERE source = 'inferred' AND started >= ? AND started < ?",
+                        (first_day.isoformat(), (last_day + timedelta(days=1)).isoformat()))
+        self.db.executemany("INSERT INTO watering (started, zone, minutes, source) VALUES (?, ?, ?, 'inferred')",
+                            [(r["started"], r["zone"], r["minutes"]) for r in runs])
+        self.db.commit()
+
+    def first_observed_run(self) -> str | None:
+        row = self.db.execute("SELECT MIN(started) AS m FROM watering WHERE source != 'inferred'").fetchone()
+        return row["m"] if row else None
 
     # Reading
     def runs(self, since: date) -> list[dict]:
@@ -159,6 +176,19 @@ def zone_flow(runs: list[dict], hourly: dict[str, float], min_samples: int = 3) 
     if solution is None:
         return {}
     return {z: {"gpm": round(g, 1), "samples": counts[z]} for z, g in zip(zones, solution) if g > 0.2}
+
+
+def confirm_with_meter(runs: list[dict], hourly: dict[str, float], min_extra_gallons: float = 10.0) -> list[dict]:
+    """Keep reconstructed runs only where the water meter shows extra water in that hour.
+
+    Rain delays, the rain sensor and manual stops don't leave a record on the
+    controller, so a program that "should" have run may not have. Hours with no
+    meter data aren't kept either.
+    """
+    by_hour = minutes_by_hour(runs)
+    baseline = baseline_by_hour_of_day(hourly, set(by_hour))
+    good_hours = {h for h in by_hour if h in hourly and hourly[h] - baseline[int(h[11:13])] >= min_extra_gallons}
+    return [r for r in runs if datetime.fromisoformat(r["started"]).strftime("%Y-%m-%dT%H") in good_hours]
 
 
 def daily_series(days: list[str], runs: list[dict], water_daily: dict[str, float], weather: dict[str, dict],

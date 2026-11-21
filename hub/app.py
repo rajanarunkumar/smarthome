@@ -31,7 +31,8 @@ from .adapters.water_adapter import WaterAdvisorAdapter
 from .auth import SESSION_COOKIE, Auth
 from .config import Secrets, data_dir
 from . import weather as weather_api
-from .history import HistoryStore, build_insights
+from .energy import EnergyStore, build_energy
+from .history import HistoryStore, build_insights, confirm_with_meter
 from .irrigation import SmartPrograms
 from .scheduler import HubScheduler
 from .models import DAYS, Device, DevicePatch, HubError, Schedule, ScheduleIn, StateIn
@@ -69,39 +70,87 @@ class Hub:
         self.history = HistoryStore(self.store.db)
         self.rainbird.on_run = self.history.log_run
         self.irrigation = SmartPrograms(self.store.db, self.history, self.rainbird)
+        self.energy = EnergyStore(self.store.db)
         self._collector: asyncio.Task | None = None
+        self._recorder: asyncio.Task | None = None
 
-    async def collect_once(self) -> list[str]:
-        """Pull weather and water history into the database. Returns what failed, if anything."""
-        problems = []
+    async def collect_once(self, days: int = 3) -> dict:
+        """Pull weather, water, electricity and past sprinkler runs into the database.
+
+        `days` is how far back to fetch water and electricity (28 for the 4-week
+        backfill). Returns counts of what was stored and anything that failed.
+        """
+        from datetime import date, timedelta
+
+        report: dict = {"problems": []}
+        problems = report["problems"]
         location = self.secrets.get("location")
         if location:
             try:
-                self.history.put_weather(await weather_api.daily(location["latitude"], location["longitude"]))
+                rows = await weather_api.daily(location["latitude"], location["longitude"])
+                self.history.put_weather(rows)
+                report["weather_days"] = len(rows)
             except HubError as exc:
-                problems.append(f"weather: {exc.message}")
+                problems.append(f"Weather: {exc.message}")
         if self.water.active:
             try:
-                daily, hourly = await self.water.history(days=14)
+                daily, hourly = await self.water.history(days=days)
                 self.history.put_water_daily(daily)
                 self.history.put_water_hourly(hourly)
+                report["water_days"], report["water_hours"] = len(daily), len(hourly)
             except HubError as exc:
-                problems.append(f"water: {exc.message}")
-        return problems
+                problems.append(f"Water: {exc.message}")
+        if self.smt.active:
+            try:
+                have = self.energy.interval_days(date.today() - timedelta(days=days + 1))
+                rows = await self.smt.intervals(days=days, have=have)
+                self.energy.put_intervals(rows)
+                report["energy_slots"] = len(rows)
+            except HubError as exc:
+                problems.append(f"Electricity: {exc.message}")
+            except Exception as exc:  # noqa: BLE001 - the library raises its own errors
+                problems.append(f"Electricity: {exc}")
+        if self.rainbird.active:
+            try:
+                first = date.today() - timedelta(days=28)
+                observed = self.history.first_observed_run()
+                last = (date.fromisoformat(observed[:10]) if observed else date.today()) - timedelta(days=1)
+                if last >= first:
+                    hourly = self.history.water_hourly(first)
+                    runs = confirm_with_meter(await self.rainbird.past_runs(first, last), hourly) if hourly else []
+                    self.history.replace_inferred(runs, first, last)
+                    report["sprinkler_runs_reconstructed"] = len(runs)
+            except Exception as exc:  # noqa: BLE001
+                problems.append(f"Sprinkler history: {exc}")
+        return report
 
     async def _collect_loop(self) -> None:
+        days = 28  # first pass after start: the 4-week backfill
         while True:
             try:
-                problems = await self.collect_once()
-                for p in problems:
+                report = await self.collect_once(days=days)
+                for p in report["problems"]:
                     log.warning("History: %s", p)
+                days = 3
             except Exception as exc:  # noqa: BLE001
                 log.warning("History collector: %s", exc)
             await asyncio.sleep(3 * 3600)
 
+    async def _record_loop(self) -> None:
+        """Every 2 minutes, note which devices are running, for the energy analytics."""
+        from datetime import datetime
+        while True:
+            await asyncio.sleep(120)
+            try:
+                devices, _ = await self.devices()
+                self.energy.observe(devices, datetime.now())
+            except Exception as exc:  # noqa: BLE001
+                log.debug("Activity recorder: %s", exc)
+
     def start_background(self) -> None:
         self.irrigation.start()
         self._collector = asyncio.create_task(self._collect_loop())
+        self._recorder = asyncio.create_task(self._record_loop())
         self._by_prefix = {p: a for a in self.adapters for p in a.prefixes}
 
     async def _apply(self, device_id: str, state: StateIn) -> None:
@@ -165,8 +214,9 @@ async def lifespan(app: FastAPI):
     hub.start_background()
     yield
     hub.irrigation.close()
-    if hub._collector:
-        hub._collector.cancel()
+    for task in (hub._collector, hub._recorder):
+        if task:
+            task.cancel()
     for adapter in hub.adapters:
         await adapter.close()
 
@@ -741,17 +791,34 @@ async def set_location(request: Request, body: LocationIn):
     hub = hub_of(request)
     location = await weather_api.geocode(body.query)
     hub.secrets.set("location", location)
-    problems = await hub.collect_once()
-    return {**location, "problems": problems}
+    report = await hub.collect_once()
+    return {**location, "problems": report["problems"]}
 
 
 @app.post("/api/insights/refresh")
 async def refresh_insights(request: Request):
-    return {"problems": await hub_of(request).collect_once()}
+    return await hub_of(request).collect_once()
+
+
+@app.post("/api/backfill")
+async def backfill(request: Request):
+    """Fetch the last 4 weeks of water, electricity, weather and sprinkler history now."""
+    return await hub_of(request).collect_once(days=28)
+
+
+@app.get("/api/energy")
+async def energy(request: Request, days: int = 28):
+    from datetime import date, timedelta
+    hub = hub_of(request)
+    days = max(7, min(days, 90))
+    weather = hub.history.weather(date.today() - timedelta(days=days + 1))
+    tmean = {d: w.get("tmean_f") if w.get("tmean_f") is not None else
+             ((w["tmax_f"] - 10) if w.get("tmax_f") is not None else None) for d, w in weather.items()}
+    return build_energy(hub.energy, tmean, days)
 
 
 @app.get("/api/insights")
-async def insights(request: Request, days: int = 30):
+async def insights(request: Request, days: int = 28):
     hub = hub_of(request)
     days = max(7, min(days, 90))
     data = build_insights(hub.history, hub.rainbird.zone_label, hub.rainbird.zone_areas(), days)

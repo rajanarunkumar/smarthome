@@ -133,6 +133,32 @@ Tests: `pip install -r requirements-dev.txt && python -m pytest tests`.
 
 Kasa and Hue schedules are saved on the plug or bridge and run even when the Mac is off. Every other device with an on/off (the Pentair pump, Govee, Dyson, Sonos, the LG TV, Ecovacs) can now be scheduled too, at set times. Those schedules run **in the hub**, so the Mac must be awake: System Settings → Energy → turn on "Prevent automatic sleeping when the display is off". The Schedules tab labels them **Hub (this Mac)**. Locks can't be scheduled.
 
+## Hooking up the accounts for water, electricity and sprinkler analytics
+
+Everything below is entered in the hub's **Settings** on your own Mac (from the iPad or iPhone over Tailscale). Passwords and keys stay in `~/.smarthome/secrets.json` on the Mac; never paste them into a chat.
+
+1. **TXU electricity → Smart Meter Texas.** TXU has no API, but your meter reports to Smart Meter Texas, the state's meter portal.
+   - Go to **smartmetertexas.com → Register → Residential customer**.
+   - You need three things from a TXU bill: the **ESI ID** (17–22 digits), the **meter number**, and your retail provider (**TXU Energy**).
+   - Then in the hub: **Settings → Smart Meter Texas**, with the Smart Meter Texas username and password (not your TXU login).
+2. **McKinney water → My Water Advisor 2.**
+   - Go to **mywateradvisor2.com** (or the "My Water Advisor 2.0" app) → **Join My Water Advisor** → sign up with your account number: all the digits **before the dash** on the water bill, and the account holder's name exactly as billed.
+   - Then in the hub: **Settings → McKinney water**, with that email and password.
+3. **Rain Bird.** **Settings → Rain Bird** with the controller's IP address (Rain Bird app → controller → Wi‑Fi, or your router's device list) and the **controller password** set in the Rain Bird app.
+4. **Washer, dryer, AC → LG ThinQ.** At **connect-pat.lgthinq.com**, sign in with your LG account → **Add new token** → tick every permission → paste it in **Settings → LG ThinQ appliances**, country **US**.
+5. **Pool pump → Pentair.** **Settings → Pentair** with the Pentair Home email and password.
+6. **Weather.** **Insights → Set your location**: enter the city, e.g. "McKinney, TX". City level is enough; the street address isn't needed and isn't sent anywhere.
+7. **Fetch history.** **Insights → Fetch last 4 weeks**. This pulls 28 days of hourly water, 15-minute electricity and weather, and replays your Rain Bird programs for those weeks (a replayed run is kept only if the water meter shows water in that hour, so rain-delay days drop out). It takes about a minute, mostly Smart Meter Texas. After that the hub tops up every 3 hours.
+
+What can't be backfilled: **device activity** (when the washer, dryer, pool pump, AC… ran). LG, Pentair and the others don't keep a history the hub can read, so the hub records it every 2 minutes from the moment it runs this version. Per-device power needs about 6 runs that line up with the meter; until then those devices show "learning". The water/sprinkler and HVAC/temperature analyses work on the backfilled weeks right away.
+
+## Electricity insights (Insights → Electricity)
+
+- **Per-device power (kW):** each 15-minute meter slot where tracked devices ran gives one equation: power above the nearby idle level (±2 hours, so the AC's slow drift is taken out) = Σ (share of the slot each device ran × its kW). A least-squares fit over all those slots separates the dryer, pool pump, AC units, plugs and so on.
+- **Heating and cooling:** daily kWh not explained by tracked devices is fitted to base + a × cooling degree-days + b × heating degree-days (65 °F balance point), with R² shown. The Lennox thermostat isn't connected yet; connecting it would replace the estimate with real run times.
+- **Always-on load:** the lowest 15-minute power between 1 and 5 AM.
+- **Spikes:** 15-minute slots far above normal (median + 6 × MAD, at least 3 kW), merged into events and labelled with whatever was running. Spikes with nothing tracked running are usually the AC or furnace starting, an oven or a water heater.
+
 ## Watering insights (Insights tab)
 
 The hub keeps three histories in `~/.smarthome/hub.db` and lines them up by day and hour:

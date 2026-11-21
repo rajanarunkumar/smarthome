@@ -123,6 +123,16 @@ def laundry_controls(profile: Any) -> dict | None:
     return out if out["key"] else None
 
 
+RUN_IDLE = {"POWER_OFF", "INITIAL", "END", "PAUSE", "SLEEP", "ERROR", "STANDBY", "DETECTING"}
+
+
+def cycle_running(status: Any) -> bool | None:
+    """True while a laundry cycle runs (for the energy analytics); None when unknown."""
+    states = [(p.get("runState") or {}).get("currentState") for p in _parts(status)]
+    states = [s for s in states if s]
+    return any(s not in RUN_IDLE for s in states) if states else None
+
+
 def remote_start_on(status: Any) -> bool:
     return any((p.get("remoteControlEnable") or {}).get("remoteControlEnabled") for p in _parts(status))
 
@@ -265,6 +275,7 @@ class ThinQAdapter(Adapter):
             if controls:
                 ready = remote_start_on(status)
                 extra = dict(
+                    on=cycle_running(status),
                     ready=ready,
                     actions=[{"id": m, "label": ACTION_LABELS[m]} for m in controls["modes"]],
                     delay_max=controls["delay"][1] if controls["delay"] else None,
@@ -272,9 +283,9 @@ class ThinQAdapter(Adapter):
             out.append(Device(
                 id=f"thinq:{dev_id}", brand=self.brand, kind="appliance",
                 name=info.get("alias") or label, model=f"{label} · {info.get('modelName') or ''}".strip(" ·"),
-                online=status is not None, on=power[1] if power else None, media=summarize(status),
+                online=status is not None, media=summarize(status),
                 capabilities=(["onoff"] if power else []) + (["actions"] if controls else []),
-                **extra,
+                **{"on": power[1] if power else None, **extra},
             ))
         return out
 

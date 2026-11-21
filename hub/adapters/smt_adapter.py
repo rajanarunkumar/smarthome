@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from ..config import Secrets
@@ -38,6 +39,18 @@ except ImportError:  # pragma: no cover
 
     class SmartMeterTexasAuthError(SmartMeterTexasAPIError):
         pass
+
+
+def parse_intervals(intervals: Any) -> list[tuple[str, float]]:
+    """[("MM/DD/YYYY H:MM", "kWh"), …] from smart-meter-texas -> [("YYYY-MM-DDTHH:MM", kWh)]."""
+    out = []
+    for item in intervals or []:
+        try:
+            when = datetime.strptime(item[0], "%m/%d/%Y %H:%M")
+            out.append((when.strftime("%Y-%m-%dT%H:%M"), float(item[1])))
+        except (TypeError, ValueError, IndexError):
+            continue
+    return out
 
 
 def day_total(intervals: Any) -> float | None:
@@ -155,6 +168,25 @@ class SmartMeterTexasAdapter(Adapter):
                 details=details, capabilities=[],
             ))
         return out
+
+    async def intervals(self, days: int = 28, have: set[str] = frozenset()) -> list[tuple[str, float]]:
+        """15-minute kWh for the last `days` days, skipping days already stored. Slots are labeled by start time."""
+        await self._ensure()
+        rows: dict[str, float] = {}
+        for back in range(1, days + 1):
+            day = date.today() - timedelta(days=back)
+            if day.isoformat() in have:
+                continue
+            for meter in self._meters:
+                try:
+                    await meter.get_15min(self._client, prevdays=back)
+                except SmartMeterTexasAPIError as exc:
+                    log.info("Smart Meter Texas has no 15-minute data for %s: %s", day, exc)
+                    continue
+                for slot, kwh in parse_intervals(meter.read_15min_consumption):
+                    rows[slot] = rows.get(slot, 0.0) + kwh
+            await asyncio.sleep(1)  # be gentle with Smart Meter Texas
+        return sorted(rows.items())
 
     def names(self) -> dict[str, str]:
         return {f"smt:{m.esiid}": "Electricity" for m in self._meters}
