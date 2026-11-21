@@ -121,12 +121,17 @@ def test_pentair_details_hide_secrets():
     assert is_running(PUMP) is True and is_running({"deviceType": "PPA0", "fields": {}}) is None
 
 
-def test_pentair_is_view_only(tmp_path, monkeypatch):
+def test_pentair_pump_on_off(tmp_path, monkeypatch):
+    sent = []
+
     class FakePentair:
         def __init__(self, **kw): pass
         def get_devices(self): return {"data": [{"deviceId": "p1"}]}
         def get_device(self, device_id): return {"data": PUMP}
         def get_tokens(self): return {"access_token": "a", "id_token": "i", "refresh_token": "r2"}
+
+        def _Pentair__request(self, method, path, *, path_params, json):
+            sent.append((method, path.format(**path_params), json))
 
     monkeypatch.setattr(pentair_adapter, "Pentair", FakePentair)
     adapter = PentairAdapter(Secrets(tmp_path / "s.json"))
@@ -134,5 +139,9 @@ def test_pentair_is_view_only(tmp_path, monkeypatch):
     [d] = asyncio.run(adapter.devices())
     assert (d.name, d.kind, d.on, d.media, d.model) == ("Pool pump", "pool", True, "Running", "Pentair IntelliFlo VSF")
     assert adapter.secrets.get("pentair")["refresh_token"] == "r2"  # renewed tokens are kept
-    with pytest.raises(HubError):
-        asyncio.run(adapter.set_state(d.id, StateIn(on=False)))
+    assert d.capabilities == ["onoff"]
+    asyncio.run(adapter.set_state(d.id, StateIn(on=False)))
+    assert sent == [("put", "device/device-service/user/device/p1", {"payload": {"d25": "0"}})]
+    with pytest.raises(HubError):  # only on/off
+        asyncio.run(adapter.set_state(d.id, StateIn(brightness=50)))
+    assert "s11" not in adapter.raw_fields()[0]["fields"]  # the security key never leaves the hub

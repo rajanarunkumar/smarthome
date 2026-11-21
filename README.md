@@ -91,7 +91,10 @@ Scanned from a Mac on the home Wi-Fi on 2026-11-21 (two passes plus the ARP tabl
 | Dyson | Purifiers and fans: on/off, fan speed, auto, oscillation, night mode, temperature, humidity, PM2.5 and filter life. Controlled directly on the Wi‑Fi. | Settings → **Dyson**: enter the MyDyson email, then the code Dyson emails and the password. Only each device's local key is saved. |
 | Ecovacs | Deebot robots: clean, pause, resume, return to dock, battery. | Settings → **Ecovacs** with the Ecovacs app email and password (only a hash is saved). Needs Python 3.13+. |
 | Schlage | Encode Wi‑Fi locks: lock, unlock, who used it last, door open/closed, battery. **Safety:** locks have no on/off switch and are skipped by a room's "All on/All off"; unlocking needs a second tap and a person signed in with Google or Face ID. Scripts using the API token (Siri Shortcuts) can lock but never unlock. | Settings → **Schlage** with a Schlage Home email and password. Schlage's sign-in needs the password, so it's kept in `~/.smarthome/secrets.json`. Share the lock with a **second Schlage account** in the Schlage Home app and use that here, so you can revoke the hub on its own. |
-| Pentair Home | Pool equipment readings (pump running, speed, power…), **view only**: Pentair has no public way for other apps to control Pentair Home devices. | Settings → **Pentair** with the Pentair Home email and password (only login tokens are saved). |
+| Pentair Home | Pool equipment readings, and **IntelliFlo pumps on/off** (the `d25` command the open-source homebridge-pentair-cloud plugin uses; Pentair doesn't publish its API). Pump schedules run in the hub (below). The pump's own programs from the Pentair app aren't documented anywhere; Settings → Pentair → **Pump data** shows the raw fields so they can be worked out from a real pump. | Settings → **Pentair** with the Pentair Home email and password (only login tokens are saved). |
+| TXU (Smart Meter Texas) | Electricity: yesterday's kWh (from 15-minute data) and the meter reading, read hourly (Smart Meter Texas allows about 2 reads an hour). TXU has no API of its own; it reads the same meter. | Make a free account at **smartmetertexas.com** (separate from TXU), then Settings → **Smart Meter Texas**. |
+| McKinney water (My Water Advisor 2) | Water: latest full day, last 7 days, this month. Read only. Uses the same calls as the mywateradvisor2.com website, which has no published API, so a site change can break it. | Settings → **McKinney water** with the My Water Advisor email and password. |
+| Atmos Energy | Not supported yet: Atmos has no API, no library, and isn't on Opower. | See "Atmos Energy" below. |
 
 Govee, LG TV, LG ThinQ, Dyson, Ecovacs, Pentair and Schlage have no way to rename a device from outside their apps, so names you give those in the hub are kept in the hub. Account keys are saved only in `~/.smarthome/secrets.json` on the Mac and are never sent back to the web app.
 
@@ -124,6 +127,17 @@ Settings live in `~/.smarthome/secrets.json` under `auth`: `google_client_id`, `
 Private data lives in `~/.smarthome/` (sign-in settings, API token, Hue key, sessions, passkeys and the rooms database), never in this repo.
 
 Tests: `pip install -r requirements-dev.txt && python -m pytest tests`.
+
+## Hub schedules
+
+Kasa and Hue schedules are saved on the plug or bridge and run even when the Mac is off. Every other device with an on/off (the Pentair pump, Govee, Dyson, Sonos, the LG TV, Ecovacs) can now be scheduled too, at set times. Those schedules run **in the hub**, so the Mac must be awake: System Settings → Energy → turn on "Prevent automatic sleeping when the display is off". The Schedules tab labels them **Hub (this Mac)**. Locks can't be scheduled.
+
+## Atmos Energy
+
+Atmos has no API and no maintained library; Opower doesn't cover it. Options, from easiest:
+1. **Bill emails:** Atmos e-bills arrive by email with the usage (Ccf) and amount. The hub could read them from Gmail (needs a Google sign-in for Gmail).
+2. **Account Center scraping:** sign in to atmosenergy.com and read the usage history page. Fragile, and needs someone to look at the logged-in site once.
+3. **Meter radio:** many Atmos meters broadcast readings that a $30 USB radio (rtl-sdr with rtlamr) can pick up. This gives near-real-time gas use with no account at all.
 
 ## Roadmap
 

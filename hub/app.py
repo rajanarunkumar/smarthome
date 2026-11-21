@@ -23,10 +23,13 @@ from .adapters.kasa_adapter import KasaAdapter
 from .adapters.lgtv_adapter import LgTvAdapter
 from .adapters.pentair_adapter import PentairAdapter
 from .adapters.schlage_adapter import SchlageAdapter
+from .adapters.smt_adapter import SmartMeterTexasAdapter
 from .adapters.sonos_adapter import SonosAdapter
 from .adapters.thinq_adapter import ThinQAdapter
+from .adapters.water_adapter import WaterAdvisorAdapter
 from .auth import SESSION_COOKIE, Auth
 from .config import Secrets, data_dir
+from .scheduler import HubScheduler
 from .models import Device, DevicePatch, HubError, Schedule, ScheduleIn, StateIn
 
 log = logging.getLogger("hub")
@@ -50,9 +53,17 @@ class Hub:
         self.ecovacs = EcovacsAdapter(self.secrets)
         self.pentair = PentairAdapter(self.secrets)
         self.schlage = SchlageAdapter(self.secrets)
+        self.smt = SmartMeterTexasAdapter(self.secrets)
+        self.water = WaterAdvisorAdapter(self.secrets)
         self.adapters: list[Adapter] = [self.kasa, self.hue, self.sonos, self.govee, self.lgtv, self.thinq,
-                                        self.dyson, self.ecovacs, self.pentair, self.schlage]
+                                        self.dyson, self.ecovacs, self.pentair, self.schlage, self.smt, self.water]
+        self.scheduler = HubScheduler(self.store.db, self._apply)
+        self.adapters.append(self.scheduler)
+        self.last_devices: dict[str, Device] = {}
         self._by_prefix = {p: a for a in self.adapters for p in a.prefixes}
+
+    async def _apply(self, device_id: str, state: StateIn) -> None:
+        await self.adapter_for(device_id).set_state(device_id, state)
 
     def adapter_for(self, item_id: str) -> Adapter:
         adapter = self._by_prefix.get(item_id.split(":", 1)[0])
@@ -81,6 +92,7 @@ class Hub:
             d.room_id = rooms.get(d.id)
             d.name = local_names.get(d.id, d.name)
         devices.sort(key=lambda d: d.name.lower())
+        self.last_devices = {d.id: d for d in devices}
         return devices, errors
 
     def _import_hue_rooms(self) -> None:
@@ -306,9 +318,18 @@ async def list_schedules(request: Request):
 async def create_schedule(request: Request, spec: ScheduleIn):
     """Create the schedule natively in each brand: one rule per device."""
     hub = hub_of(request)
+    if not hub.last_devices:
+        await hub.devices()
     by_adapter: dict[object, list[str]] = {}
     for device_id in spec.device_ids:
-        by_adapter.setdefault(hub.adapter_for(device_id), []).append(device_id)
+        device = hub.last_devices.get(device_id)
+        if device is None:
+            raise HubError(404, f"Unknown device {device_id}")
+        if device.kind == "lock":
+            raise HubError(400, "Locks can't be scheduled.")
+        # Brands with native schedules keep them on the device; everything else runs in the hub.
+        native = "schedule" in device.capabilities
+        by_adapter.setdefault(hub.adapter_for(device_id) if native else hub.scheduler, []).append(device_id)
     created: list[Schedule] = []
     for adapter, ids in by_adapter.items():
         created.extend(await adapter.create_schedule(spec, ids))
@@ -533,6 +554,38 @@ async def schlage_connect(request: Request, body: LoginIn):
 async def schlage_disconnect(request: Request):
     await hub_of(request).schlage.disconnect()
     return {"ok": True}
+
+
+class UserPassIn(BaseModel):
+    username: str = Field(min_length=1, max_length=254)
+    password: str = Field(min_length=1, max_length=200)
+
+
+@app.post("/api/smt/account")
+async def smt_connect(request: Request, body: UserPassIn):
+    return await hub_of(request).smt.connect(body.username, body.password)
+
+
+@app.delete("/api/smt/account")
+async def smt_disconnect(request: Request):
+    await hub_of(request).smt.disconnect()
+    return {"ok": True}
+
+
+@app.post("/api/water/account")
+async def water_connect(request: Request, body: UserPassIn):
+    return await hub_of(request).water.connect(body.username, body.password)
+
+
+@app.delete("/api/water/account")
+async def water_disconnect(request: Request):
+    await hub_of(request).water.disconnect()
+    return {"ok": True}
+
+
+@app.get("/api/pentair/fields")
+async def pentair_fields(request: Request):
+    return hub_of(request).pentair.raw_fields()
 
 
 @app.post("/api/pentair/account")

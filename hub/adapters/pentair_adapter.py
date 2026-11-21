@@ -1,9 +1,13 @@
-"""Pentair Home (cloud) pool equipment, read-only (pypentair, the library the
-Home Assistant Pentair Home integration uses).
+"""Pentair Home (cloud) pool equipment (pypentair, the library the Home
+Assistant Pentair Home integration uses).
 
-Pentair has no public API for controlling Pentair Home devices, and no public
-source documents how the app sends commands, so the hub shows each device's
-readings (pump running, speed, power, temperatures…) but doesn't change them.
+Readings for every device. IntelliFlo VSF pumps (type IF31) can also be turned
+on and off: the hub sends {"d25": "1"/"0"} with a PUT to the device, which is
+what the open-source homebridge-pentair-cloud plugin does. Pentair doesn't
+publish this API. Schedules for the pump run in the hub (see scheduler.py);
+the pump's own programs and schedules from the Pentair app aren't documented
+anywhere, so the hub doesn't change them.
+
 Sign in with the Pentair Home email and password in Settings; the hub keeps
 only the login tokens, never the password.
 """
@@ -23,6 +27,8 @@ log = logging.getLogger(__name__)
 REFRESH_SECONDS = 120
 SECRET_FIELDS = {"s11", "d15", "s6", "s23"}  # security key, password, Wi-Fi MAC, Wi-Fi name
 RUNNING_FIELD = {"IF31": "s25"}               # IntelliFlo pump: "pump enabled"
+POWER_COMMAND = {"IF31": "d25"}               # IntelliFlo pump: run "1" / stop "0"
+DEVICE_PATH = "device/device-service/user/device/{device_id}"
 
 try:
     from pypentair import Pentair
@@ -149,7 +155,7 @@ class PentairAdapter(Adapter):
                 online=bool(d.get("fields")), on=running,
                 media=("Running" if running else "Off") if running is not None else
                       (" · ".join(f"{x['label']} {x['value']}" for x in details[:2]) or None),
-                details=details, capabilities=[],
+                details=details, capabilities=["onoff"] if d.get("deviceType") in POWER_COMMAND else [],
             ))
         return out
 
@@ -158,7 +164,31 @@ class PentairAdapter(Adapter):
                 for i, d in self._devices.items()}
 
     async def set_state(self, device_id: str, state: StateIn) -> None:
-        raise HubError(400, "Pentair devices are view-only in the hub. Use the Pentair Home app to change them.")
+        dev_id = device_id.split(":", 1)[1]
+        device = self._devices.get(dev_id) or {}
+        key = POWER_COMMAND.get(device.get("deviceType", ""))
+        if key is None or state.on is None:
+            raise HubError(400, "The hub can only turn Pentair IntelliFlo pumps on and off. Use the Pentair Home app for the rest.")
+
+        def send() -> None:
+            client = self._client()
+            # pypentair has no public command call; this reuses its signed request helper.
+            client._Pentair__request("put", DEVICE_PATH, path_params={"device_id": dev_id},
+                                     json={"payload": {key: "1" if state.on else "0"}})
+
+        try:
+            await asyncio.to_thread(send)
+        except PentairAuthenticationError as exc:
+            raise HubError(401, "Pentair sign-in expired. Connect again in Settings.") from exc
+        except Exception as exc:  # noqa: BLE001
+            raise HubError(502, f"Pentair didn't accept the command: {exc}") from exc
+        self._at = 0.0
+
+    def raw_fields(self) -> list[dict]:
+        """Every field of every device, secrets removed: for working out the pump's schedule fields."""
+        return [{"name": (d.get("productInfo") or {}).get("nickName"), "deviceType": d.get("deviceType"),
+                 "fields": {k: v for k, v in (d.get("fields") or {}).items() if k not in SECRET_FIELDS}}
+                for d in self._devices.values()]
 
     async def status(self) -> dict:
         return {"connected": self.active, "available": AVAILABLE, "devices": len(self._devices)}

@@ -14,9 +14,9 @@ const view = $("#view");
 const sheet = $("#sheet");
 const DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const DAY_LABEL = { mon: "Mon", tue: "Tue", wed: "Wed", thu: "Thu", fri: "Fri", sat: "Sat", sun: "Sun" };
-const BRAND = { kasa: "Kasa", hue: "Hue", sonos: "Sonos", lg: "LG", govee: "Govee", thinq: "LG ThinQ", dyson: "Dyson", ecovacs: "Ecovacs", pentair: "Pentair", schlage: "Schlage" };
+const BRAND = { kasa: "Kasa", hue: "Hue", sonos: "Sonos", lg: "LG", govee: "Govee", thinq: "LG ThinQ", dyson: "Dyson", ecovacs: "Ecovacs", pentair: "Pentair", schlage: "Schlage", smt: "Smart Meter Texas", water: "My Water Advisor", hub: "Hub" };
 // These brands have no rename API, so the hub keeps the name.
-const HUB_NAMED = new Set(["govee", "lg", "thinq", "dyson", "ecovacs", "pentair", "schlage"]);
+const HUB_NAMED = new Set(["govee", "lg", "thinq", "dyson", "ecovacs", "pentair", "schlage", "smt", "water"]);
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -110,7 +110,7 @@ function deviceSub(d) {
   if (!d.online) parts.push("Not responding");
   else if (d.kind === "speaker") parts.push(d.playing ? (d.media ? `Playing ${d.media}` : "Playing") : "Paused");
   else if (d.kind === "tv") parts.push(d.on ? (d.media ? `On · ${d.media}` : "On") : "Off");
-  else if (["appliance", "purifier", "pool"].includes(d.kind)) parts.push(d.media || (d.on == null ? "Idle" : d.on ? "On" : "Off"));
+  else if (["appliance", "purifier", "pool", "meter"].includes(d.kind)) parts.push(d.media || (d.on == null ? "Idle" : d.on ? "On" : "Off"));
   else if (d.kind === "lock") parts.push([d.media, d.battery != null && d.battery <= 25 ? `battery ${d.battery}%` : ""].filter(Boolean).join(" · "));
   else if (d.kind === "vacuum") parts.push([d.media, d.battery != null ? `${d.battery}% battery` : ""].filter(Boolean).join(" · "));
   else if (d.on && d.brightness) parts.push(`${d.brightness}%`);
@@ -398,7 +398,7 @@ function renderSchedules() {
     <div class="section-title"><span>All schedules</span>
       <span class="actions"><button class="pill primary" id="new-sched">New schedule</button></span></div>
     ${rows ? `<div class="card">${rows}</div>` : `<p class="empty">No schedules yet.</p>`}
-    <p class="note">Each schedule is saved on the device or bridge itself, so it runs even when this Mac is off.</p>
+    <p class="note">Kasa and Hue schedules are saved on the device, so they run even when the Mac is off. Schedules marked “Hub (this Mac)” run only while the hub is running.</p>
     ${errorsHtml()}`;
   $("#new-sched").addEventListener("click", openNewSchedule);
 }
@@ -420,7 +420,9 @@ view.addEventListener("click", async (e) => {
 });
 
 function openNewSchedule() {
-  const devices = state.devices.filter((d) => d.online && d.capabilities.includes("schedule"));
+  // Kasa and Hue keep schedules on the device; other on/off devices are scheduled by the hub.
+  const devices = state.devices.filter((d) => d.online && d.kind !== "lock"
+    && (d.capabilities.includes("schedule") || d.capabilities.includes("onoff")));
   openSheet("New schedule", `
     <label class="field"><span>Name</span><input type="text" id="s-name" value="Schedule" maxlength="32"></label>
     <div class="field"><span>Devices</span><div class="chips">${devices.map((d) => `
@@ -434,7 +436,7 @@ function openNewSchedule() {
       <input type="number" id="s-offset" value="0" min="-180" max="180" title="Minutes after (negative for before)" hidden></div></div>
     <div class="field"><span>Days</span><div class="chips">${DAYS.map((d) => `
       <label class="chip"><input type="checkbox" name="s-day" value="${d}" checked><span>${DAY_LABEL[d]}</span></label>`).join("")}</div></div>
-    <p class="note">Kasa plugs support times, sunrise and sunset. The Hue Bridge supports set times. Sonos, LG and Govee schedules aren't supported yet.</p>
+    <p class="note">Kasa plugs support times, sunrise and sunset. The Hue Bridge supports set times. Other devices (pool pump, Govee, Dyson, Sonos…) use set times and run in the hub, so the Mac must be awake. Locks can't be scheduled.</p>
     <button class="pill primary" id="s-save">Save schedule</button>`);
 
   const type = $("#s-type", sheet);
@@ -477,14 +479,16 @@ function renderSettings() {
   const ecovacs = state.status?.ecovacs || {};
   const pentair = state.status?.pentair || {};
   const schlage = state.status?.schlage || {};
-  const accountCard = (name, st, form, about, connectedText) => `
+  const smt = state.status?.smt || {};
+  const water = state.status?.water || {};
+  const accountCard = (name, st, form, about, connectedText, key = name.toLowerCase(), extra = "") => `
     <div class="section-title"><span>${esc(name)}</span></div>
     <div class="card">${st.available === false ? `
       <div class="row"><div class="main"><span class="name">Not available</span>
         <span class="sub wrap">${name === "Ecovacs" ? "Needs Python 3.13 on the hub Mac." : "Its library isn't installed."} See the README.</span></div></div>`
       : st.connected ? `
       <div class="row"><div class="main"><span class="name">Connected</span><span class="sub wrap">${connectedText}</span></div>
-        <button class="pill danger" id="${name.toLowerCase()}-off">Disconnect</button></div>` : `
+        ${extra}<button class="pill danger" id="${key}-off">Disconnect</button></div>` : `
       <div class="row"><div class="main"><span class="name">Not connected</span><span class="sub wrap">${about}</span></div></div>${form}`}
     </div>`;
   const thinq = state.status?.thinq || {};
@@ -569,8 +573,21 @@ function renderSettings() {
       <div class="row key-row"><input type="email" id="pentair-email" placeholder="Pentair Home email" autocomplete="off">
         <input type="password" id="pentair-pw" placeholder="Password" autocomplete="off">
         <button class="pill primary" id="pentair-on">Connect</button></div>`,
-      "Pool equipment from the Pentair Home app, view only: Pentair offers no way for other apps to change settings.",
-      `${count("pentair")} device(s), view only`)}
+      "Pool equipment from the Pentair Home app: readings, and turning IntelliFlo pumps on and off.",
+      `${count("pentair")} device(s). Pumps turn on and off; schedules for them run in the hub.`, "pentair",
+      `<button class="pill" id="pentair-raw">Pump data</button>`)}
+    ${accountCard("Smart Meter Texas", smt, `
+      <div class="row key-row"><input type="text" id="smt-user" placeholder="Smart Meter Texas username" autocomplete="off">
+        <input type="password" id="smt-pw" placeholder="Password" autocomplete="off">
+        <button class="pill primary" id="smt-on">Connect</button></div>`,
+      "TXU electricity usage, from the state's smart meter portal that TXU reads. Make a free account at <b>smartmetertexas.com</b> (it's separate from your TXU login). The hub reads the meter hourly and yesterday's usage daily.",
+      `${count("smt")} meter(s)`, "smt")}
+    ${accountCard("McKinney water", water, `
+      <div class="row key-row"><input type="email" id="water-user" placeholder="My Water Advisor email" autocomplete="off">
+        <input type="password" id="water-pw" placeholder="Password" autocomplete="off">
+        <button class="pill primary" id="water-on">Connect</button></div>`,
+      "Daily water use from <b>My Water Advisor 2</b>, the City of McKinney's meter portal. Read only.",
+      `${count("water")} meter(s)`, "water")}
 
     <div class="section-title"><span>Found automatically</span></div>
     <div class="card">
@@ -622,7 +639,21 @@ function renderSettings() {
     (r) => `Pentair connected: ${r.devices} device(s)`);
   accountButton("#schlage-on", () => api("POST", "/api/schlage/account", { email: val("#schlage-email"), password: $("#schlage-pw").value }),
     (r) => `Schlage connected: ${r.devices} lock(s)`);
-  for (const b of ["dyson", "ecovacs", "pentair", "schlage"]) accountButton(`#${b}-off`, () => api("DELETE", `/api/${b}/account`), () => `${BRAND[b]} disconnected`);
+  accountButton("#smt-on", () => api("POST", "/api/smt/account", { username: val("#smt-user"), password: $("#smt-pw").value }),
+    (r) => `Smart Meter Texas connected: ${r.devices} meter(s)`);
+  accountButton("#water-on", () => api("POST", "/api/water/account", { username: val("#water-user"), password: $("#water-pw").value }),
+    (r) => `My Water Advisor connected: ${r.devices} meter(s)`);
+  $("#pentair-raw")?.addEventListener("click", async () => {
+    try {
+      const pumps = await api("GET", "/api/pentair/fields");
+      openSheet("Pentair data", pumps.map((p) => `
+        <div class="field"><span>${esc(p.name || p.deviceType)} (${esc(p.deviceType)})</span><div class="card">${Object.entries(p.fields).map(([k, f]) => `
+          <div class="row"><span class="main"><span class="name small">${esc(k)} · ${esc(f?.name ?? "")}</span></span>
+          <span class="sub-value">${esc(f?.value ?? f)} ${esc(f?.unit ?? "")}</span></div>`).join("")}</div></div>`).join("")
+        + `<p class="note">Secret fields (security key, Wi‑Fi details) are left out. Sharing this helps work out how the Pentair app stores the pump's own schedules.</p>`);
+    } catch (err) { toast(err.message); }
+  });
+  for (const b of ["dyson", "ecovacs", "pentair", "schlage", "smt", "water"]) accountButton(`#${b}-off`, () => api("DELETE", `/api/${b}/account`), () => `${BRAND[b]} disconnected`);
   accountButton("#govee-off", () => api("DELETE", "/api/govee/account"), () => "Govee account disconnected");
   accountButton("#thinq-off", () => api("DELETE", "/api/thinq/account"), () => "LG ThinQ disconnected");
   $("#lg-pair")?.addEventListener("click", async (e) => {
