@@ -184,3 +184,7 @@ button { cursor: pointer; }
 .sub-value { font-variant-numeric: tabular-nums; color: var(--muted); }
 .lock-badge { flex: none; }
 .row > .pill { flex: none; }
+.zone-name { flex: 1 1 auto; min-width: 0; border: 0; background: transparent; font: inherit; padding: 4px 0; }
+.zone-name:focus { outline: 2px solid var(--accent); border-radius: 6px; }
+.row.running .sub-value { color: var(--accent); font-weight: 600; }
+.row .sub-value { white-space: nowrap; flex: none; }

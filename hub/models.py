@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -23,7 +23,7 @@ class Device(BaseModel):
     brand: str
     name: str
     model: str | None = None
-    kind: Literal["plug", "dimmer", "light", "speaker", "tv", "appliance", "vacuum", "purifier", "pool", "lock", "meter"]
+    kind: Literal["plug", "dimmer", "light", "speaker", "tv", "appliance", "vacuum", "purifier", "pool", "lock", "meter", "sprinkler"]
     room_id: int | None = None
     online: bool = True
     on: bool | None = None
@@ -47,6 +47,8 @@ class Device(BaseModel):
     level: int | None = None           # fan speed and similar 1..level_max settings
     level_max: int | None = None
     details: list[dict[str, str]] = []  # read-only readings, [{"label": ..., "value": ...}]
+    zones: list[dict[str, Any]] = []   # sprinklers: [{"id", "label", "running"}]
+    rain_delay: int | None = None      # sprinklers: rain delay in days
     capabilities: list[str] = []
 
 
@@ -63,6 +65,9 @@ class StateIn(BaseModel):
     delay_start_hours: int | None = Field(None, ge=1, le=24)
     level: int | None = Field(None, ge=1, le=10)
     locked: bool | None = None         # locks: True locks, False unlocks
+    zone: int | None = Field(None, ge=1, le=64)            # sprinklers: zone to run
+    minutes: int | None = Field(None, ge=1, le=240)        # sprinklers: how long
+    rain_delay_days: int | None = Field(None, ge=0, le=14)  # sprinklers: 0 cancels
 
 
 class DevicePatch(BaseModel):

@@ -14,9 +14,9 @@ const view = $("#view");
 const sheet = $("#sheet");
 const DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const DAY_LABEL = { mon: "Mon", tue: "Tue", wed: "Wed", thu: "Thu", fri: "Fri", sat: "Sat", sun: "Sun" };
-const BRAND = { kasa: "Kasa", hue: "Hue", sonos: "Sonos", lg: "LG", govee: "Govee", thinq: "LG ThinQ", dyson: "Dyson", ecovacs: "Ecovacs", pentair: "Pentair", schlage: "Schlage", smt: "Smart Meter Texas", water: "My Water Advisor", hub: "Hub" };
+const BRAND = { kasa: "Kasa", hue: "Hue", sonos: "Sonos", lg: "LG", govee: "Govee", thinq: "LG ThinQ", dyson: "Dyson", ecovacs: "Ecovacs", pentair: "Pentair", schlage: "Schlage", smt: "Smart Meter Texas", water: "My Water Advisor", rainbird: "Rain Bird", hub: "Hub" };
 // These brands have no rename API, so the hub keeps the name.
-const HUB_NAMED = new Set(["govee", "lg", "thinq", "dyson", "ecovacs", "pentair", "schlage", "smt", "water"]);
+const HUB_NAMED = new Set(["govee", "lg", "thinq", "dyson", "ecovacs", "pentair", "schlage", "smt", "water", "rainbird"]);
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -110,7 +110,7 @@ function deviceSub(d) {
   if (!d.online) parts.push("Not responding");
   else if (d.kind === "speaker") parts.push(d.playing ? (d.media ? `Playing ${d.media}` : "Playing") : "Paused");
   else if (d.kind === "tv") parts.push(d.on ? (d.media ? `On · ${d.media}` : "On") : "Off");
-  else if (["appliance", "purifier", "pool", "meter"].includes(d.kind)) parts.push(d.media || (d.on == null ? "Idle" : d.on ? "On" : "Off"));
+  else if (["appliance", "purifier", "pool", "meter", "sprinkler"].includes(d.kind)) parts.push(d.media || (d.on == null ? "Idle" : d.on ? "On" : "Off"));
   else if (d.kind === "lock") parts.push([d.media, d.battery != null && d.battery <= 25 ? `battery ${d.battery}%` : ""].filter(Boolean).join(" · "));
   else if (d.kind === "vacuum") parts.push([d.media, d.battery != null ? `${d.battery}% battery` : ""].filter(Boolean).join(" · "));
   else if (d.on && d.brightness) parts.push(`${d.brightness}%`);
@@ -127,6 +127,7 @@ function deviceRow(d) {
         <span class="name">${esc(d.name)}</span>
         <span class="sub">${esc(deviceSub(d))}</span>
       </button>
+      ${d.kind === "sprinkler" && d.on ? `<button class="pill danger" data-stop="${esc(d.id)}">Stop</button>` : ""}
       ${d.kind === "lock" ? (d.on ? `<span class="badge lock-badge">Locked</span>`
         : `<button class="pill primary" data-lock="${esc(d.id)}" ${d.online ? "" : "disabled"}>Lock</button>`) : ""}
       ${d.capabilities.includes("onoff") ? `<label class="switch" aria-label="${esc(d.name)} ${d.kind === "speaker" ? "play" : "power"}">
@@ -172,6 +173,13 @@ view.addEventListener("change", async (e) => {
 });
 
 view.addEventListener("click", async (e) => {
+  const stopBtn = e.target.closest("[data-stop]");
+  if (stopBtn) {
+    stopBtn.disabled = true;
+    try { await api("POST", `/api/devices/${encodeURIComponent(stopBtn.dataset.stop)}/state`, { action: "stop" }); toast("Stopped"); await loadDevices(); renderRooms(); }
+    catch (err) { toast(err.message); stopBtn.disabled = false; }
+    return;
+  }
   const lockBtn = e.target.closest("[data-lock]");
   if (lockBtn) {
     lockBtn.disabled = true;
@@ -228,6 +236,18 @@ function openDevice(id) {
       <span class="switch"><input type="checkbox" id="f-mute" ${d.muted ? "checked" : ""}><span></span></span></label>` : ""}
     ${caps.has("source") && d.sources.length ? `<label class="field"><span>Input or app</span><select id="f-src">
       ${d.source ? "" : `<option value="">Choose…</option>`}${d.sources.map((x) => `<option value="${esc(x.id)}" ${x.id === d.source ? "selected" : ""}>${esc(x.label)}</option>`).join("")}</select></label>` : ""}
+    ${caps.has("zones") ? `<div class="field"><span>${esc(d.media || "")}</span>
+      <div class="inline"><label class="inline"><span>Run for</span>
+        <select id="f-minutes">${[5, 10, 15, 20, 30, 45, 60].map((m) => `<option value="${m}" ${m === 10 ? "selected" : ""}>${m} min</option>`).join("")}</select></label>
+        ${d.on ? `<button class="pill danger" id="f-stop">Stop watering</button>` : ""}</div>
+      <div class="card">${d.zones.map((z) => `
+        <div class="row ${z.running ? "running" : ""}">
+          <input type="text" class="zone-name" data-zone-name="${esc(z.id)}" value="${esc(z.name || "")}" placeholder="Zone ${esc(z.id)}" aria-label="Name for zone ${esc(z.id)}" maxlength="24">
+          <span class="sub-value">Zone ${esc(z.id)}</span>
+          <button class="pill ${z.running ? "danger" : "primary"}" data-zone="${esc(z.id)}">${z.running ? "Stop" : "Run"}</button>
+        </div>`).join("")}</div></div>
+      <label class="field"><span>Rain delay</span><select id="f-raindelay">${[0, 1, 2, 3, 5, 7, 14].map((n) => `<option value="${n}" ${n === (d.rain_delay ?? 0) ? "selected" : ""}>${n ? `${n} day${n > 1 ? "s" : ""}` : "Off"}</option>`).join("")}</select></label>
+      ${d.details.length ? "" : `<p class="note">The controller's own programs appear here when it reports them.</p>`}` : ""}
     ${caps.has("lock") ? `<div class="field"><span>${esc(d.media || "")}</span><div class="inline">
       <button class="pill primary" id="f-lock" ${d.online ? "" : "disabled"}>Lock</button>
       <button class="pill danger" id="f-unlock" ${d.online ? "" : "disabled"}>Unlock</button></div>
@@ -244,7 +264,7 @@ function openDevice(id) {
       <button class="pill" id="f-delay-go" ${d.ready ? "" : "disabled"}>Start in hours</button></div></div>` : ""}
     ${caps.has("level") ? `<label class="field"><span>Fan speed <b id="f-level-v">${d.level ?? "Auto"}</b></span>
       <input type="range" id="f-level" min="1" max="${d.level_max ?? 10}" value="${d.level ?? 5}"></label>` : ""}
-    ${d.details.length ? `<div class="field"><span>Readings</span><div class="card">${d.details.map((x) => `
+    ${d.details.length ? `<div class="field"><span>${d.kind === "sprinkler" ? "Programs on the controller" : "Readings"}</span><div class="card">${d.details.map((x) => `
       <div class="row"><span class="main"><span class="name small">${esc(x.label)}</span></span><span class="sub-value">${esc(x.value)}</span></div>`).join("")}</div></div>` : ""}
     ${d.battery != null ? `<p class="note">Battery ${d.battery}%</p>` : ""}
     ${caps.has("brightness") ? `<label class="field"><span>Brightness <b id="f-bri-v">${d.brightness ?? 100}%</b></span>
@@ -291,6 +311,19 @@ function openDevice(id) {
     catch (err) { toast(err.message); if (btn) btn.disabled = false; }
   };
   $("#f-lock", sheet)?.addEventListener("click", (e) => act({ locked: true }, e.target, "Locking…"));
+  $("#f-stop", sheet)?.addEventListener("click", (e) => act({ action: "stop" }, e.target, "Stopped"));
+  sheet.querySelectorAll("[data-zone]").forEach((btn) => btn.addEventListener("click", () => {
+    const z = d.zones.find((x) => x.id === btn.dataset.zone);
+    if (z?.running) return act({ action: "stop" }, btn, "Stopped");
+    const minutes = Number($("#f-minutes", sheet).value);
+    act({ zone: Number(btn.dataset.zone), minutes }, btn, `Zone ${btn.dataset.zone}: ${minutes} min`);
+  }));
+  $("#f-raindelay", sheet)?.addEventListener("change", (e) =>
+    act({ rain_delay_days: Number(e.target.value) }, null, Number(e.target.value) ? `Rain delay: ${e.target.value} day(s)` : "Rain delay off"));
+  sheet.querySelectorAll("[data-zone-name]").forEach((input) => input.addEventListener("change", async () => {
+    try { await api("PUT", `/api/rainbird/zones/${input.dataset.zoneName}`, { name: input.value.trim() }); toast("Zone renamed"); }
+    catch (err) { toast(err.message); }
+  }));
   const unlock = $("#f-unlock", sheet);
   let armed = null;
   unlock?.addEventListener("click", () => {
@@ -481,6 +514,7 @@ function renderSettings() {
   const schlage = state.status?.schlage || {};
   const smt = state.status?.smt || {};
   const water = state.status?.water || {};
+  const rainbird = state.status?.rainbird || {};
   const accountCard = (name, st, form, about, connectedText, key = name.toLowerCase(), extra = "") => `
     <div class="section-title"><span>${esc(name)}</span></div>
     <div class="card">${st.available === false ? `
@@ -576,6 +610,12 @@ function renderSettings() {
       "Pool equipment from the Pentair Home app: readings, and turning IntelliFlo pumps on and off.",
       `${count("pentair")} device(s). Pumps turn on and off; schedules for them run in the hub.`, "pentair",
       `<button class="pill" id="pentair-raw">Pump data</button>`)}
+    ${accountCard("Rain Bird", rainbird, `
+      <div class="row key-row"><input type="text" inputmode="decimal" id="rainbird-host" placeholder="Controller IP, e.g. 192.168.1.40" autocomplete="off">
+        <input type="password" id="rainbird-pw" placeholder="Controller password" autocomplete="off">
+        <button class="pill primary" id="rainbird-on">Connect</button></div>`,
+      "Sprinklers with the Rain Bird LNK Wi‑Fi module, controlled directly on your Wi‑Fi. Use the controller password from the Rain Bird app (not your account password). Find the IP in the Rain Bird app's controller settings or your router's device list.",
+      `${esc(rainbird.host || "")} · ${rainbird.zones ?? 0} zone(s)`, "rainbird")}
     ${accountCard("Smart Meter Texas", smt, `
       <div class="row key-row"><input type="text" id="smt-user" placeholder="Smart Meter Texas username" autocomplete="off">
         <input type="password" id="smt-pw" placeholder="Password" autocomplete="off">
@@ -653,7 +693,9 @@ function renderSettings() {
         + `<p class="note">Secret fields (security key, Wi‑Fi details) are left out. Sharing this helps work out how the Pentair app stores the pump's own schedules.</p>`);
     } catch (err) { toast(err.message); }
   });
-  for (const b of ["dyson", "ecovacs", "pentair", "schlage", "smt", "water"]) accountButton(`#${b}-off`, () => api("DELETE", `/api/${b}/account`), () => `${BRAND[b]} disconnected`);
+  accountButton("#rainbird-on", () => api("POST", "/api/rainbird/account", { host: val("#rainbird-host"), password: $("#rainbird-pw").value }),
+    (r) => `Rain Bird connected: ${r.zones} zone(s)`);
+  for (const b of ["dyson", "ecovacs", "pentair", "schlage", "smt", "water", "rainbird"]) accountButton(`#${b}-off`, () => api("DELETE", `/api/${b}/account`), () => `${BRAND[b]} disconnected`);
   accountButton("#govee-off", () => api("DELETE", "/api/govee/account"), () => "Govee account disconnected");
   accountButton("#thinq-off", () => api("DELETE", "/api/thinq/account"), () => "LG ThinQ disconnected");
   $("#lg-pair")?.addEventListener("click", async (e) => {

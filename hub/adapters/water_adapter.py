@@ -74,7 +74,7 @@ class WaterAdvisorAdapter(Adapter):
         self._token: str | None = None
         self._meters: list[dict] = []
         self._usage: dict[str, list[dict]] = {}
-        self._at = 0.0
+        self._at = float("-inf")
 
     @property
     def config(self) -> dict:
@@ -114,7 +114,7 @@ class WaterAdvisorAdapter(Adapter):
                "device_id": self.config.get("device_id") or str(uuid.uuid4())}
         self._token = await self._login(cfg)
         self.secrets.set("water", cfg)
-        self._at = 0.0
+        self._at = float("-inf")
         found = await self.devices()
         return {"connected": True, "devices": len(found)}
 

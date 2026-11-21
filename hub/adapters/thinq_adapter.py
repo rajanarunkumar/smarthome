@@ -228,7 +228,7 @@ class ThinQAdapter(Adapter):
         return self._devices
 
     async def _refresh(self, dev_id: str) -> None:
-        if time.monotonic() - self._status_at.get(dev_id, 0) < STATUS_SECONDS:
+        if time.monotonic() - self._status_at.get(dev_id, float("-inf")) < STATUS_SECONDS:
             return
         try:
             self._status[dev_id] = await self._call("GET", f"/devices/{dev_id}/state")

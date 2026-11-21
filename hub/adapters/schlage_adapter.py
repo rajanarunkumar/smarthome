@@ -69,7 +69,7 @@ class SchlageAdapter(Adapter):
         self.secrets = secrets
         self._api: Any = None
         self._locks: dict[str, Any] = {}
-        self._at = 0.0
+        self._at = float("-inf")
         self._lock = asyncio.Lock()
 
     @property
@@ -146,7 +146,7 @@ class SchlageAdapter(Adapter):
             await asyncio.to_thread(lk.lock if state.locked else lk.unlock)
         except SchlageError as exc:
             raise HubError(502, f"The lock didn't respond: {exc}") from exc
-        self._at = 0.0  # show the new state on the next refresh
+        self._at = float("-inf")  # show the new state on the next refresh
 
     async def status(self) -> dict:
         return {"connected": self.active, "available": AVAILABLE, "devices": len(self._locks)}

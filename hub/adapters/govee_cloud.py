@@ -104,7 +104,7 @@ class GoveeCloud:
         return self.devices
 
     async def refresh(self, hid: str) -> dict:
-        if time.monotonic() - self._refreshed.get(hid, 0) < REFRESH_SECONDS:
+        if time.monotonic() - self._refreshed.get(hid, float("-inf")) < REFRESH_SECONDS:
             return self.state.get(hid, {})
         d = self.devices[hid]
         data = await self._call("POST", "/device/state", {"sku": d["sku"], "device": d["device"]})

@@ -82,7 +82,7 @@ class PentairAdapter(Adapter):
     def __init__(self, secrets: Secrets) -> None:
         self.secrets = secrets
         self._devices: dict[str, dict] = {}
-        self._at = 0.0
+        self._at = float("-inf")  # never
 
     @property
     def config(self) -> dict:
@@ -127,7 +127,7 @@ class PentairAdapter(Adapter):
         except PentairAuthenticationError as exc:
             raise HubError(401, "Pentair didn't accept that email and password.") from exc
         self.secrets.set("pentair", {"email": email.strip(), **tokens})
-        self._at = 0.0
+        self._at = float("-inf")  # never
         found = await self.devices()
         return {"connected": True, "devices": len(found)}
 
@@ -182,7 +182,7 @@ class PentairAdapter(Adapter):
             raise HubError(401, "Pentair sign-in expired. Connect again in Settings.") from exc
         except Exception as exc:  # noqa: BLE001
             raise HubError(502, f"Pentair didn't accept the command: {exc}") from exc
-        self._at = 0.0
+        self._at = float("-inf")  # never
 
     def raw_fields(self) -> list[dict]:
         """Every field of every device, secrets removed: for working out the pump's schedule fields."""

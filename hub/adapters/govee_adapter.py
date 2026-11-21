@@ -48,7 +48,7 @@ class GoveeAdapter(Adapter):
         self._by_ip: dict[str, str] = {}
         self._status_waiters: dict[str, asyncio.Future] = {}
         self._transport: asyncio.DatagramTransport | None = None
-        self._last_scan = 0.0
+        self._last_scan = float("-inf")  # never
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()

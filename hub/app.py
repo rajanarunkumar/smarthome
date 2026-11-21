@@ -22,6 +22,7 @@ from .adapters.hue_adapter import HueAdapter
 from .adapters.kasa_adapter import KasaAdapter
 from .adapters.lgtv_adapter import LgTvAdapter
 from .adapters.pentair_adapter import PentairAdapter
+from .adapters.rainbird_adapter import RainBirdAdapter
 from .adapters.schlage_adapter import SchlageAdapter
 from .adapters.smt_adapter import SmartMeterTexasAdapter
 from .adapters.sonos_adapter import SonosAdapter
@@ -55,8 +56,10 @@ class Hub:
         self.schlage = SchlageAdapter(self.secrets)
         self.smt = SmartMeterTexasAdapter(self.secrets)
         self.water = WaterAdvisorAdapter(self.secrets)
+        self.rainbird = RainBirdAdapter(self.secrets)
         self.adapters: list[Adapter] = [self.kasa, self.hue, self.sonos, self.govee, self.lgtv, self.thinq,
-                                        self.dyson, self.ecovacs, self.pentair, self.schlage, self.smt, self.water]
+                                        self.dyson, self.ecovacs, self.pentair, self.schlage, self.smt, self.water,
+                                        self.rainbird]
         self.scheduler = HubScheduler(self.store.db, self._apply)
         self.adapters.append(self.scheduler)
         self.last_devices: dict[str, Device] = {}
@@ -580,6 +583,32 @@ async def water_connect(request: Request, body: UserPassIn):
 @app.delete("/api/water/account")
 async def water_disconnect(request: Request):
     await hub_of(request).water.disconnect()
+    return {"ok": True}
+
+
+class RainBirdIn(BaseModel):
+    host: str = Field(pattern=r"^\d{1,3}(\.\d{1,3}){3}$")
+    password: str = Field(min_length=1, max_length=100)
+
+
+@app.post("/api/rainbird/account")
+async def rainbird_connect(request: Request, body: RainBirdIn):
+    return await hub_of(request).rainbird.connect(body.host, body.password)
+
+
+@app.delete("/api/rainbird/account")
+async def rainbird_disconnect(request: Request):
+    await hub_of(request).rainbird.disconnect()
+    return {"ok": True}
+
+
+class ZoneNameIn(BaseModel):
+    name: str = Field("", max_length=24)
+
+
+@app.put("/api/rainbird/zones/{zone}")
+async def rainbird_zone_name(request: Request, zone: int, body: ZoneNameIn):
+    hub_of(request).rainbird.name_zone(zone, body.name)
     return {"ok": True}
 
 
