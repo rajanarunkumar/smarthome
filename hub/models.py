@@ -23,7 +23,7 @@ class Device(BaseModel):
     brand: str
     name: str
     model: str | None = None
-    kind: Literal["plug", "dimmer", "light", "speaker", "tv"]
+    kind: Literal["plug", "dimmer", "light", "speaker", "tv", "appliance"]
     room_id: int | None = None
     online: bool = True
     on: bool | None = None
@@ -36,7 +36,7 @@ class Device(BaseModel):
     volume: int | None = None
     muted: bool | None = None
     playing: bool | None = None
-    media: str | None = None           # what's playing, or the TV's current app
+    media: str | None = None           # what's playing, the TV's app, or an appliance's status
     source: str | None = None          # current input / app id
     sources: list[dict[str, str]] = []  # [{"id": ..., "label": ...}]
     capabilities: list[str] = []

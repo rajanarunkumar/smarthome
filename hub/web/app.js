@@ -14,9 +14,9 @@ const view = $("#view");
 const sheet = $("#sheet");
 const DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const DAY_LABEL = { mon: "Mon", tue: "Tue", wed: "Wed", thu: "Thu", fri: "Fri", sat: "Sat", sun: "Sun" };
-const BRAND = { kasa: "Kasa", hue: "Hue", sonos: "Sonos", lg: "LG", govee: "Govee" };
+const BRAND = { kasa: "Kasa", hue: "Hue", sonos: "Sonos", lg: "LG", govee: "Govee", thinq: "LG ThinQ" };
 // These brands have no rename API, so the hub keeps the name.
-const HUB_NAMED = new Set(["govee", "lg"]);
+const HUB_NAMED = new Set(["govee", "lg", "thinq"]);
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -110,6 +110,7 @@ function deviceSub(d) {
   if (!d.online) parts.push("Not responding");
   else if (d.kind === "speaker") parts.push(d.playing ? (d.media ? `Playing ${d.media}` : "Playing") : "Paused");
   else if (d.kind === "tv") parts.push(d.on ? (d.media ? `On · ${d.media}` : "On") : "Off");
+  else if (d.kind === "appliance") parts.push(d.media || (d.on == null ? "Idle" : d.on ? "On" : "Off"));
   else if (d.on && d.brightness) parts.push(`${d.brightness}%`);
   else parts.push(d.on ? "On" : "Off");
   return parts.join(" · ");
@@ -124,10 +125,10 @@ function deviceRow(d) {
         <span class="name">${esc(d.name)}</span>
         <span class="sub">${esc(deviceSub(d))}</span>
       </button>
-      <label class="switch" aria-label="${esc(d.name)} ${d.kind === "speaker" ? "play" : "power"}">
+      ${d.capabilities.includes("onoff") ? `<label class="switch" aria-label="${esc(d.name)} ${d.kind === "speaker" ? "play" : "power"}">
         <input type="checkbox" data-power="${esc(d.id)}" ${d.on ? "checked" : ""} ${d.online ? "" : "disabled"}>
         <span></span>
-      </label>
+      </label>` : ""}
     </div>`;
 }
 
@@ -416,6 +417,8 @@ function renderSettings() {
   const hue = state.hue || {};
   const lg = state.status?.lg || {};
   const count = (brand) => state.status?.[brand]?.devices ?? 0;
+  const govee = state.status?.govee || {};
+  const thinq = state.status?.thinq || {};
   const fmtDate = (s) => s ? new Date(s * 1000).toLocaleDateString() : "never";
   const keys = state.passkeys.map((p) => `
       <div class="row"><div class="main">
@@ -443,16 +446,39 @@ function renderSettings() {
     <div class="section-title"><span>LG TV</span></div>
     <div class="card"><div class="row"><div class="main">
       <span class="name">${lg.paired ? `Connected${lg.model ? ` (${esc(lg.model)})` : ""}` : "Not connected"}</span>
-      <span class="sub">${lg.available === false ? "Needs Python 3.12 on the hub Mac. See the README."
+      <span class="sub wrap">${lg.available === false ? "Needs Python 3.12 on the hub Mac. See the README."
         : lg.paired ? (lg.wake_on_lan ? "The hub can turn the TV on and off." : "The hub can turn the TV off. To turn it on too, connect again while the TV is on.")
         : "Turn the TV on, tap Connect, then choose Accept on the TV with the remote within 30 seconds."}</span>
     </div>${lg.available === false ? "" : `<button class="pill ${lg.paired ? "" : "primary"}" id="lg-pair">${lg.paired ? "Connect again" : "Connect"}</button>`}</div></div>
+
+    <div class="section-title"><span>Govee account</span></div>
+    <div class="card">${govee.account ? `
+      <div class="row"><div class="main"><span class="name">Connected</span>
+        <span class="sub">${count("govee")} Govee device(s), ${govee.lan ?? 0} controlled over the local network</span></div>
+        <button class="pill danger" id="govee-off">Disconnect</button></div>` : `
+      <div class="row"><div class="main"><span class="name">Not connected</span>
+        <span class="sub wrap">Adds Govee devices without LAN Control, plugs, and the names from the Govee app. In the Govee Home app: <b>Profile → Settings (gear) → Apply for API Key</b>. The key arrives by email.</span></div></div>
+      <div class="row key-row"><input type="password" id="govee-key" placeholder="Govee API key" autocomplete="off" spellcheck="false">
+        <button class="pill primary" id="govee-on">Connect</button></div>`}
+    </div>
+
+    <div class="section-title"><span>LG ThinQ appliances</span></div>
+    <div class="card">${thinq.connected ? `
+      <div class="row"><div class="main"><span class="name">Connected (${esc(thinq.country)})</span>
+        <span class="sub wrap">${count("thinq")} appliance(s). Laundry, dishwashers and ovens are shown read-only.</span></div>
+        <button class="pill danger" id="thinq-off">Disconnect</button></div>` : `
+      <div class="row"><div class="main"><span class="name">Not connected</span>
+        <span class="sub wrap">Sign in at <b>connect-pat.lgthinq.com</b> with your LG account, choose <b>Add new token</b>, tick every permission, and paste the token here.</span></div></div>
+      <div class="row key-row"><input type="password" id="thinq-token" placeholder="Personal access token" autocomplete="off" spellcheck="false">
+        <input type="text" id="thinq-country" value="US" maxlength="2" aria-label="Country code" class="country">
+        <button class="pill primary" id="thinq-on">Connect</button></div>`}
+    </div>
 
     <div class="section-title"><span>Found automatically</span></div>
     <div class="card">
       <div class="row"><div class="main"><span class="name">Kasa</span><span class="sub">${count("kasa")} plug(s) and dimmer(s)</span></div></div>
       <div class="row"><div class="main"><span class="name">Sonos</span><span class="sub">${count("sonos")} speaker(s)</span></div></div>
-      <div class="row"><div class="main"><span class="name">Govee</span><span class="sub">${count("govee")} light(s). A light only shows up after you turn on <b>LAN Control</b> for it in the Govee app.</span></div></div>
+      ${govee.account ? "" : `<div class="row"><div class="main"><span class="name">Govee</span><span class="sub wrap">${count("govee")} light(s). Without the account, a light only shows up after you turn on <b>LAN Control</b> for it in the Govee app.</span></div></div>`}
     </div>
 
     <div class="section-title"><span>Rooms</span></div>
@@ -478,6 +504,17 @@ function renderSettings() {
     try { await api("POST", "/api/hue/pair"); toast("Hue Bridge paired"); render(true); }
     catch (err) { toast(err.message); e.target.disabled = false; }
   });
+  const accountButton = (btnId, run, done) => $(btnId)?.addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    try { const r = await run(); toast(done(r)); render(true); }
+    catch (err) { toast(err.message); e.target.disabled = false; }
+  });
+  accountButton("#govee-on", () => api("POST", "/api/govee/account", { api_key: $("#govee-key").value.trim() }),
+    (r) => `Govee connected: ${r.devices} device(s)`);
+  accountButton("#thinq-on", () => api("POST", "/api/thinq/account", { token: $("#thinq-token").value.trim(), country: $("#thinq-country").value.trim().toUpperCase() || "US" }),
+    (r) => `LG ThinQ connected: ${r.devices} appliance(s)`);
+  accountButton("#govee-off", () => api("DELETE", "/api/govee/account"), () => "Govee account disconnected");
+  accountButton("#thinq-off", () => api("DELETE", "/api/thinq/account"), () => "LG ThinQ disconnected");
   $("#lg-pair")?.addEventListener("click", async (e) => {
     e.target.disabled = true;
     e.target.textContent = "Accept on the TV…";

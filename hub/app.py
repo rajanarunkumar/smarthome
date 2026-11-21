@@ -20,6 +20,7 @@ from .adapters.hue_adapter import HueAdapter
 from .adapters.kasa_adapter import KasaAdapter
 from .adapters.lgtv_adapter import LgTvAdapter
 from .adapters.sonos_adapter import SonosAdapter
+from .adapters.thinq_adapter import ThinQAdapter
 from .auth import SESSION_COOKIE, Auth
 from .config import Secrets, data_dir
 from .models import Device, DevicePatch, HubError, Schedule, ScheduleIn, StateIn
@@ -38,9 +39,10 @@ class Hub:
         self.kasa = KasaAdapter()
         self.hue = HueAdapter(self.secrets)
         self.sonos = SonosAdapter()
-        self.govee = GoveeAdapter()
+        self.govee = GoveeAdapter(self.secrets)
         self.lgtv = LgTvAdapter(self.secrets)
-        self.adapters: list[Adapter] = [self.kasa, self.hue, self.sonos, self.govee, self.lgtv]
+        self.thinq = ThinQAdapter(self.secrets)
+        self.adapters: list[Adapter] = [self.kasa, self.hue, self.sonos, self.govee, self.lgtv, self.thinq]
         self._by_prefix = {p: a for a in self.adapters for p in a.prefixes}
 
     def adapter_for(self, item_id: str) -> Adapter:
@@ -431,6 +433,38 @@ class LgPairIn(BaseModel):
 @app.post("/api/lgtv/pair")
 async def pair_lgtv(request: Request, body: LgPairIn = Body(LgPairIn())):
     return await hub_of(request).lgtv.pair(body.host)
+
+
+# Brand accounts. Keys are saved in ~/.smarthome/secrets.json and never sent back.
+class GoveeKeyIn(BaseModel):
+    api_key: str = Field(min_length=20, max_length=128, pattern=r"^[A-Za-z0-9-]+$")
+
+
+@app.post("/api/govee/account")
+async def connect_govee(request: Request, body: GoveeKeyIn):
+    return await hub_of(request).govee.connect_account(body.api_key)
+
+
+@app.delete("/api/govee/account")
+async def disconnect_govee(request: Request):
+    await hub_of(request).govee.disconnect_account()
+    return {"ok": True}
+
+
+class ThinQIn(BaseModel):
+    token: str = Field(min_length=20, max_length=512, pattern=r"^[A-Za-z0-9._~+/=-]+$")
+    country: str = Field("US", pattern=r"^[A-Za-z]{2}$")
+
+
+@app.post("/api/thinq/account")
+async def connect_thinq(request: Request, body: ThinQIn):
+    return await hub_of(request).thinq.connect(body.token, body.country)
+
+
+@app.delete("/api/thinq/account")
+async def disconnect_thinq(request: Request):
+    await hub_of(request).thinq.disconnect()
+    return {"ok": True}
 
 
 app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")

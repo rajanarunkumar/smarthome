@@ -169,3 +169,11 @@ button { cursor: pointer; }
 
 .inline.media button { font-size: 20px; }
 .field.inline > .switch { flex: none; }
+.row .sub.wrap { white-space: normal; }
+.key-row { flex-wrap: wrap; gap: 8px; }
+.key-row input {
+  flex: 1 1 12em; min-width: 0; padding: 10px 12px; border-radius: 12px;
+  border: 1px solid var(--line); background: var(--bg);
+}
+.key-row input.country { flex: 0 0 4em; text-transform: uppercase; text-align: center; }
+.key-row .pill { flex: none; }

@@ -76,7 +76,7 @@ Scanned from a Mac on the home Wi-Fi on 2026-11-21 (two passes plus the ARP tabl
 
 ## The hub (phase 1: built)
 
-`hub/` is a Python server (FastAPI) with a web app for the iPhone. It currently covers **Kasa**, **Hue**, **Sonos**, **LG webOS TV** and **Govee**, all over the local network:
+`hub/` is a Python server (FastAPI) with a web app for the iPhone. It currently covers **Kasa**, **Hue**, **Sonos**, **LG webOS TV** and **Govee** over the local network, plus optional **Govee** and **LG ThinQ** accounts:
 
 | Brand | What the hub can do | Setup |
 |---|---|---|
@@ -85,8 +85,10 @@ Scanned from a Mac on the home Wi-Fi on 2026-11-21 (two passes plus the ARP tabl
 | Sonos | Play/pause, next/previous, volume, mute, rename. The switch on the Rooms tab means play/pause. Grouped speakers play and pause together. | None: found automatically |
 | LG TV | On/off, volume, mute, input (HDMI…) or app, play/pause | Settings → LG TV → Connect, then **Accept** on the TV. For turning the TV *on*, enable **Turn on via Wi‑Fi** on the TV (Settings → General → Devices → TV Management / External Devices). Needs Python 3.12+. |
 | Govee | On/off, brightness, color, white | In the Govee app, turn on **LAN Control** for each light (device → settings). Not every model supports it. |
+| Govee account (optional) | Adds Govee lights without LAN Control, Govee plugs, and the device names from the Govee app. A light that answers on the LAN is still controlled locally. | In the Govee Home app: Profile → Settings → **Apply for API Key** (arrives by email). Paste it in hub **Settings → Govee account**. |
+| LG ThinQ (optional) | Washer, dryer, fridge, dishwasher, oven and other ThinQ appliances, with status such as "Running · 32 min left". AC, air purifiers, (de)humidifiers and fans can be turned on and off. Laundry, dishwashers and ovens are **read-only**: the hub never starts or stops them. | At **connect-pat.lgthinq.com**, sign in with your LG account, **Add new token** with every permission ticked, and paste it in hub **Settings → LG ThinQ appliances** with your country code. |
 
-Govee and LG have no way to rename a device from outside their apps, so names you give those in the hub are kept in the hub.
+Govee, LG TV and LG ThinQ have no way to rename a device from outside their apps, so names you give those in the hub are kept in the hub. Account keys are saved only in `~/.smarthome/secrets.json` on the Mac and are never sent back to the web app.
 
 
 - **Rooms tab:** every device grouped by room, power switches, "all on/off" per room. Tap a device to rename it (the name is written back to the brand), move it to a room, or set brightness, color and white temperature.
