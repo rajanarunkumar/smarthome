@@ -23,7 +23,7 @@ class Device(BaseModel):
     brand: str
     name: str
     model: str | None = None
-    kind: Literal["plug", "dimmer", "light", "speaker", "tv", "appliance", "vacuum", "purifier", "pool"]
+    kind: Literal["plug", "dimmer", "light", "speaker", "tv", "appliance", "vacuum", "purifier", "pool", "lock"]
     room_id: int | None = None
     online: bool = True
     on: bool | None = None
@@ -62,6 +62,7 @@ class StateIn(BaseModel):
     action: str | None = Field(None, pattern=r"^[A-Za-z_]{2,24}$")
     delay_start_hours: int | None = Field(None, ge=1, le=24)
     level: int | None = Field(None, ge=1, le=10)
+    locked: bool | None = None         # locks: True locks, False unlocks
 
 
 class DevicePatch(BaseModel):

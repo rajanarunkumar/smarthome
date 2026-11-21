@@ -182,3 +182,5 @@ button { cursor: pointer; }
 .pill:disabled { opacity: .45; cursor: not-allowed; }
 .name.small { font-size: 15px; }
 .sub-value { font-variant-numeric: tabular-nums; color: var(--muted); }
+.lock-badge { flex: none; }
+.row > .pill { flex: none; }

@@ -22,6 +22,7 @@ from .adapters.hue_adapter import HueAdapter
 from .adapters.kasa_adapter import KasaAdapter
 from .adapters.lgtv_adapter import LgTvAdapter
 from .adapters.pentair_adapter import PentairAdapter
+from .adapters.schlage_adapter import SchlageAdapter
 from .adapters.sonos_adapter import SonosAdapter
 from .adapters.thinq_adapter import ThinQAdapter
 from .auth import SESSION_COOKIE, Auth
@@ -48,8 +49,9 @@ class Hub:
         self.dyson = DysonAdapter(self.secrets)
         self.ecovacs = EcovacsAdapter(self.secrets)
         self.pentair = PentairAdapter(self.secrets)
+        self.schlage = SchlageAdapter(self.secrets)
         self.adapters: list[Adapter] = [self.kasa, self.hue, self.sonos, self.govee, self.lgtv, self.thinq,
-                                        self.dyson, self.ecovacs, self.pentair]
+                                        self.dyson, self.ecovacs, self.pentair, self.schlage]
         self._by_prefix = {p: a for a in self.adapters for p in a.prefixes}
 
     def adapter_for(self, item_id: str) -> Adapter:
@@ -198,6 +200,9 @@ async def list_devices(request: Request):
 
 @app.post("/api/devices/{device_id}/state")
 async def set_device_state(request: Request, device_id: str, state: StateIn):
+    if state.locked is False and not (request.state.user or {}).get("email"):
+        # Scripts with the API token (e.g. Siri Shortcuts) may lock, never unlock.
+        raise HubError(403, "Unlocking needs you to be signed in with Google or Face ID.")
     await hub_of(request).adapter_for(device_id).set_state(device_id, state)
     return {"ok": True}
 
@@ -253,7 +258,9 @@ async def delete_room(request: Request, room_id: int):
 @app.post("/api/rooms/{room_id}/state")
 async def set_room_state(request: Request, room_id: int, state: StateIn):
     hub = hub_of(request)
-    targets = [d for d, r in hub.store.room_map().items() if r == room_id]
+    # Locks are never part of "All on / All off".
+    targets = [d for d, r in hub.store.room_map().items()
+               if r == room_id and not d.startswith("schlage:")]
     results = await asyncio.gather(
         *(hub.adapter_for(d).set_state(d, state) for d in targets), return_exceptions=True
     )
@@ -514,6 +521,17 @@ async def ecovacs_connect(request: Request, body: LoginIn):
 @app.delete("/api/ecovacs/account")
 async def ecovacs_disconnect(request: Request):
     await hub_of(request).ecovacs.disconnect()
+    return {"ok": True}
+
+
+@app.post("/api/schlage/account")
+async def schlage_connect(request: Request, body: LoginIn):
+    return await hub_of(request).schlage.connect(body.email, body.password)
+
+
+@app.delete("/api/schlage/account")
+async def schlage_disconnect(request: Request):
+    await hub_of(request).schlage.disconnect()
     return {"ok": True}
 
 

@@ -90,9 +90,10 @@ Scanned from a Mac on the home Wi-Fi on 2026-11-21 (two passes plus the ARP tabl
 
 | Dyson | Purifiers and fans: on/off, fan speed, auto, oscillation, night mode, temperature, humidity, PM2.5 and filter life. Controlled directly on the Wi‑Fi. | Settings → **Dyson**: enter the MyDyson email, then the code Dyson emails and the password. Only each device's local key is saved. |
 | Ecovacs | Deebot robots: clean, pause, resume, return to dock, battery. | Settings → **Ecovacs** with the Ecovacs app email and password (only a hash is saved). Needs Python 3.13+. |
+| Schlage | Encode Wi‑Fi locks: lock, unlock, who used it last, door open/closed, battery. **Safety:** locks have no on/off switch and are skipped by a room's "All on/All off"; unlocking needs a second tap and a person signed in with Google or Face ID. Scripts using the API token (Siri Shortcuts) can lock but never unlock. | Settings → **Schlage** with a Schlage Home email and password. Schlage's sign-in needs the password, so it's kept in `~/.smarthome/secrets.json`. Share the lock with a **second Schlage account** in the Schlage Home app and use that here, so you can revoke the hub on its own. |
 | Pentair Home | Pool equipment readings (pump running, speed, power…), **view only**: Pentair has no public way for other apps to control Pentair Home devices. | Settings → **Pentair** with the Pentair Home email and password (only login tokens are saved). |
 
-Govee, LG TV, LG ThinQ, Dyson, Ecovacs and Pentair have no way to rename a device from outside their apps, so names you give those in the hub are kept in the hub. Account keys are saved only in `~/.smarthome/secrets.json` on the Mac and are never sent back to the web app.
+Govee, LG TV, LG ThinQ, Dyson, Ecovacs, Pentair and Schlage have no way to rename a device from outside their apps, so names you give those in the hub are kept in the hub. Account keys are saved only in `~/.smarthome/secrets.json` on the Mac and are never sent back to the web app.
 
 
 - **Rooms tab:** every device grouped by room, power switches, "all on/off" per room. Tap a device to rename it (the name is written back to the brand), move it to a room, or set brightness, color and white temperature.

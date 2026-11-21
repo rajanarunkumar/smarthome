@@ -14,9 +14,9 @@ const view = $("#view");
 const sheet = $("#sheet");
 const DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const DAY_LABEL = { mon: "Mon", tue: "Tue", wed: "Wed", thu: "Thu", fri: "Fri", sat: "Sat", sun: "Sun" };
-const BRAND = { kasa: "Kasa", hue: "Hue", sonos: "Sonos", lg: "LG", govee: "Govee", thinq: "LG ThinQ", dyson: "Dyson", ecovacs: "Ecovacs", pentair: "Pentair" };
+const BRAND = { kasa: "Kasa", hue: "Hue", sonos: "Sonos", lg: "LG", govee: "Govee", thinq: "LG ThinQ", dyson: "Dyson", ecovacs: "Ecovacs", pentair: "Pentair", schlage: "Schlage" };
 // These brands have no rename API, so the hub keeps the name.
-const HUB_NAMED = new Set(["govee", "lg", "thinq", "dyson", "ecovacs", "pentair"]);
+const HUB_NAMED = new Set(["govee", "lg", "thinq", "dyson", "ecovacs", "pentair", "schlage"]);
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -111,6 +111,7 @@ function deviceSub(d) {
   else if (d.kind === "speaker") parts.push(d.playing ? (d.media ? `Playing ${d.media}` : "Playing") : "Paused");
   else if (d.kind === "tv") parts.push(d.on ? (d.media ? `On · ${d.media}` : "On") : "Off");
   else if (["appliance", "purifier", "pool"].includes(d.kind)) parts.push(d.media || (d.on == null ? "Idle" : d.on ? "On" : "Off"));
+  else if (d.kind === "lock") parts.push([d.media, d.battery != null && d.battery <= 25 ? `battery ${d.battery}%` : ""].filter(Boolean).join(" · "));
   else if (d.kind === "vacuum") parts.push([d.media, d.battery != null ? `${d.battery}% battery` : ""].filter(Boolean).join(" · "));
   else if (d.on && d.brightness) parts.push(`${d.brightness}%`);
   else parts.push(d.on ? "On" : "Off");
@@ -126,6 +127,8 @@ function deviceRow(d) {
         <span class="name">${esc(d.name)}</span>
         <span class="sub">${esc(deviceSub(d))}</span>
       </button>
+      ${d.kind === "lock" ? (d.on ? `<span class="badge lock-badge">Locked</span>`
+        : `<button class="pill primary" data-lock="${esc(d.id)}" ${d.online ? "" : "disabled"}>Lock</button>`) : ""}
       ${d.capabilities.includes("onoff") ? `<label class="switch" aria-label="${esc(d.name)} ${d.kind === "speaker" ? "play" : "power"}">
         <input type="checkbox" data-power="${esc(d.id)}" ${d.on ? "checked" : ""} ${d.online ? "" : "disabled"}>
         <span></span>
@@ -169,6 +172,13 @@ view.addEventListener("change", async (e) => {
 });
 
 view.addEventListener("click", async (e) => {
+  const lockBtn = e.target.closest("[data-lock]");
+  if (lockBtn) {
+    lockBtn.disabled = true;
+    try { await api("POST", `/api/devices/${encodeURIComponent(lockBtn.dataset.lock)}/state`, { locked: true }); toast("Locking…"); await loadDevices(); renderRooms(); }
+    catch (err) { toast(err.message); lockBtn.disabled = false; }
+    return;
+  }
   const open = e.target.closest("[data-open]");
   if (open) return openDevice(open.dataset.open);
   const roomBtn = e.target.closest("[data-room-power]");
@@ -218,6 +228,10 @@ function openDevice(id) {
       <span class="switch"><input type="checkbox" id="f-mute" ${d.muted ? "checked" : ""}><span></span></span></label>` : ""}
     ${caps.has("source") && d.sources.length ? `<label class="field"><span>Input or app</span><select id="f-src">
       ${d.source ? "" : `<option value="">Choose…</option>`}${d.sources.map((x) => `<option value="${esc(x.id)}" ${x.id === d.source ? "selected" : ""}>${esc(x.label)}</option>`).join("")}</select></label>` : ""}
+    ${caps.has("lock") ? `<div class="field"><span>${esc(d.media || "")}</span><div class="inline">
+      <button class="pill primary" id="f-lock" ${d.online ? "" : "disabled"}>Lock</button>
+      <button class="pill danger" id="f-unlock" ${d.online ? "" : "disabled"}>Unlock</button></div>
+      <p class="note">Unlocking takes a second tap to confirm. Shortcuts and scripts can lock, but never unlock.</p></div>` : ""}
     ${caps.has("actions") && d.actions.length ? `<div class="field"><span>${esc(d.media || "Controls")}</span>
       <div class="inline actions">${d.actions.map((a) => {
         const locked = a.id === "START" && d.ready === false;
@@ -276,6 +290,18 @@ function openDevice(id) {
     try { await api("POST", `/api/devices/${encodeURIComponent(id)}/state`, body); toast(done); sheet.close(); }
     catch (err) { toast(err.message); if (btn) btn.disabled = false; }
   };
+  $("#f-lock", sheet)?.addEventListener("click", (e) => act({ locked: true }, e.target, "Locking…"));
+  const unlock = $("#f-unlock", sheet);
+  let armed = null;
+  unlock?.addEventListener("click", () => {
+    if (!armed) {
+      unlock.textContent = "Tap again to unlock";
+      armed = setTimeout(() => { armed = null; unlock.textContent = "Unlock"; }, 4000);
+      return;
+    }
+    clearTimeout(armed); armed = null;
+    act({ locked: false }, unlock, "Unlocking…");
+  });
   sheet.querySelectorAll("[data-action]").forEach((btn) => btn.addEventListener("click",
     () => act({ action: btn.dataset.action }, btn, `${btn.textContent}: sent`)));
   $("#f-delay-go", sheet)?.addEventListener("click", (e) =>
@@ -450,6 +476,7 @@ function renderSettings() {
   const dyson = state.status?.dyson || {};
   const ecovacs = state.status?.ecovacs || {};
   const pentair = state.status?.pentair || {};
+  const schlage = state.status?.schlage || {};
   const accountCard = (name, st, form, about, connectedText) => `
     <div class="section-title"><span>${esc(name)}</span></div>
     <div class="card">${st.available === false ? `
@@ -532,6 +559,12 @@ function renderSettings() {
         <button class="pill primary" id="ecovacs-on">Connect</button></div>`,
       "Deebot robot vacuums: clean, pause, return to the dock, battery. The hub keeps a hash of the password, not the password.",
       `${count("ecovacs")} robot(s)`)}
+    ${accountCard("Schlage", schlage, `
+      <div class="row key-row"><input type="email" id="schlage-email" placeholder="Schlage Home email" autocomplete="off">
+        <input type="password" id="schlage-pw" placeholder="Password" autocomplete="off">
+        <button class="pill primary" id="schlage-on">Connect</button></div>`,
+      "Encode Wi‑Fi locks: lock, unlock, who used it last, battery. Schlage needs the password kept on the hub Mac, so share your lock with a second Schlage account in the Schlage Home app and use that one here.",
+      `${count("schlage")} lock(s)`)}
     ${accountCard("Pentair", pentair, `
       <div class="row key-row"><input type="email" id="pentair-email" placeholder="Pentair Home email" autocomplete="off">
         <input type="password" id="pentair-pw" placeholder="Password" autocomplete="off">
@@ -587,7 +620,9 @@ function renderSettings() {
     (r) => `Ecovacs connected: ${r.devices} robot(s)`);
   accountButton("#pentair-on", () => api("POST", "/api/pentair/account", { email: val("#pentair-email"), password: $("#pentair-pw").value }),
     (r) => `Pentair connected: ${r.devices} device(s)`);
-  for (const b of ["dyson", "ecovacs", "pentair"]) accountButton(`#${b}-off`, () => api("DELETE", `/api/${b}/account`), () => `${BRAND[b]} disconnected`);
+  accountButton("#schlage-on", () => api("POST", "/api/schlage/account", { email: val("#schlage-email"), password: $("#schlage-pw").value }),
+    (r) => `Schlage connected: ${r.devices} lock(s)`);
+  for (const b of ["dyson", "ecovacs", "pentair", "schlage"]) accountButton(`#${b}-off`, () => api("DELETE", `/api/${b}/account`), () => `${BRAND[b]} disconnected`);
   accountButton("#govee-off", () => api("DELETE", "/api/govee/account"), () => "Govee account disconnected");
   accountButton("#thinq-off", () => api("DELETE", "/api/thinq/account"), () => "LG ThinQ disconnected");
   $("#lg-pair")?.addEventListener("click", async (e) => {
