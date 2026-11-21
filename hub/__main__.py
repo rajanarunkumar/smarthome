@@ -23,7 +23,7 @@ def main() -> None:
     print("\nSmart home hub")
     print(f"  On this Mac:   http://localhost:{args.port}/#token={token}")
     print(f"  On your phone: http://{host}:{args.port}/#token={token}")
-    print("  Open the link once; the app remembers the token.\n")
+    print("  Open the link once; the app remembers the token.\n", flush=True)
     uvicorn.run("hub.app:app", host=args.host, port=args.port, log_level="warning")
 
 
