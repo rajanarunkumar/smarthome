@@ -204,7 +204,7 @@ function openDevice(id) {
     <label class="field"><span>${HUB_NAMED.has(d.brand) ? "Name" : `Name (also changes it in the ${esc(BRAND[d.brand] || d.brand)} app)`}</span>
       <input type="text" id="f-name" value="${esc(d.name)}" maxlength="32"></label>
     <label class="field"><span>Room</span><select id="f-room">${roomOptions}</select></label>
-    ${caps.has("playback") && d.on !== false || d.kind === "speaker" ? `<div class="field"><span>${esc(d.media || (d.kind === "tv" ? "TV" : "Nothing playing"))}</span>
+    ${caps.has("playback") && d.on !== false || d.kind === "speaker" ? `<div class="field"><span id="f-media">${esc(d.media || (d.kind === "tv" ? "TV" : "Nothing playing"))}</span>
       <div class="inline media">
         <button class="pill" data-play="previous" aria-label="Previous">⏮</button>
         <button class="pill primary" data-play="${d.playing ? "pause" : "play"}" aria-label="Play or pause">${d.playing ? "⏸" : "▶"}</button>
@@ -259,6 +259,11 @@ function openDevice(id) {
         d.playing = playback === "play";
         btn.dataset.play = d.playing ? "pause" : "play";
         btn.textContent = d.playing ? "⏸" : "▶";
+      } else {
+        // Skipping changes the track: show the new title.
+        await loadDevices();
+        const fresh = state.devices.find((x) => x.id === id);
+        if (fresh?.media) $("#f-media", sheet).textContent = fresh.media;
       }
     } catch (err) { toast(err.message); }
   }));
