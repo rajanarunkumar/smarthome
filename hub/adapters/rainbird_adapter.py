@@ -45,6 +45,22 @@ except ImportError:  # pragma: no cover
         pass
 
 WATCH_SECONDS = 30
+MIN_LIBRARY = (6, 1)   # older pyrainbird speaks only HTTP; newer LNK2 firmware answers only HTTPS
+
+
+def library_version() -> str | None:
+    try:
+        from importlib.metadata import version
+        return version("pyrainbird")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def library_too_old(ver: str | None) -> bool:
+    try:
+        return tuple(int(x) for x in (ver or "").split(".")[:2]) < MIN_LIBRARY
+    except ValueError:
+        return False
 HUB_RUN_WINDOW = 4 * 3600  # a run counts as hub-started if the hub asked for that zone this recently
 DAY_NAMES = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"]
 HUB_DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
@@ -343,12 +359,19 @@ class RainBirdAdapter(Adapter):
         if not any(ports.values()):
             return [{"ok": False, "title": f"Nothing answers at {host}",
                      "detail": "Ports 443 and 80 are both closed or silent. Check the IP address (your router's device list shows the Rain Bird "
-                               "Wi-Fi module, often named RainBird or LNK), that the module's light shows it's online, and that this Mac is on the "
-                               "same Wi-Fi network as the controller (not a guest network)."}]
+                               "Wi-Fi module, often named RainBird or LNK; it may have changed), that the module's light shows it's online, and "
+                               "that this Mac is on the same network as the controller. If your router puts smart devices on a separate IoT or "
+                               "guest network, the Rain Bird app still works (it goes through Rain Bird's cloud) but the hub can't reach it. "
+                               "On the Mac, python -m hub.adapters.rainbird_adapter --find searches the network for it."}]
         steps.append({"ok": True, "title": f"{host} is reachable", "detail": f"Port {443 if ports[443] else 80} is open."})
         if not AVAILABLE:
             steps.append({"ok": False, "title": "Rain Bird support isn't installed", "detail": "It needs Python 3.13 or newer on the hub Mac."})
             return steps
+        ver = library_version()
+        if library_too_old(ver):
+            steps.append({"ok": False, "title": f"Rain Bird library {ver} is too old",
+                          "detail": "It can't use the secure (HTTPS) connection newer Rain Bird Wi-Fi modules require, so the right password "
+                                    "still fails. On the Mac: pip install -U -r requirements.txt, then restart the hub."})
         session = aiohttp.ClientSession()
         try:
             ctl = await create_controller(session, host, password or "")
@@ -528,3 +551,104 @@ class RainBirdAdapter(Adapter):
         if self._session is not None:
             await self._session.close()
         self._session = self._ctl = None
+
+
+# ---- command line: python -m hub.adapters.rainbird_adapter [IP] [--find] ----
+def _local_address(host: str) -> str | None:
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect((host, 80))      # no packet is sent; this only picks the interface that would be used
+            return s.getsockname()[0]
+    except OSError:
+        return None
+
+
+async def _open_ports(host: str, ports=(443, 80), timeout: float = 0.8) -> list[int]:
+    found = []
+    for port in ports:
+        try:
+            _, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout)
+            writer.close()
+            found.append(port)
+        except (OSError, asyncio.TimeoutError):
+            pass
+    return found
+
+
+async def find_controllers(password: str, subnet: str) -> list[tuple[str, str]]:
+    """Every address on the subnet with port 443 or 80 open gets one connection attempt. Only a Rain Bird
+    answers with a model name; other devices just fail. Returns [(ip, model)]."""
+    import ipaddress
+    hosts = [str(h) for h in ipaddress.ip_network(subnet, strict=False).hosts()]
+    sem = asyncio.Semaphore(64)
+
+    async def probe(ip: str) -> str | None:
+        async with sem:
+            return ip if await _open_ports(ip) else None
+    candidates = [ip for ip in await asyncio.gather(*(probe(h) for h in hosts)) if ip]
+    print(f"  {len(candidates)} address(es) with a web port open: {', '.join(candidates) or 'none'}")
+    found = []
+    async with aiohttp.ClientSession() as session:
+        for ip in candidates:
+            try:
+                ctl = await asyncio.wait_for(create_controller(session, ip, password), timeout=8)
+                model = await asyncio.wait_for(ctl.get_model_and_version(), timeout=8)
+                found.append((ip, model.model_name))
+                print(f"  {ip}: Rain Bird {model.model_name}")
+            except Exception as exc:  # noqa: BLE001
+                if error_kind(exc) in ("auth", "lockout", "busy"):
+                    found.append((ip, f"Rain Bird (answered: {error_kind(exc)})"))
+                    print(f"  {ip}: looks like a Rain Bird, but: {explain(exc, ip)}")
+    return found
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+    import getpass
+    import platform
+    parser = argparse.ArgumentParser(description="Test the hub's connection to a Rain Bird controller. Sends at most one "
+                                                 "password attempt to the controller (or one per candidate with --find).")
+    parser.add_argument("host", nargs="?", help="controller IP address (default: the one saved in the hub)")
+    parser.add_argument("--find", action="store_true", help="search this Mac's network (/24) for the controller")
+    args = parser.parse_args(argv)
+    saved = Secrets().get("rainbird") or {}
+    print(f"Python {platform.python_version()} · pyrainbird {library_version() or 'not installed'}")
+    if not AVAILABLE:
+        print("Rain Bird support isn't installed: it needs Python 3.13+. Recreate the hub's venv with python3.13 "
+              "and pip install -r requirements.txt.")
+        return 2
+    if library_too_old(library_version()):
+        print("pyrainbird is too old for controllers that only speak HTTPS. Run: pip install -U -r requirements.txt")
+    host = args.host or saved.get("host")
+    password = getpass.getpass("Controller password (Enter = the one saved in the hub): ") or saved.get("password", "")
+    if args.find or not host:
+        import ipaddress
+        local = _local_address(host or "1.1.1.1")
+        if not local:
+            print("This Mac has no network address.")
+            return 1
+        subnet = str(ipaddress.ip_network(local + "/24", strict=False))
+        print(f"Searching {subnet} (this Mac is {local})…")
+        found = asyncio.run(find_controllers(password, subnet))
+        if not found:
+            print("No Rain Bird found. If the Rain Bird app works, the controller is probably on another network "
+                  "(IoT or guest Wi-Fi) or a different subnet. Look for it in your router's device list.")
+            return 1
+        print("Use this address in Settings → Rain Bird:", ", ".join(ip for ip, _ in found))
+        return 0
+    local = _local_address(host)
+    print(f"Controller {host} · this Mac {local or 'unknown'}")
+    if local and local.rsplit(".", 1)[0] != host.rsplit(".", 1)[0]:
+        print("Note: the controller is on a different subnet from this Mac. That only works if your router routes between them.")
+    if host == saved.get("host"):
+        print("Tip: stop the hub first (or expect 'busy'), since the controller answers one request at a time.")
+    steps = asyncio.run(RainBirdAdapter(Secrets()).diagnose(host, password))
+    for step in steps:
+        print(("OK   " if step["ok"] else "FAIL ") + step["title"])
+        print("     " + step["detail"])
+    return 0 if all(s["ok"] for s in steps) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

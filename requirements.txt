@@ -12,7 +12,8 @@ pypentair>=0.5  # Pentair Home
 deebot-client>=17.0; python_version >= "3.13"  # Ecovacs
 pyschlage>=2024.1  # Schlage locks
 smart-meter-texas>=0.5  # TXU / Smart Meter Texas
-pyrainbird>=6.0; python_version >= "3.13"  # Rain Bird
+pyrainbird>=6.10; python_version >= "3.13"  # Rain Bird (6.1+ needed for controllers that only speak HTTPS)
+ring-doorbell>=0.9  # Ring doorbells and cameras
 anthropic>=2.0  # optional Claude photo analysis
 pillow>=10  # zone photo analysis
 boto3>=1.27  # S3 backups

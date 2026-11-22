@@ -23,7 +23,7 @@ class Device(BaseModel):
     brand: str
     name: str
     model: str | None = None
-    kind: Literal["plug", "dimmer", "light", "speaker", "tv", "appliance", "vacuum", "purifier", "pool", "lock", "meter", "sprinkler"]
+    kind: Literal["plug", "dimmer", "light", "speaker", "tv", "appliance", "vacuum", "purifier", "pool", "lock", "meter", "sprinkler", "thermostat", "doorbell", "camera"]
     room_id: int | None = None
     online: bool = True
     on: bool | None = None
@@ -49,6 +49,8 @@ class Device(BaseModel):
     details: list[dict[str, str]] = []  # read-only readings, [{"label": ..., "value": ...}]
     zones: list[dict[str, Any]] = []   # sprinklers: [{"id", "label", "running"}]
     rain_delay: int | None = None      # sprinklers: rain delay in days
+    # Thermostats: {"current", "humidity", "mode", "modes", "hvac", "heat", "cool", "eco", "fan"} in °F
+    thermostat: dict[str, Any] | None = None
     capabilities: list[str] = []
 
 
@@ -68,6 +70,11 @@ class StateIn(BaseModel):
     zone: int | None = Field(None, ge=1, le=64)            # sprinklers: zone to run
     minutes: int | None = Field(None, ge=1, le=240)        # sprinklers: how long
     rain_delay_days: int | None = Field(None, ge=0, le=14)  # sprinklers: 0 cancels
+    thermostat_mode: Literal["HEAT", "COOL", "HEATCOOL", "OFF"] | None = None
+    heat_f: float | None = Field(None, ge=45, le=90)       # thermostats: heat to (°F)
+    cool_f: float | None = Field(None, ge=50, le=95)       # thermostats: cool to (°F)
+    eco: bool | None = None
+    fan_minutes: int | None = Field(None, ge=0, le=720)    # thermostats: run the fan; 0 stops the timer
 
 
 class DevicePatch(BaseModel):

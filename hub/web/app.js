@@ -14,9 +14,9 @@ const view = $("#view");
 const sheet = $("#sheet");
 const DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const DAY_LABEL = { mon: "Mon", tue: "Tue", wed: "Wed", thu: "Thu", fri: "Fri", sat: "Sat", sun: "Sun" };
-const BRAND = { kasa: "Kasa", hue: "Hue", sonos: "Sonos", lg: "LG", govee: "Govee", thinq: "LG ThinQ", dyson: "Dyson", ecovacs: "Ecovacs", pentair: "Pentair", schlage: "Schlage", smt: "Smart Meter Texas", water: "My Water Advisor", rainbird: "Rain Bird", hub: "Hub" };
+const BRAND = { kasa: "Kasa", hue: "Hue", sonos: "Sonos", lg: "LG", govee: "Govee", thinq: "LG ThinQ", dyson: "Dyson", ecovacs: "Ecovacs", pentair: "Pentair", schlage: "Schlage", smt: "Smart Meter Texas", water: "My Water Advisor", rainbird: "Rain Bird", ring: "Ring", nest: "Nest", hub: "Hub" };
 // These brands have no rename API, so the hub keeps the name.
-const HUB_NAMED = new Set(["govee", "lg", "thinq", "dyson", "ecovacs", "pentair", "schlage", "smt", "water", "rainbird"]);
+const HUB_NAMED = new Set(["govee", "lg", "thinq", "dyson", "ecovacs", "pentair", "schlage", "smt", "water", "rainbird", "ring", "nest"]);
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -27,8 +27,12 @@ async function api(method, path, body) {
     credentials: "same-origin",
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  if (res.status === 401 && !path.startsWith("/api/auth/")) { state.signedIn = false; showLogin(); throw new Error("Sign in required"); }
   const data = res.headers.get("content-type")?.includes("json") ? await res.json() : null;
+  // Only the hub's own "Sign in required" means you're signed out. A brand saying 401 (Rain Bird, Ring or Nest
+  // rejecting a password or code) is shown as an error instead.
+  if (res.status === 401 && !path.startsWith("/api/auth/") && data?.detail === "Sign in required") {
+    state.signedIn = false; showLogin(); throw new Error("Sign in required");
+  }
   if (!res.ok) {
     const detail = data?.detail;
     throw new Error(typeof detail === "string" ? detail : Array.isArray(detail) ? detail.map((d) => d.msg).join("; ") : `Error ${res.status}`);
@@ -111,7 +115,8 @@ function deviceSub(d) {
   if (!d.online) parts.push("Not responding");
   else if (d.kind === "speaker") parts.push(d.playing ? (d.media ? `Playing ${d.media}` : "Playing") : "Paused");
   else if (d.kind === "tv") parts.push(d.on ? (d.media ? `On · ${d.media}` : "On") : "Off");
-  else if (["appliance", "purifier", "pool", "meter", "sprinkler"].includes(d.kind)) parts.push(d.media || (d.on == null ? "Idle" : d.on ? "On" : "Off"));
+  else if (["doorbell", "camera"].includes(d.kind)) parts.push([d.media, d.battery != null && d.battery <= 25 ? `battery ${d.battery}%` : ""].filter(Boolean).join(" · "));
+  else if (["appliance", "purifier", "pool", "meter", "sprinkler", "thermostat"].includes(d.kind)) parts.push(d.media || (d.on == null ? "Idle" : d.on ? "On" : "Off"));
   else if (d.kind === "lock") parts.push([d.media, d.battery != null && d.battery <= 25 ? `battery ${d.battery}%` : ""].filter(Boolean).join(" · "));
   else if (d.kind === "vacuum") parts.push([d.media, d.battery != null ? `${d.battery}% battery` : ""].filter(Boolean).join(" · "));
   else if (d.on && d.brightness) parts.push(`${d.brightness}%`);
@@ -133,6 +138,9 @@ const ICON_PATHS = {
   unlock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.6-1.8"/>',
   meter: '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>',
   sprinkler: '<path d="M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11z"/>',
+  thermostat: '<circle cx="12" cy="12" r="8.5"/><path d="M12 8v4l2.5 2.5"/>',
+  doorbell: '<rect x="7" y="2.5" width="10" height="19" rx="5"/><circle cx="12" cy="14" r="2.5"/><circle cx="12" cy="7" r="1"/>',
+  camera: '<rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10 5-3v10l-5-3z"/>',
   sparkle: '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z"/>',
   power: '<path d="M12 3v8M6.3 7a8 8 0 1 0 11.4 0"/>',
   chevron: '<path d="m9 6 6 6-6 6"/>',
@@ -338,6 +346,10 @@ function openDevice(id) {
     ${d.delay_max ? `<div class="field"><span>Delayed start</span><div class="inline">
       <input type="number" id="f-delay" min="1" max="${d.delay_max}" value="3" aria-label="Hours from now" ${d.ready ? "" : "disabled"}>
       <button class="pill" id="f-delay-go" ${d.ready ? "" : "disabled"}>Start in hours</button></div></div>` : ""}
+    ${caps.has("thermostat") && d.thermostat ? thermostatHtml(d.thermostat) : ""}
+    ${caps.has("snapshot") ? `<div class="field"><span>Camera</span>
+      <button class="pill" id="f-snap">Take a snapshot</button><div id="f-snap-img"></div></div>` : ""}
+    ${caps.has("events") ? `<div class="field"><span>Recent events</span><div class="card" id="f-events"><div class="row"><span class="sub">Loading…</span></div></div></div>` : ""}
     ${caps.has("level") ? `<label class="field"><span>Fan speed <b id="f-level-v">${d.level ?? "Auto"}</b></span>
       <input type="range" id="f-level" min="1" max="${d.level_max ?? 10}" value="${d.level ?? 5}"></label>` : ""}
     ${d.details.length ? `<div class="field"><span>${d.kind === "sprinkler" ? "Programs on the controller" : "Readings"}</span><div class="card">${d.details.map((x) => `
@@ -403,6 +415,20 @@ function openDevice(id) {
   sheet.querySelectorAll("[data-zone-sched]").forEach((btn) => btn.addEventListener("click", () =>
     openZoneSchedule(d, d.zones.find((z) => z.id === btn.dataset.zoneSched))));
   if (caps.has("zones")) loadPrograms(d);
+  if (caps.has("thermostat")) bindThermostat(d, act);
+  if (caps.has("events")) loadRingEvents(d);
+  $("#f-snap", sheet)?.addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    e.target.textContent = "Asking the camera…";
+    try {
+      const res = await fetch(`/api/ring/${encodeURIComponent(d.id)}/snapshot`, { credentials: "same-origin" });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `HTTP ${res.status}`);
+      const url = URL.createObjectURL(await res.blob());
+      $("#f-snap-img", sheet).innerHTML = `<img class="snapshot" src="${url}" alt="Snapshot from ${esc(d.name)}">`;
+    } catch (err) { toast(err.message); }
+    e.target.disabled = false;
+    e.target.textContent = "Take another";
+  });
   sheet.querySelectorAll("[data-zone-name]").forEach((input) => input.addEventListener("change", async () => {
     try { await api("PUT", `/api/rainbird/zones/${input.dataset.zoneName}`, { name: input.value.trim() }); toast("Zone renamed"); }
     catch (err) { toast(err.message); }
@@ -619,6 +645,8 @@ function renderSettings() {
   const smt = state.status?.smt || {};
   const water = state.status?.water || {};
   const rainbird = state.status?.rainbird || {};
+  const ring = state.status?.ring || {};
+  const nest = state.status?.nest || {};
   const accountCard = (name, st, form, about, connectedText, key = name.toLowerCase(), extra = "") => `
     <div class="section-title"><span>${esc(name)}</span></div>
     <div class="card">${st.available === false ? `
@@ -710,6 +738,28 @@ function renderSettings() {
         <button class="pill primary" id="schlage-on">Connect</button></div>`,
       "Encode Wi‑Fi locks: lock, unlock, who used it last, battery. Schlage needs the password kept on the hub Mac, so share your lock with a second Schlage account in the Schlage Home app and use that one here.",
       `${count("schlage")} lock(s)`)}
+    ${accountCard("Ring", ring, ring.waiting_for_code ? `
+      <div class="row key-row"><input type="text" inputmode="numeric" id="ring-code" placeholder="Code Ring sent you" autocomplete="one-time-code">
+        <button class="pill primary" id="ring-verify">Connect</button></div>` : `
+      <div class="row key-row"><input type="email" id="ring-email" placeholder="Ring email" autocomplete="off">
+        <input type="password" id="ring-pw" placeholder="Password" autocomplete="off">
+        <button class="pill primary" id="ring-on">Continue</button></div>`,
+      "Doorbells and cameras: latest ring and motion, event history, snapshots, motion detection, lights and siren. Ring then texts or emails a code. The hub keeps Ring's token, not your password.",
+      `${count("ring")} doorbell(s) and camera(s)${ring.error ? ` · ${esc(ring.error)}` : ""}`)}
+    <div class="section-title"><span>Nest thermostat</span></div>
+    <div class="card">${nest.connected ? `
+      <div class="row"><div class="main"><span class="name">Connected</span>
+        <span class="sub wrap">${count("nest")} thermostat(s)${nest.error ? ` · ${esc(nest.error)}` : ""}</span></div>
+        <button class="pill" id="nest-link">Link again</button><button class="pill danger" id="nest-off">Disconnect</button></div>` : `
+      <div class="row"><div class="main"><span class="name">Not connected</span>
+        <span class="sub wrap">Uses Google's Device Access (a one-time US$5 fee to Google). Follow README → <b>Nest thermostat</b> to get the three values below, then link your Google account and tick the thermostat.</span></div></div>
+      ${nest.configured ? `<div class="row"><span class="sub wrap">Project ${esc(nest.project_id || "")} is saved.</span><button class="pill primary" id="nest-link">Link Google account</button></div>` : ""}
+      <div class="row key-row"><input type="text" id="nest-project" placeholder="Device Access project ID" autocomplete="off" spellcheck="false">
+        <input type="text" id="nest-client" placeholder="OAuth client ID" autocomplete="off" spellcheck="false">
+        <input type="password" id="nest-secret" placeholder="OAuth client secret" autocomplete="off">
+        <button class="pill ${nest.configured ? "" : "primary"}" id="nest-save">Save and link</button></div>
+      <p class="note">Redirect URI to add on the OAuth client: <b>${esc(location.origin)}/</b></p>`}
+    </div>
     ${accountCard("Pentair", pentair, `
       <div class="row key-row"><input type="email" id="pentair-email" placeholder="Pentair Home email" autocomplete="off">
         <input type="password" id="pentair-pw" placeholder="Password" autocomplete="off">
@@ -842,7 +892,25 @@ function renderSettings() {
     (r) => `Rain Bird connected: ${r.zones} zone(s)`);
   accountButton("#claude-on", () => api("PUT", "/api/settings/claude", { api_key: val("#claude-key") }), () => "Claude photo analysis is on");
   accountButton("#claude-off", () => api("DELETE", "/api/settings/claude"), () => "Claude photo analysis is off");
-  for (const b of ["dyson", "ecovacs", "pentair", "schlage", "smt", "water", "rainbird"]) accountButton(`#${b}-off`, () => api("DELETE", `/api/${b}/account`), () => `${BRAND[b]} disconnected`);
+  accountButton("#ring-on", async () => {
+    const r = await api("POST", "/api/ring/account", { email: val("#ring-email"), password: $("#ring-pw").value });
+    return r;
+  }, (r) => r.needs_code ? "Enter the code Ring sent you" : `Ring connected: ${r.devices} device(s)`);
+  accountButton("#ring-verify", () => api("POST", "/api/ring/account", { code: val("#ring-code") }),
+    (r) => `Ring connected: ${r.devices} device(s)`);
+  $("#nest-save")?.addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    try {
+      const r = await api("PUT", "/api/nest/config", { project_id: val("#nest-project"), client_id: val("#nest-client"), client_secret: $("#nest-secret").value.trim() });
+      location.href = r.url;
+    } catch (err) { toast(err.message); e.target.disabled = false; }
+  });
+  $("#nest-link")?.addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    try { location.href = (await api("POST", "/api/nest/link")).url; }
+    catch (err) { toast(err.message); e.target.disabled = false; }
+  });
+  for (const b of ["dyson", "ecovacs", "pentair", "schlage", "smt", "water", "rainbird", "ring", "nest"]) accountButton(`#${b}-off`, () => api("DELETE", `/api/${b}/account`), () => `${BRAND[b]} disconnected`);
   accountButton("#govee-off", () => api("DELETE", "/api/govee/account"), () => "Govee account disconnected");
   accountButton("#thinq-off", () => api("DELETE", "/api/thinq/account"), () => "LG ThinQ disconnected");
   $("#lg-pair")?.addEventListener("click", async (e) => {
@@ -986,6 +1054,25 @@ async function finishGoogleRedirect() {
   } catch (err) { showLogin(); toast(err.message); return false; }
 }
 
+// Nest: Google sends the user back to "/?code=…&state=nest.…" after they pick the thermostats to share.
+const nestReturn = (() => {
+  const q = new URLSearchParams(location.search);
+  const st = q.get("state") || "";
+  if (!st.startsWith("nest.")) return null;
+  history.replaceState(null, "", location.pathname);
+  return q.get("error") ? { error: q.get("error") } : { code: q.get("code"), state: st };
+})();
+async function finishNestLink() {
+  if (!nestReturn) return;
+  if (nestReturn.error) { toast("Nest linking was cancelled"); return; }
+  try {
+    const r = await api("POST", "/api/nest/code", { code: nestReturn.code, state: nestReturn.state });
+    toast(`Nest connected: ${r.devices} thermostat(s)`);
+    state.tab = "settings";
+    render(true);
+  } catch (err) { toast(err.message); }
+}
+
 // The iPhone app opens /?app_challenge=… in a sign-in sheet; after signing in here,
 // a tap hands it a one-time code through its smarthome:// link.
 const APP_KEY = "hub-app-challenge";
@@ -1064,7 +1151,7 @@ async function boot() {
     state.me = await api("GET", "/api/auth/me");
     state.signedIn = state.me.signed_in;
   } catch { state.signedIn = false; }
-  if (state.signedIn) { await afterSignIn(false); } else { showLogin(); }
+  if (state.signedIn) { await afterSignIn(false); await finishNestLink(); } else { showLogin(); }
 }
 boot();
 
@@ -1214,6 +1301,7 @@ async function loadBackup() {
   if (!box) return;
   let b;
   try { b = await api("GET", "/api/backup"); } catch (err) { box.innerHTML = `<div class="row"><span class="sub">${esc(err.message)}</span></div>`; return; }
+  if (!box.isConnected) return;   // Settings was redrawn while this loaded; the new card loads itself
   const when = (iso) => new Date(iso).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
   const mb = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
   if (b.configured) {
@@ -1270,4 +1358,59 @@ async function showRecoveryKey() {
       <p class="note">To restore on a new Mac: download the .enc file from S3, then run <code>python -m hub.backup restore FILE.enc --key KEY --to ~/.smarthome</code> (hub stopped).</p>`);
     $("#rk-copy", sheet).addEventListener("click", async () => { try { await navigator.clipboard.writeText(key); toast("Copied"); } catch { toast("Select the key and copy it"); } });
   } catch (err) { toast(err.message); }
+}
+
+// ---------- thermostats ----------
+const MODE_LABEL = { HEAT: "Heat", COOL: "Cool", HEATCOOL: "Heat · Cool", OFF: "Off" };
+function thermostatHtml(t) {
+  const stepper = (id, label, value) => `
+    <div class="row"><span class="main"><span class="name">${label}</span></span>
+      <button class="pill" data-step="${id}" data-delta="-1" aria-label="${label} down">−</button>
+      <b class="setpoint" id="f-${id}">${value ?? "–"}°</b>
+      <button class="pill" data-step="${id}" data-delta="1" aria-label="${label} up">+</button></div>`;
+  const heat = ["HEAT", "HEATCOOL"].includes(t.mode) && !t.eco;
+  const cool = ["COOL", "HEATCOOL"].includes(t.mode) && !t.eco;
+  return `<div class="field"><span>${t.current ?? "–"}° inside${t.humidity != null ? ` · ${t.humidity}% humidity` : ""} · ${t.hvac === "HEATING" ? "heating" : t.hvac === "COOLING" ? "cooling" : "idle"}</span>
+    <label class="field"><span>Mode</span><select id="f-tmode">${(t.modes.length ? t.modes : ["HEAT", "COOL", "HEATCOOL", "OFF"]).map((m) =>
+      `<option value="${m}" ${m === t.mode ? "selected" : ""}>${MODE_LABEL[m] || m}</option>`).join("")}</select></label>
+    <div class="card">${heat ? stepper("heat", "Heat to", t.heat) : ""}${cool ? stepper("cool", "Cool to", t.cool) : ""}
+      ${t.eco != null ? `<label class="row"><span class="main"><span class="name">Eco</span><span class="sub">${t.eco ? "Holding eco temperatures" : "Off"}</span></span>
+        <span class="switch"><input type="checkbox" id="f-eco" ${t.eco ? "checked" : ""}><span></span></span></label>` : ""}
+      ${t.fan != null ? `<div class="row"><span class="main"><span class="name">Fan</span><span class="sub">${t.fan === "ON" ? "Running on a timer" : "Auto"}</span></span>
+        ${t.fan === "ON" ? `<button class="pill" data-fan="0">Stop</button>` : `<button class="pill" data-fan="15">15 min</button><button class="pill" data-fan="60">1 hour</button>`}</div>` : ""}
+    </div>${t.eco ? `<p class="note">Eco is on, so the temperature can't be changed. Turn Eco off first.</p>` : ""}</div>`;
+}
+function bindThermostat(d, act) {
+  const t = d.thermostat;
+  const target = { heat: t.heat, cool: t.cool };
+  const push = debounce(async () => {
+    const body = {};
+    if (["HEAT", "HEATCOOL"].includes(t.mode)) body.heat_f = target.heat;
+    if (["COOL", "HEATCOOL"].includes(t.mode)) body.cool_f = target.cool;
+    try { await api("POST", `/api/devices/${encodeURIComponent(d.id)}/state`, body); toast("Temperature set"); }
+    catch (err) { toast(err.message); }
+  }, 1200);   // one call after the taps stop: Google limits how often a thermostat can be changed
+  sheet.querySelectorAll("[data-step]").forEach((btn) => btn.addEventListener("click", () => {
+    const key = btn.dataset.step;
+    if (target[key] == null) return;
+    target[key] += Number(btn.dataset.delta);
+    $(`#f-${key}`, sheet).textContent = `${target[key]}°`;
+    push();
+  }));
+  $("#f-tmode", sheet)?.addEventListener("change", (e) => act({ thermostat_mode: e.target.value }, null, `Mode: ${MODE_LABEL[e.target.value]}`));
+  $("#f-eco", sheet)?.addEventListener("change", (e) => act({ eco: e.target.checked }, null, e.target.checked ? "Eco on" : "Eco off"));
+  sheet.querySelectorAll("[data-fan]").forEach((btn) => btn.addEventListener("click", () =>
+    act({ fan_minutes: Number(btn.dataset.fan) }, btn, Number(btn.dataset.fan) ? `Fan on for ${btn.dataset.fan} min` : "Fan back to auto")));
+}
+
+// ---------- Ring ----------
+async function loadRingEvents(d) {
+  const box = $("#f-events", sheet);
+  try {
+    const r = await api("GET", `/api/ring/${encodeURIComponent(d.id)}/events`);
+    if (!box.isConnected) return;
+    box.innerHTML = r.events.map((e) => `
+      <div class="row"><span class="main"><span class="name small">${esc(e.label)}</span>${e.kind === "ding" ? `<span class="sub">${e.answered ? "Answered" : "Not answered"}</span>` : ""}</span>
+        <span class="sub-value">${esc(e.when)}</span></div>`).join("") || `<div class="row"><span class="sub">No events in Ring's history.</span></div>`;
+  } catch (err) { box.innerHTML = `<div class="row"><span class="sub wrap">${esc(err.message)}</span></div>`; }
 }

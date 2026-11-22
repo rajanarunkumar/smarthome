@@ -70,7 +70,9 @@ Subclass `Adapter` (`hub/adapters/base.py`): set `brand`, `label`, `prefixes`, i
 | McKinney water | **My Water Advisor 2**, API reverse-engineered from the site JS (`customerportal-api.harmonyencoremdm.com`; login POST `/consumer/login`, header `x-access-token`; `/consumption/daily|hourly/{meterCount}/{start}/{end}`). Response shapes (`consDate`, `cons`, `units`) inferred from the JS only | built, **unverified against the live API** |
 | Rain Bird | pyrainbird local (Py 3.13); run zone, stop, rain delay, run program, zone names/areas, per-zone schedule write on ESP-RZXe/ST8 with read-back. Program-based (ESP-TM2/ME3) controllers cannot be written by any library, so **smart programs** run in the hub instead | built, untested; user's controller model unknown |
 | Atmos Energy | not built: no API/library; options in README | open |
-| Lennox iComfort | not built; HomeKit/cloud; would explain HVAC spikes | open |
+| Ring | `hub/adapters/ring_adapter.py`, ring-doorbell 0.9.x; email+password then 2FA code (password kept only in memory for 10 min); saves token + hardware_id; token_updater writes refreshed tokens; doorbell/camera kinds, events, snapshot (`GET /api/ring/{id}/snapshot`), motion/light/siren actions | built, untested on real account |
+| Nest | `hub/adapters/nest_adapter.py`, direct httpx to SDM; `PUT /api/nest/config` then Google partnerconnections redirect back to `/?code&state=nest.…`, web app posts `/api/nest/code`; refresh token stored; device list cached 60 s; °F in the UI, °C to Google; thermostat counted in energy TRACKED_KINDS | built, untested on real account |
+| Lennox iComfort | not built; waiting for the user to say local (S30/E30 IP) vs iComfort login | open |
 | Leviton | not built (Matter/HomeKit) | open |
 
 ## Analytics (all in Insights)
@@ -117,3 +119,9 @@ Subclass `Adapter` (`hub/adapters/base.py`): set `brand`, `label`, `prefixes`, i
 ## Where to start next
 
 See `.claude/NEXT.md`.
+
+## Session: Ring, Nest, Rain Bird connectivity (Nov 2026)
+- Built Ring and Nest (see table). New Device kinds `thermostat`, `doorbell`, `camera`; `Device.thermostat` dict; StateIn `thermostat_mode`, `heat_f`, `cool_f`, `eco`, `fan_minutes`.
+- **Web app bug fixed:** `api()` treated any 401 as "signed out" and showed the login screen, so a brand rejecting a password (Rain Bird, Ring, Nest) looked like being logged out. Now only the hub's own "Sign in required" does that.
+- Rain Bird: `python -m hub.adapters.rainbird_adapter [IP] [--find]` CLI (versions, subnet hint, port probe, one password attempt; --find scans the /24). pyrainbird < 6.1 can't do HTTPS (verified by diffing wheels), so requirements now pin >= 6.10 and the connection test warns on old versions.
+- `loadBackup()` no longer throws when Settings re-renders mid-load.

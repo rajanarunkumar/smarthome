@@ -95,9 +95,11 @@ Scanned from a Mac on the home Wi-Fi on 2026-11-21 (two passes plus the ARP tabl
 | TXU (Smart Meter Texas) | Electricity: yesterday's kWh (from 15-minute data) and the meter reading, read hourly (Smart Meter Texas allows about 2 reads an hour). TXU has no API of its own; it reads the same meter. | Make a free account at **smartmetertexas.com** (separate from TXU), then Settings → **Smart Meter Texas**. |
 | McKinney water (My Water Advisor 2) | Water: latest full day, last 7 days, this month. Read only. Uses the same calls as the mywateradvisor2.com website, which has no published API, so a site change can break it. | Settings → **McKinney water** with the My Water Advisor email and password. |
 | Rain Bird | Controllers with the LNK/LNK2 Wi‑Fi module, controlled directly on your Wi‑Fi: run any zone for 5–60 minutes, stop, rain delay (1–14 days), what's watering and time left, rain sensor, and the controller's own programs (read only). Zone names are kept in the hub. Needs Python 3.13+. | Settings → **Rain Bird** with the controller's IP address and the **controller password** set in the Rain Bird app (not your Rain Bird account password). |
+| Ring | Doorbells and cameras (indoor and outdoor): latest ring and motion, the event history, a fresh **snapshot**, motion detection on/off, floodlight and siren where the camera has them, battery and Wi‑Fi signal. No live video. Uses Ring's cloud through the unofficial `ring-doorbell` library (the one Home Assistant uses). | Settings → **Ring** with the Ring email and password, then the code Ring texts or emails. Only Ring's token is saved, never the password. The hub appears in the Ring app under Control Center → Authorized Client Devices, where it can be removed. |
+| Nest thermostat | Temperature, humidity, heating/cooling now, mode (Heat, Cool, Heat·Cool, Off), set temperatures, Eco, fan timer. Google's official Smart Device Management API. Thermostat run time also feeds the Electricity insights. | See **Nest thermostat** below (one-time US$5 Google fee). |
 | Atmos Energy | Not supported yet: Atmos has no API, no library, and isn't on Opower. | See "Atmos Energy" below. |
 
-Govee, LG TV, LG ThinQ, Dyson, Ecovacs, Pentair and Schlage have no way to rename a device from outside their apps, so names you give those in the hub are kept in the hub. Account keys are saved only in `~/.smarthome/secrets.json` on the Mac and are never sent back to the web app.
+Govee, LG TV, LG ThinQ, Dyson, Ecovacs, Pentair, Schlage, Ring and Nest have no way to rename a device from outside their apps, so names you give those in the hub are kept in the hub. Account keys are saved only in `~/.smarthome/secrets.json` on the Mac and are never sent back to the web app.
 
 
 - **Rooms tab:** every device grouped by room, power switches, "all on/off" per room. Tap a device to rename it (the name is written back to the brand), move it to a room, or set brightness, color and white temperature.
@@ -182,7 +184,32 @@ The hub only ever needs a **token**, never your LG password, so there is nothing
 1. Open **connect-pat.lgthinq.com** and choose the same sign-in you use in the ThinQ app (for example **Continue with Google**) if it's offered.
 2. Community reports say that page may accept only an LG email-and-password account (LG doesn't confirm this either way). If so: create an ordinary LG account (email + password), **invite it as a member of your home in the ThinQ app** (the menu name varies by app version), and make the token with that account. I haven't verified that appliances shared this way show up in LG's API, so check the Settings card says how many appliances it found.
 
+## Nest thermostat
+
+Google only lets outside apps control a Nest through **Device Access**, which needs a one-time US$5 registration. About 15 minutes, once:
+
+1. **Register** at [console.nest.google.com/device-access](https://console.nest.google.com/device-access) with the Google account that owns the thermostat, and pay the US$5 fee.
+2. **Google Cloud project** (the one used for Google sign-in is fine): in [console.cloud.google.com](https://console.cloud.google.com), *APIs & Services → Library*, enable **Smart Device Management API**.
+3. **OAuth client:** *APIs & Services → Credentials → Create credentials → OAuth client ID → Web application*. Under *Authorized redirect URIs* add the hub's address with a trailing slash, exactly as Settings → Nest shows it (for example `https://your-mac.your-tailnet.ts.net/`). Copy the **client ID** and **client secret**. On *OAuth consent screen*, set the app to **In production** (in Testing, Google expires the link after 7 days); you can skip verification for your own account.
+4. **Device Access project:** in the Device Access console, *Create project*, paste the OAuth client ID, skip events. Copy the **project ID** (a UUID).
+5. Hub: **Settings → Nest**, paste the project ID, client ID and client secret, tap **Save and link**. Google asks which home and thermostat to share; tick the thermostat. You come back to the hub and it appears in Rooms.
+
+The hub reads the thermostat at most once a minute (Google limits calls); temperature taps are sent once you stop tapping. "Google no longer accepts the hub's Nest link" means the link was removed or expired: tap **Link again**.
+
+## Ring
+
+Settings → **Ring**: email and password, **Continue**, then the code Ring sends. If your Ring login has no password (a sign-in through another account), set one first: ring.com → Forgot password, with the same email. For a separate revocable login, add a **Shared User** in the Ring app (Control Center → Shared Users) and use that account here; shared users see devices and events but can't change some settings. Snapshots from battery cameras need **Snapshot Capture** on in the Ring app (Device Settings → Video Settings).
+
 ## Rain Bird: when it won't connect
+
+**If the password works in the Rain Bird app but not in the hub,** the app is almost certainly not talking to the controller the way the hub does. The app also works through Rain Bird's cloud, from anywhere; the hub needs to reach the controller **directly on your network**. The usual causes, most likely first:
+
+1. **The IP address changed** (routers hand out new ones). Run the finder on the Mac, from the smarthome folder: `.venv/bin/python -m hub.adapters.rainbird_adapter --find` (the hub's venv). It asks for the controller password, searches the Mac's network and prints the controller's address. Reserve that address for the controller in your router so it stops moving.
+2. **The controller is on a separate IoT or guest network** (Orbi, eero and others offer one). The app still works via the cloud, but the Mac can't reach it. Put the controller on the main network, or the Mac on the same one.
+3. **Old Rain Bird library.** pyrainbird before 6.1 speaks only HTTP; newer LNK2 firmware answers only HTTPS, so the right password still fails. `pip install -U -r requirements.txt` in the hub's venv, then restart the hub. The test reports the installed version.
+4. **Wrong kind of password.** It's the controller's own password (Rain Bird app → the controller → Settings → Controller password), not the Rain Bird account password.
+
+The same test from the command line, without the web app: `.venv/bin/python -m hub.adapters.rainbird_adapter 192.168.1.40` (your controller's address). It prints Python and library versions, which network this Mac is on, whether the ports answer, and what the controller says. It sends one password attempt.
 
 **Settings → Rain Bird → Test connection** (before connecting, or **Test** once connected) walks through it and says which step fails. It sends at most one request to the controller, and never while the hub is paused, so testing can't cause a lockout.
 
@@ -279,7 +306,7 @@ Atmos has no API and no maintained library; Opower doesn't cover it. Options, fr
 
 1. ~~Core hub, Kasa and Hue, native schedules~~ (done)
 2. ~~**Sign-in:** Google sign-in plus Face ID / Touch ID (passkeys), over HTTPS through Tailscale~~ (done)
-3. **More devices:** ~~LG TV, Sonos, Govee (LAN)~~ (done). Next: Leviton and Lennox (HomeKit), Leviton Matter and Nest Thermostat (Matter), Ring.
+3. **More devices:** ~~LG TV, Sonos, Govee (LAN), Ring, Nest thermostat~~ (done). Next: Lennox, Leviton.
 4. **Siri:** a "schedule" Shortcut that turns spoken requests into hub schedules, then a HomeKit bridge for direct Siri control.
 5. **Alexa and Google:** private skill and smart-home project, so both show the hub's names and rooms.
 6. **Govee private API** investigation for timers.

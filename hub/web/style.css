@@ -368,3 +368,7 @@ button.tile-icon:active { transform: scale(.92); }
   .dtile:active, .stile:active, .chip-btn:active, button.tile-icon:active { transform: none; }
 }
 .rec .status.status-neutral { background: var(--line); color: var(--ink) !important; }
+
+/* Ring snapshots and thermostat setpoints */
+img.snapshot { display: block; width: 100%; margin-top: 10px; border-radius: 12px; }
+b.setpoint { min-width: 3.2em; text-align: center; font-size: 1.15rem; font-variant-numeric: tabular-nums; }

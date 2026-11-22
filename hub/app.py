@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Body, FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -21,8 +21,10 @@ from .adapters.govee_adapter import GoveeAdapter
 from .adapters.hue_adapter import HueAdapter
 from .adapters.kasa_adapter import KasaAdapter
 from .adapters.lgtv_adapter import LgTvAdapter
+from .adapters.nest_adapter import NestAdapter
 from .adapters.pentair_adapter import PentairAdapter
 from .adapters.rainbird_adapter import RainBirdAdapter
+from .adapters.ring_adapter import RingAdapter
 from .adapters.schlage_adapter import SchlageAdapter
 from .adapters.smt_adapter import SmartMeterTexasAdapter
 from .adapters.sonos_adapter import SonosAdapter
@@ -65,9 +67,11 @@ class Hub:
         self.smt = SmartMeterTexasAdapter(self.secrets)
         self.water = WaterAdvisorAdapter(self.secrets)
         self.rainbird = RainBirdAdapter(self.secrets)
+        self.ring = RingAdapter(self.secrets)
+        self.nest = NestAdapter(self.secrets)
         self.adapters: list[Adapter] = [self.kasa, self.hue, self.sonos, self.govee, self.lgtv, self.thinq,
                                         self.dyson, self.ecovacs, self.pentair, self.schlage, self.smt, self.water,
-                                        self.rainbird]
+                                        self.rainbird, self.ring, self.nest]
         self.scheduler = HubScheduler(self.store.db, self._apply)
         self.adapters.append(self.scheduler)
         self.last_devices: dict[str, Device] = {}
@@ -807,6 +811,72 @@ async def rainbird_test(request: Request, body: RainBirdTestIn = Body(RainBirdTe
     return {"steps": await rb.diagnose(host, password or "")}
 
 
+# Ring: email and password, then the code Ring sends
+class RingLoginIn(BaseModel):
+    email: str = Field("", max_length=254)
+    password: str = Field("", max_length=200)
+    code: str | None = Field(None, min_length=4, max_length=10, pattern=r"^\d+$")
+
+
+@app.post("/api/ring/account")
+async def ring_connect(request: Request, body: RingLoginIn):
+    if not body.code and not (body.email and body.password):
+        raise HubError(400, "Enter the Ring email and password.")
+    return await hub_of(request).ring.connect(body.email, body.password, body.code)
+
+
+@app.delete("/api/ring/account")
+async def ring_disconnect(request: Request):
+    await hub_of(request).ring.disconnect()
+    return {"ok": True}
+
+
+@app.get("/api/ring/{device_id}/events")
+async def ring_events(request: Request, device_id: str):
+    return {"events": await hub_of(request).ring.history(device_id, limit=30, fresh=True)}
+
+
+@app.get("/api/ring/{device_id}/snapshot")
+async def ring_snapshot(request: Request, device_id: str):
+    image = await hub_of(request).ring.snapshot(device_id)
+    return Response(image, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+# Nest: Device Access project + OAuth client, then link the Google account
+class NestConfigIn(BaseModel):
+    project_id: str = Field(min_length=8, max_length=80, pattern=r"^[A-Za-z0-9-]+$")
+    client_id: str = Field(min_length=10, max_length=200, pattern=r"^[A-Za-z0-9._-]+$")
+    client_secret: str = Field(min_length=8, max_length=200)
+
+
+class NestCodeIn(BaseModel):
+    code: str = Field(min_length=10, max_length=1000)
+    state: str = Field(min_length=10, max_length=100, pattern=r"^nest\.[A-Za-z0-9_-]+$")
+
+
+@app.put("/api/nest/config")
+async def nest_config(request: Request, body: NestConfigIn):
+    hub = hub_of(request)
+    hub.nest.configure(body.project_id, body.client_id, body.client_secret)
+    return {"url": hub.nest.link_url(_origin(request))}
+
+
+@app.post("/api/nest/link")
+async def nest_link(request: Request):
+    return {"url": hub_of(request).nest.link_url(_origin(request))}
+
+
+@app.post("/api/nest/code")
+async def nest_code(request: Request, body: NestCodeIn):
+    return await hub_of(request).nest.finish_link(_origin(request), body.code, body.state)
+
+
+@app.delete("/api/nest/account")
+async def nest_disconnect(request: Request):
+    await hub_of(request).nest.disconnect()
+    return {"ok": True}
+
+
 @app.delete("/api/rainbird/account")
 async def rainbird_disconnect(request: Request):
     await hub_of(request).rainbird.disconnect()
@@ -1053,6 +1123,8 @@ STORED_SETTINGS = {
     "smt": ("Smart Meter Texas username and password", "password"),
     "water": ("My Water Advisor email and password", "password"),
     "rainbird": ("Rain Bird controller address and password, zone names and sizes", "password"),
+    "ring": ("Ring sign-in token (not the password)", "key"),
+    "nest": ("Nest (Google Device Access) client secret and refresh token", "key"),
     "anthropic_api_key": ("Anthropic API key (photo analysis)", "key"),
     "s3_backup": ("S3 backup bucket and AWS access key", "password"),
 }

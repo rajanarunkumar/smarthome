@@ -27,7 +27,7 @@ from .history import _solve
 
 BALANCE_F = 65.0
 SLOT = timedelta(minutes=15)
-TRACKED_KINDS = {"appliance", "pool", "purifier", "plug", "dimmer", "tv", "vacuum"}
+TRACKED_KINDS = {"appliance", "pool", "purifier", "plug", "dimmer", "tv", "vacuum", "thermostat"}
 LAUNDRY_IDLE = {"POWER_OFF", "INITIAL", "END", "PAUSE", "SLEEP", "ERROR", "STANDBY"}
 
 
