@@ -24,7 +24,52 @@ Nothing below is implemented yet. Pick up from step 1.
 
 ## Step 1: backend speed (`hub/app.py`, adapters)
 
-- **Per-adapter timeout in `Hub.devices()`:** `asyncio.wait_for(a.devices(), 4)`. If an adapter times out, use its last good devices (keep `self._last_by_brand[brand]`), mark them `stale`, and add an error such as "Rain Bird slow, showing last known".
+### L1 in-memory cache, Caffeine-style (`hub/cache.py`, the user asked for this)
+
+A small async loading cache, modelled on Java's Caffeine. Use it for every read endpoint and adapter read instead of ad-hoc timers.
+
+- **API:**
+  - `LoadingCache(name, loader, *, max_size, expire_after_write, refresh_after_write, expire_after_access=None, timeout=None)`
+  - `await cache.get(key)`
+  - `cache.get_if_present(key)`
+  - `cache.put(key, value)`
+  - `cache.invalidate(key)` and `invalidate_all()`
+  - `cache.stats()`
+  - A registry (`caches: dict[str, LoadingCache]`) feeds the Admin tab.
+- **Semantics (same as Caffeine):**
+  - **`refresh_after_write`:** if an entry is older than this, return the old value at once and reload it in the background. At most one reload runs per key at a time.
+  - **`expire_after_write`:** if an entry is older than this, the caller waits for a fresh load. If that load fails or times out, it still serves the expired value marked `stale`, instead of an error.
+  - **Single flight:** concurrent `get()` calls for a missing key share one load future, so 10 tabs mean 1 adapter call.
+  - **Size bound:** LRU eviction (`OrderedDict.move_to_end`) when over `max_size`.
+  - **Failures:** a failed load keeps the previous value, records the error and timestamp, and backs off before the next refresh (no hammering a locked-out Rain Bird).
+- **Stats, per cache:**
+  - hits, misses, loads, load failures, refreshes, evictions
+  - average and p95 load time
+  - hit rate, size, and the age of the oldest entry
+- **Uses, with starting values to tune:**
+
+| Cache | Key | refresh | expire | Notes |
+|---|---|---|---|---|
+| `devices:<brand>` | brand | 10 s | 120 s | timeout 4 s; `Hub.devices()` merges every brand's cached list, so one slow brand never blocks |
+| `scenes` | – | 30 s | 10 min | |
+| `schedules` | – | 30 s | 10 min | invalidate on create/edit/delete |
+| `status` | – | 5 s | 60 s | |
+| `insights:<days>`, `energy:<days>` | days | 60 s | 15 min | invalidate after each collector run |
+| `weather` | – | 30 min | 6 h | Open-Meteo 429s if hit often |
+
+- **Write-through:** after `set_state`, update that one device inside `devices:<brand>` (`cache.put`) from the adapter's answer, or patch it optimistically and schedule a refresh of that brand in about 1.5 s.
+- **Warm start:** load every `devices:<brand>` at startup, and refresh all keys every 30 s with a background ticker so first taps hit.
+- **Escape hatch:** `?fresh=1` on read endpoints calls `invalidate` and then `get`.
+- **Tests (`tests/test_cache.py`):**
+  - single flight (10 concurrent gets, 1 load)
+  - refresh-after-write returns the old value and reloads once
+  - expiry waits for a fresh load
+  - a failed reload keeps the old value and marks it stale
+  - LRU eviction
+  - the stats counts
+  - Use a fake clock (inject `clock=time.monotonic`).
+
+- (Covered by the L1 cache above; kept for detail.) **Per-adapter timeout in `Hub.devices()`:** `asyncio.wait_for(a.devices(), 4)`. If an adapter times out, use its last good devices (keep `self._last_by_brand[brand]`), mark them `stale`, and add an error such as "Rain Bird slow, showing last known".
 - **Stale-while-revalidate cache:** `GET /api/devices` returns the cached list right away if it is younger than about 10 s. Otherwise it returns the cached list and kicks off one background refresh, guarded by a lock so there is never more than one refresh at a time. Add `?fresh=1` to force a wait for new data.
 - A background task refreshes devices every 30 s, so the cache is always warm.
 - **Find the 19 s brand** with the new per-adapter timing (step 3) and fix its root cause. Suspects: Kasa re-discovery (`No route to host` errors in the log), Sonos `soco.discover`, Hue, the water/SMT cloud, or Lennox. Rediscovery must never sit on the request path; move it to the background.
@@ -54,6 +99,7 @@ Nothing below is implemented yet. Pick up from step 1.
 ### Backend: new `hub/telemetry.py`, no new dependency if avoidable
 
 - **Request metrics middleware:** per route template (`request.scope["route"].path`), keep count, error count (5xx and 4xx separately), and latency samples (ring buffer of the last 500). Report p50, p95, p99 and max, plus the last 50 slow requests (over 1 s) with time, path, status and ms. Measure in the same middleware as auth, or in a second one.
+- **Cache panel:** per-cache stats from `hub/cache.py` (hit rate, loads, failures, p95 load time, size, oldest entry) with an "Invalidate" button per cache.
 - **Adapter metrics:** wrap `devices()`, `set_state()`, `scenes()` and `schedules()` per brand. Record calls, errors, last error text and time, last duration, p95, last success time, timeouts, and stale-cache serves.
 - **Background tasks:** for the collector, recorder, irrigation, flow tests, backups and devices refresher, record last run, last duration, last result or error, and next run.
 - **Event-loop lag:** a task sleeps 0.5 s and measures overshoot; keep the max and p95 over 5 min. A blocking adapter call shows up here.
