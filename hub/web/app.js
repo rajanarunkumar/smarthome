@@ -144,7 +144,7 @@ async function render(fetch = false, { fresh = false } = {}) {
       await renderInsights(fetch || !state.insights);
     }
     if (tab === "settings") {
-      if (state.status) renderSettings(); else setView(skeleton(5));
+      if (!state.status) setView(skeleton(5)); else if (!settingsBusy()) renderSettings();
       if (fetch || fresh || !state.status) {
         const [status, passkeys] = await Promise.all([
           api("GET", "/api/status", undefined, { signal }),
@@ -1416,6 +1416,11 @@ async function loadStorage() {
 }
 
 
+// What the user has typed into the backup form, kept in memory (never stored) so a redraw of
+// Settings, e.g. on coming back from the AWS console, doesn't wipe it.
+let backupDraft = {};
+const BACKUP_FIELDS = ["bk-bucket", "bk-region", "bk-prefix", "bk-akid", "bk-secret", "bk-photos"];
+
 async function loadBackup() {
   const box = $("#backup-card");
   if (!box) return;
@@ -1455,11 +1460,17 @@ async function loadBackup() {
         <input type="password" id="bk-secret" placeholder="AWS secret access key" autocomplete="off" spellcheck="false"></div>
       <div class="row"><label class="inline"><span>Include zone photos</span><span class="switch"><input type="checkbox" id="bk-photos" checked><span></span></span></label>
         <button class="pill primary" id="bk-connect" style="flex:none">Connect and back up now</button></div>`;
+    for (const id of BACKUP_FIELDS) {
+      const el = $("#" + id);
+      if (id in backupDraft) el[el.type === "checkbox" ? "checked" : "value"] = backupDraft[id];
+      el.addEventListener("input", () => { backupDraft[id] = el.type === "checkbox" ? el.checked : el.value; });
+    }
     $("#bk-connect").addEventListener("click", async (e) => {
       e.target.disabled = true; e.target.textContent = "Backing up…";
       try {
         const r = await api("PUT", "/api/backup", { bucket: $("#bk-bucket").value.trim(), region: $("#bk-region").value.trim(), prefix: $("#bk-prefix").value.trim(),
           access_key_id: $("#bk-akid").value.trim(), secret_access_key: $("#bk-secret").value.trim(), include_photos: $("#bk-photos").checked });
+        backupDraft = {};
         toast(`First backup uploaded (${mb(r.bytes)})`);
         await loadBackup();
         showRecoveryKey();
