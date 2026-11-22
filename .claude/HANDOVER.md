@@ -1,6 +1,6 @@
 # Smart home hub: handover
 
-Read this first in a new session, then `docs/HANDOVER.md` (Mac session) and `.claude/NEXT.md`. Branch: `claude/brave-edison-9evhkk`. Last updated 2026-11-22. Tests: 119 passing.
+Read this first in a new session, then `docs/HANDOVER.md` (Mac session) and `.claude/NEXT.md`. Branch: `claude/brave-edison-9evhkk`. Last updated 2026-11-22. Tests: 133 passing.
 
 ## What this is
 
@@ -27,7 +27,7 @@ python3.13 -m venv .venv && . .venv/bin/activate   # 3.13 needed for Ecovacs and
 pip install -r requirements.txt
 python -m hub                       # 127.0.0.1:8420
 tailscale serve --bg 8420
-python -m pytest -q tests           # 119 tests, ~45 s
+python -m pytest -q tests           # 133 tests, ~50 s
 ```
 
 ## Layout
@@ -84,6 +84,7 @@ Subclass `Adapter` (`hub/adapters/base.py`): set `brand`, `label`, `prefixes`, i
 
 ## Hard-won facts and decisions
 
+- **Opus review of the correlation fix** (2026-11-22, an Opus subagent reviewed it read-only; its findings were verified, not trusted): fixed and tested in `tests/test_realworld_water.py`: meter **units** now converted to gallons (CCF/cubic feet would have made every number 7.48x or 748x off with all checks green); robust `parse_stamp` (US dates, AM/PM, epoch, field-name fallbacks) with unparsed counts; hourly URL falls back to US dates if ISO is refused; running-total readings converted; unlabelled-UTC stamps converted with DST (`align_hourly` mode `utc`); iterative outlier trimming in `zone_flow` (floor 25 gal: hourly use is noisy, a lower floor trimmed normal noise) and a 40 gal/min cap; `missing_runs` replays programs for any day the hub recorded nothing; `RainBirdAdapter._read_state` falls back to zone/rain-delay requests and `watch_error` is shown in the Data check; flow tests ignore ~0 extra-water readings. **Not fixed / open:** cyclic programs can't be replayed; weekday vs weekend household baselines aren't separated; the Rain Bird combined-state claim comes from reading pyrainbird's model table, not from hardware. To settle what's real, ask the user to paste: the first 3 items of one `/consumption/hourly/...` and one `/consumption/daily/...` response (keys, `consDate`, `cons`, `units`), the Data check card, `hub.water.diagnostics`, and the Rain Bird model.
 - **Water-to-sprinkler correlation** (fixed 2026-11-22 after the user asked why it wasn't captured; none of it seen on real data yet): (1) hourly water is now requested **one day at a time** (the My Water Advisor site's own JS always sends start == end; a 28-day range may be refused and used to fail silently); (2) hourly stamps with `Z`/offset are converted to the home time zone (from `location.timezone`), naive ones are taken as local; (3) `history.best_hour_shift` finds a meter clock offset by correlation and `aligned_hourly` applies it (also used for flow tests and for confirming replayed runs, detected from the unfiltered replay first); (4) `zone_flow` skips hours-of-day with fewer than 3 watering-free samples instead of falling back to an overall median (that fallback biased zone 2 by ~8% in the end-to-end test); (5) `data_checks()` + Insights "Data check" card explain which link is missing; `WaterAdvisorAdapter.diagnostics` holds the last hourly fetch result. `tests/test_correlation.py` runs the whole chain (controller poller → log → meter → gal/min) at meter offsets 0, +1 and +6.
 
 - **S3 backups** (`hub/backup.py`, Settings → Backup): nightly 03:30 (retry hourly after a failure) tar.gz of a SQLite-online-backup snapshot of `hub.db` + `secrets.json` + optional photos, **AES-256-GCM encrypted on the Mac** (`~/.smarthome/backup.key`, excluded from the archive), uploaded with `s3:PutObject` only (SSE-S3). The user chose S3 over git for secrets because git history is permanent and the repo may be shared; never commit `~/.smarthome` or encrypted copies of it. Settings are saved only after a first upload succeeds. Restore: `python -m hub.backup restore FILE --key KEY --to DIR`. The recovery key is shown only to a signed-in person (not the script token). Untested against real S3: tests use a fake client and the real AES-GCM/tar/SQLite code. Open: Keychain-backed key storage; restore-from-S3 button (currently download the `.enc` with the AWS console/CLI).

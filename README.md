@@ -232,6 +232,17 @@ Insights → Water ends with a **Data check** card (and moves it to the top when
 5. **Gallons per minute by zone:** a zone is only estimated if its hour of the day has at least 3 watering-free days to compare against (a program that waters at the same hour every day leaves none) and its minutes vary enough to tell zones apart. Otherwise it shows "learning", and the **flow tests** measure it directly.
 6. **Weather history.**
 
+Hardening from an independent review (all tested, none seen on real data yet):
+- **Units:** readings are converted to gallons from the meter's own unit (gallons, cubic feet, CCF/HCF, kgal, m³, litres). An unknown unit is flagged in the Data check instead of being assumed.
+- **Odd timestamps:** ISO (with or without Z/offset), US dates (`11/20/2026 5:00 AM`), epoch seconds or milliseconds, and alternative field names are read; readings that can't be read are counted and the first one is shown.
+- **Date format:** if the server refuses or returns nothing for ISO dates, the hourly request is retried with US dates (the daily endpoint uses them) and the working format is remembered.
+- **Running totals:** if the readings are a meter total that only goes up, they are converted to use per hour.
+- **Clock changes:** a meter that stamps UTC with no label is converted with daylight-saving rules, so it keeps matching across the November and March changes.
+- **Pool fills and leaks:** the worst-fitting hour is dropped and the fit repeated (at most a quarter of the hours), and an implausible fit (over 40 gal/min) is discarded.
+- **Missed runs:** the controller's programs are replayed for every day the hub saw nothing (Mac asleep, hub restarting), not only before it started watching, and kept only where the meter shows water. Cyclic ("every N days") programs can't be replayed.
+- **Older controllers:** if a controller doesn't answer the combined state request, runs are read from the zone and rain-delay requests, and a failure is shown in the Data check instead of being logged quietly.
+- **Flow tests** ignore an hour with no extra water (a placeholder reading, or a clock mismatch) and keep waiting.
+
 ### Rain Bird programs
 
 - **Any controller:** run one of its programs now, from the Sprinklers screen.

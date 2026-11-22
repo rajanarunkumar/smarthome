@@ -47,6 +47,8 @@ def measure(test: dict, hourly: dict[str, float], busy: set[str]) -> dict | None
         return None
     baseline = overnight_baseline(hourly, int(hour_key[11:13]), busy, hour_key) or 0.0
     gallons = max(hourly[hour_key] - baseline, 0.0)
+    if gallons < 0.2 * test["minutes"]:
+        return None  # no extra water yet: the meter may post a placeholder first, or its clock may be off
     return {"gallons": round(gallons, 1), "gpm": round(gallons / test["minutes"], 2), "baseline": round(baseline, 1)}
 
 
@@ -116,8 +118,9 @@ class FlowTests:
                                 (result["gallons"], result["gpm"], f"Overnight use that hour is usually {result['baseline']} gal", t["id"]))
                 done += 1
             elif now - datetime.fromisoformat(t["start"]) > GIVE_UP_AFTER:
-                self.db.execute("UPDATE flow_tests SET status = 'failed', note = ? WHERE id = ?",
-                                ("My Water Advisor hasn't posted hourly data for that hour", t["id"]))
+                note = ("The meter showed no extra water that hour. Check that the zone ran and that the meter's hours match (Insights → Data check)"
+                        if t["start"][:13] in hourly else "My Water Advisor hasn't posted hourly data for that hour")
+                self.db.execute("UPDATE flow_tests SET status = 'failed', note = ? WHERE id = ?", (note, t["id"]))
         self.db.commit()
         return done
 

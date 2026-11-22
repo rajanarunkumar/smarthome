@@ -33,7 +33,7 @@ from . import backup as backup_mod
 from .config import Secrets, data_dir
 from . import weather as weather_api
 from .energy import EnergyStore, build_energy
-from .history import HistoryStore, apply_shift, best_hour_shift, build_insights, confirm_with_meter
+from .history import HistoryStore, align_hourly, build_insights, confirm_with_meter, missing_runs
 from .irrigation import SmartPrograms
 from .flowtest import FlowTests
 from .history import minutes_by_hour
@@ -93,6 +93,7 @@ class Hub:
         report: dict = {"problems": []}
         problems = report["problems"]
         location = self.secrets.get("location")
+        tz_name = (location or {}).get("timezone", "America/Chicago")
         if location:
             try:
                 rows = await weather_api.daily(location["latitude"], location["longitude"])
@@ -102,7 +103,7 @@ class Hub:
                 problems.append(f"Weather: {exc.message}")
         if self.water.active:
             try:
-                daily, hourly = await self.water.history(days=days, tz_name=(location or {}).get("timezone", "America/Chicago"))
+                daily, hourly = await self.water.history(days=days, tz_name=tz_name)
                 self.history.put_water_daily(daily)
                 self.history.put_water_hourly(hourly)
                 report["water_days"], report["water_hours"] = len(daily), len(hourly)
@@ -111,7 +112,7 @@ class Hub:
                 since = date.today() - timedelta(days=30)
                 busy = set(minutes_by_hour(self.history.runs(since)))
                 report["flow_tests_measured"] = self.flowtests.update_measurements(
-                    self.history.aligned_hourly(since)[0], busy, datetime.now())
+                    self.history.aligned_hourly(since, None, tz_name)[0], busy, datetime.now())
             except HubError as exc:
                 problems.append(f"Water: {exc.message}")
         if self.smt.active:
@@ -126,20 +127,17 @@ class Hub:
                 problems.append(f"Electricity: {exc}")
         if self.rainbird.active:
             try:
-                first = date.today() - timedelta(days=28)
-                observed = self.history.first_observed_run()
-                last = (date.fromisoformat(observed[:10]) if observed else date.today()) - timedelta(days=1)
-                if last >= first:
-                    hourly = self.history.water_hourly(first)
-                    replayed = await self.rainbird.past_runs(first, last)
-                    # Work out the meter's clock offset from the unfiltered replay first; otherwise a meter that is
-                    # an hour off would reject every replayed run and leave nothing to detect the offset from.
-                    align = best_hour_shift(hourly, replayed)
-                    if align["confident"] and align["shift"]:
-                        hourly = apply_shift(hourly, align["shift"])
-                    runs = confirm_with_meter(replayed, hourly) if hourly else []
-                    self.history.replace_inferred(runs, first, last)
-                    report["sprinkler_runs_reconstructed"] = len(runs)
+                first, last = date.today() - timedelta(days=28), date.today() - timedelta(days=1)
+                recorded = [r for r in self.history.runs(first) if r["source"] != "inferred"]
+                # Replay the controller's programs for every day the hub saw nothing: before it started watching,
+                # and any day the Mac was asleep or the hub restarting at watering time.
+                replayed = missing_runs(await self.rainbird.past_runs(first, last), recorded)
+                # Work out the meter's clock from the unfiltered replay first; a meter that is off would otherwise
+                # reject every replayed run and leave nothing to detect the offset from.
+                hourly, _ = align_hourly(self.history.water_hourly(first), recorded + replayed, tz_name)
+                runs = confirm_with_meter(replayed, hourly) if hourly else []
+                self.history.replace_inferred(runs, first, last)
+                report["sprinkler_runs_reconstructed"] = len(runs)
             except Exception as exc:  # noqa: BLE001
                 problems.append(f"Sprinkler history: {exc}")
         return report
@@ -927,7 +925,8 @@ async def insights(request: Request, days: int = 28):
     days = max(7, min(days, 90))
     data = build_insights(hub.history, hub.rainbird.zone_label, hub.rainbird.zone_areas(), days,
                           measured=hub.flowtests.measured_gpm(), photo_advice=hub.photo_advice,
-                          water_diag=hub.water.diagnostics)
+                          water_diag=hub.water.diagnostics, watch_error=hub.rainbird.watch_error,
+                          tz_name=(hub.secrets.get("location") or {}).get("timezone", "America/Chicago"))
     return {**data, "location": hub.secrets.get("location")}
 
 

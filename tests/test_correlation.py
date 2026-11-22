@@ -7,7 +7,7 @@ an hour off (end-of-hour stamps) and six hours off (UTC without a label).
 import asyncio
 import json
 import sqlite3
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -34,9 +34,10 @@ def household(hour: int) -> float:
     return 6.0 if 6 <= hour <= 22 else 0.5
 
 
-def simulate(tmp_path, offset_hours: int, every_day: bool = False):
+def simulate(tmp_path, offset_hours: int, every_day: bool = False, today: date = TODAY, utc_tz: str | None = None):
     """21 days of 5 AM watering (every other day, or every day) seen through the controller poller, and a
-    meter whose hour labels are `offset_hours` late. Each zone's minutes vary so zones can be told apart."""
+    meter whose hour labels are `offset_hours` late (or, with utc_tz, are UTC with no label). Each zone's minutes
+    vary so zones can be told apart."""
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
     store = HistoryStore(db)
@@ -47,7 +48,7 @@ def simulate(tmp_path, offset_hours: int, every_day: bool = False):
         if n % 2 and not every_day:
             continue
         k = n if every_day else n // 2
-        t = datetime.combine(TODAY - timedelta(days=n), datetime.min.time()).replace(hour=5)
+        t = datetime.combine(today - timedelta(days=n), datetime.min.time()).replace(hour=5)
         for zone, minutes in ((1, 20 + (k % 3) * 5), (2, 12 + (k % 2) * 6), (3, 10 + (k % 4) * 3)):
             adapter.observe(state(zone), t)           # the poller sees this zone start...
             runs.append({"started": t.isoformat(timespec="minutes"), "zone": zone, "minutes": minutes})
@@ -57,11 +58,13 @@ def simulate(tmp_path, offset_hours: int, every_day: bool = False):
     hourly = {}
     for n in range(21):
         for h in range(24):
-            key = f"{(TODAY - timedelta(days=n)).isoformat()}T{h:02d}"
+            key = f"{(today - timedelta(days=n)).isoformat()}T{h:02d}"
             hourly[key] = household(h) + sum(m * GPM[z] for z, m in by_hour.get(key, {}).items())
     stamped = {}
     for key, gallons in hourly.items():
         t = datetime.strptime(key, "%Y-%m-%dT%H") + timedelta(hours=offset_hours)
+        if utc_tz:  # the real local hour, written down in UTC with no label
+            t = t.replace(tzinfo=ZoneInfo(utc_tz)).astimezone(timezone.utc).replace(tzinfo=None)
         stamped[t.strftime("%Y-%m-%dT%H")] = gallons
     store.put_water_hourly(stamped.items())
     store.put_water_daily({d: sum(v for k, v in hourly.items() if k[:10] == d) for d in {k[:10] for k in hourly}}.items())

@@ -18,6 +18,7 @@ import logging
 import time
 from datetime import datetime, timedelta
 from datetime import time as dtime
+from types import SimpleNamespace
 from typing import Any, Callable
 
 from ..config import Secrets
@@ -157,6 +158,8 @@ class RainBirdAdapter(Adapter):
         self._program_ids: list[int] = []
         self._zone_scheds: dict[int, dict] = {}
         self._schedule_raw: Any = None
+        self.watch_error: str | None = None   # why the poller can't read the controller, shown in Insights
+        self._state_mode: str | None = None   # combined, or legacy for controllers that don't answer it
         self._lock = asyncio.Lock()
         # Watering log: called with (started, zone, minutes, source) when a run ends.
         self.on_run: Callable[[datetime, int, float, str], None] | None = None
@@ -176,6 +179,31 @@ class RainBirdAdapter(Adapter):
     async def start(self) -> None:
         self._watcher = asyncio.create_task(self._watch())
 
+    async def _read_state(self, ctl: Any) -> Any:
+        """The controller's current state. Newer models answer the combined request; for the others, the same
+        fields come from the zone and rain-delay requests (without time remaining, which only the combined one has)."""
+        if self._state_mode != "legacy":
+            try:
+                state = await ctl.get_combined_controller_state()
+                self._state_mode = "combined"
+                return state
+            except Exception:
+                if self._state_mode == "combined":
+                    raise  # it worked before, so this is a real failure and not an unsupported request
+        zones = await ctl.get_zone_states()
+        active = sorted(zones.active_set)
+        try:
+            delay = await ctl.get_rain_delay()
+        except Exception:  # noqa: BLE001 - optional
+            delay = 0
+        try:
+            sensor = int(bool(await ctl.get_rain_sensor_state()))
+        except Exception:  # noqa: BLE001 - optional
+            sensor = 0
+        self._state_mode = "legacy"
+        return SimpleNamespace(irrigation_state=1 if active else 0, active_station=active[0] if active else 0,
+                               remaining_runtime=0, delay_setting=delay or 0, sensor_state=sensor, seasonal_adjust=100)
+
     async def _watch(self) -> None:
         """Poll the controller so every run is logged, even ones started by its own programs."""
         while True:
@@ -183,11 +211,15 @@ class RainBirdAdapter(Adapter):
                 try:
                     async with self._lock:
                         ctl = await self._controller()
-                        self._state = await ctl.get_combined_controller_state()
+                        self._state = await self._read_state(ctl)
                         self._state_at = time.monotonic()
                     self.observe(self._state, datetime.now())
+                    self.watch_error = None
                 except Exception as exc:  # noqa: BLE001 - keep watching
-                    log.debug("Rain Bird watch: %s", exc)
+                    message = f"{type(exc).__name__}: {exc}"
+                    if message != self.watch_error:  # say it once, at warning level, so it isn't silent
+                        log.warning("Rain Bird watch: %s", message)
+                    self.watch_error = message
                     await self.close()
             await asyncio.sleep(WATCH_SECONDS)
 
@@ -252,7 +284,7 @@ class RainBirdAdapter(Adapter):
             ctl = await self._controller()
             now = time.monotonic()
             if now - self._state_at > STATE_SECONDS:
-                self._state = await ctl.get_combined_controller_state()
+                self._state = await self._read_state(ctl)
                 self._state_at = now
             if now - self._programs_at > SCHEDULE_SECONDS:
                 try:
@@ -390,7 +422,8 @@ class RainBirdAdapter(Adapter):
 
     async def status(self) -> dict:
         return {"connected": self.active, "available": AVAILABLE, "zone_scheduled": self.zone_scheduled, "devices": 1 if self.active else 0,
-                "zones": len(self._zones), "host": self.config.get("host")}
+                "zones": len(self._zones), "host": self.config.get("host"),
+                "watch_error": self.watch_error}
 
     async def close(self) -> None:
         if self._session is not None:

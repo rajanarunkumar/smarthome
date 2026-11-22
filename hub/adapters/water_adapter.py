@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import statistics
 import time
 import uuid
 from datetime import date, datetime, timedelta
@@ -43,45 +44,127 @@ def _items(response: Any) -> list[dict]:
     return response if isinstance(response, list) else []
 
 
-def daily_usage(items: list[dict]) -> list[tuple[str, float]]:
-    """[(YYYY-MM-DD, amount)] from daily items like {"consDate": ..., "cons": ...}."""
-    out = []
-    for item in items:
-        day, amount = item.get("consDate") or item.get("date"), item.get("cons")
-        try:
-            out.append((str(day)[:10], float(amount)))
-        except (TypeError, ValueError):
-            continue
-    return sorted(out)
+STAMP_FIELDS = ("consDate", "date", "readDate", "dateTime", "timestamp", "time")
+AMOUNT_FIELDS = ("cons", "consumption", "usage", "value", "volume")
+US_FORMATS = ("%m/%d/%Y %I:%M:%S %p", "%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M",
+              "%m-%d-%Y %H:%M:%S", "%m-%d-%Y %H:%M", "%m/%d/%Y", "%m-%d-%Y")
+GAL_PER = {  # one of this unit, in US gallons
+    "gal": 1.0, "gals": 1.0, "gallon": 1.0, "gallons": 1.0,
+    "cf": 7.48052, "cu ft": 7.48052, "cuft": 7.48052, "ft3": 7.48052, "ft³": 7.48052, "cubic feet": 7.48052, "cubic foot": 7.48052,
+    "ccf": 748.052, "hcf": 748.052, "100 cf": 748.052, "100 cubic feet": 748.052,
+    "kgal": 1000.0, "kgals": 1000.0, "1000 gal": 1000.0, "1000 gallons": 1000.0, "thousand gallons": 1000.0,
+    "m3": 264.172, "m³": 264.172, "cubic meters": 264.172, "l": 0.264172, "liter": 0.264172, "liters": 0.264172, "litres": 0.264172,
+}
 
 
-def local_hour(stamp: str, tz) -> str | None:
-    """'YYYY-MM-DDTHH' in the home's time zone. A stamp with Z or an offset is converted;
-    one without is taken as already local."""
-    stamp = stamp.strip()
-    if len(stamp) < 13:
+def unit_factor(unit: str | None) -> float | None:
+    """Gallons per meter unit; 1.0 when the meter names no unit; None for a unit the hub doesn't know."""
+    if not unit:
+        return 1.0
+    return GAL_PER.get(re.sub(r"[.\s]+", " ", str(unit).strip().lower()).strip())
+
+
+def _raw_unit(items: list[dict]) -> str | None:
+    return next((str(i["units"]) for i in items if i.get("units")), None)
+
+
+def _pick(item: dict, names: tuple[str, ...]) -> Any:
+    return next((item[n] for n in names if item.get(n) is not None), None)
+
+
+def parse_stamp(value: Any, tz) -> tuple[datetime, bool] | None:
+    """(local naive datetime, has_time). Reads ISO (a Z or offset is converted to local), US-style
+    dates and date-times, and epoch seconds or milliseconds. None when it can't be read."""
+    if value is None or isinstance(value, bool):
         return None
-    try:
-        aware = stamp.endswith("Z") or re.search(r"[+-]\d{2}:?\d{2}$", stamp[10:]) is not None
-        if aware:
-            return datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone(tz).strftime("%Y-%m-%dT%H")
-        return datetime.fromisoformat(stamp[:19]).strftime("%Y-%m-%dT%H")
-    except ValueError:
-        return stamp[:10] + "T" + stamp[11:13] if stamp[10] in "T " else None
+    if isinstance(value, (int, float)) or (isinstance(value, str) and re.fullmatch(r"\d{9,13}(\.\d+)?", value.strip())):
+        n = float(value)
+        n = n / 1000 if n > 1e11 else n
+        if n < 1e8:
+            return None
+        return datetime.fromtimestamp(n, tz=ZoneInfo("UTC")).astimezone(tz).replace(tzinfo=None), True
+    text = str(value).strip()
+    if re.match(r"^\d{4}-\d{2}-\d{2}", text):
+        has_time = len(text) >= 13 and text[10] in "T "
+        try:
+            if text.endswith("Z") or re.search(r"[+-]\d{2}:?\d{2}$", text[10:]):
+                return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(tz).replace(tzinfo=None), has_time
+            return datetime.fromisoformat(text[:19] if has_time else text[:10]), has_time
+        except ValueError:
+            return None
+    for fmt in US_FORMATS:
+        try:
+            return datetime.strptime(text, fmt), ("%H" in fmt or "%I" in fmt)
+        except ValueError:
+            continue
+    return None
 
 
-def hourly_usage(items: list[dict], tz=None) -> list[tuple[str, float]]:
-    """[('YYYY-MM-DDTHH', amount)] from hourly items like {"consDate": "2026-11-20T05:00:00", "cons": 12}."""
+def local_hour(stamp: Any, tz) -> str | None:
+    """'YYYY-MM-DDTHH' in the home's time zone, or None if the stamp has no readable time."""
+    parsed = parse_stamp(stamp, tz)
+    return parsed[0].strftime("%Y-%m-%dT%H") if parsed and parsed[1] else None
+
+
+def day_key(stamp: Any, tz) -> str | None:
+    """YYYY-MM-DD. An ISO date is taken as written (midnight UTC stamps mean that date)."""
+    if isinstance(stamp, str) and re.match(r"^\d{4}-\d{2}-\d{2}", stamp.strip()):
+        return stamp.strip()[:10]
+    parsed = parse_stamp(stamp, tz)
+    return parsed[0].strftime("%Y-%m-%d") if parsed else None
+
+
+def daily_usage(items: list[dict], factor: float = 1.0, tz=None) -> list[tuple[str, float]]:
+    """[(YYYY-MM-DD, gallons)] from daily items like {"consDate": ..., "cons": ...}."""
     tz = tz or ZoneInfo("America/Chicago")
     out = []
     for item in items:
-        hour = local_hour(str(item.get("consDate") or item.get("date") or ""), tz)
+        day, amount = day_key(_pick(item, STAMP_FIELDS), tz), _pick(item, AMOUNT_FIELDS)
         try:
-            if hour:
-                out.append((hour, float(item.get("cons"))))
+            if day and float(amount) >= 0:
+                out.append((day, float(amount) * factor))
         except (TypeError, ValueError):
             continue
     return sorted(out)
+
+
+def hourly_rows(items: list[dict], tz=None, factor: float = 1.0) -> tuple[list[tuple[str, float]], list]:
+    """([('YYYY-MM-DDTHH', gallons)], unreadable stamps). Two readings in one local hour (the clocks going
+    back) are added together."""
+    tz = tz or ZoneInfo("America/Chicago")
+    rows: dict[str, float] = {}
+    bad = []
+    for item in items:
+        stamp, amount = _pick(item, STAMP_FIELDS), _pick(item, AMOUNT_FIELDS)
+        hour = local_hour(stamp, tz)
+        try:
+            value = float(amount)
+        except (TypeError, ValueError):
+            value = -1.0
+        if hour is None or value < 0:
+            bad.append(stamp)
+            continue
+        rows[hour] = rows.get(hour, 0.0) + value * factor
+    return sorted(rows.items()), bad
+
+
+def hourly_usage(items: list[dict], tz=None, factor: float = 1.0) -> list[tuple[str, float]]:
+    return hourly_rows(items, tz, factor)[0]
+
+
+def looks_cumulative(values: list[float]) -> bool:
+    """A running meter total, not use per hour: never goes down, large next to its own steps."""
+    if len(values) < 12:
+        return False
+    steps = [b - a for a, b in zip(values, values[1:])]
+    return min(steps) >= 0 and max(steps) > 0 and statistics.median(values) > 10 * max(steps)
+
+
+def _zone(name: str):
+    try:
+        return ZoneInfo(name)
+    except Exception:  # noqa: BLE001 - unknown zone name: fall back to Central
+        return ZoneInfo("America/Chicago")
 
 
 def unit_of(items: list[dict]) -> str:
@@ -108,6 +191,7 @@ class WaterAdvisorAdapter(Adapter):
         self._usage: dict[str, list[dict]] = {}
         self._at = float("-inf")
         self.diagnostics: dict = {}   # what the last hourly fetch managed, shown in Insights → Data check
+        self._hourly_fmt, self._hourly_fmt_proven = "iso", False  # which date format the hourly URL accepts
 
     @property
     def config(self) -> dict:
@@ -191,47 +275,81 @@ class WaterAdvisorAdapter(Adapter):
             ))
         return out
 
+    async def _hourly_items(self, count: str, day: date) -> tuple[list[dict] | None, str | None]:
+        """One day's hourly items. Until one date format has produced data, a refused or empty answer is
+        retried with the other (ISO 2026-11-20, then US 11-20-2026), since the daily endpoint uses US dates."""
+        other = "mdy" if self._hourly_fmt == "iso" else "iso"
+        order = [self._hourly_fmt] if self._hourly_fmt_proven else [self._hourly_fmt, other]
+        error, answered = None, False
+        for fmt in order:
+            text = day.isoformat() if fmt == "iso" else _mdy(day)
+            try:
+                items = _items(await self._get(f"/consumption/hourly/{count}/{text}/{text}"))
+            except HubError as exc:
+                error = exc.message
+                continue
+            if items:
+                self._hourly_fmt, self._hourly_fmt_proven = fmt, True
+                return items, None
+            answered = True
+        return ([], None) if answered else (None, error)
+
     async def history(self, days: int = 14, tz_name: str = "America/Chicago"
                       ) -> tuple[list[tuple[str, float]], list[tuple[str, float]]]:
-        """(daily rows, hourly rows) for all meters added together, for the analytics history.
+        """(daily rows, hourly rows) in gallons, all meters added together, for the analytics history.
 
-        Hourly readings are requested one day at a time, the way the My Water Advisor website does
-        (it always sends the same date as start and end), not as one long range.
+        Hourly readings are requested one day at a time, the way the My Water Advisor website does (start
+        and end date equal). Everything is converted to gallons from the meter's own unit.
         """
         await self._refresh()
-        try:
-            tz = ZoneInfo(tz_name)
-        except Exception:  # noqa: BLE001 - unknown zone name: fall back to Central
-            tz = ZoneInfo("America/Chicago")
+        tz = _zone(tz_name)
         end = date.today()
         daily: dict[str, float] = {}
         hourly: dict[str, float] = {}
-        diag: dict[str, Any] = {"checked": datetime.now().isoformat(timespec="minutes"), "hourly_days_requested": 0,
-                                "hourly_days_with_data": 0, "hourly_failures": 0, "sample_stamp": None, "last_error": None}
+        diag: dict[str, Any] = {
+            "checked": datetime.now().isoformat(timespec="minutes"), "hourly_days_requested": 0, "hourly_days_with_data": 0,
+            "hourly_failures": 0, "sample_stamp": None, "last_error": None, "unit": None, "unit_factor": 1.0,
+            "unit_unknown": None, "unparsed_items": 0, "bad_stamp": None, "cumulative": False}
         for meter in self._meters:
             count = str(meter.get("meterCount"))
-            for day, amount in daily_usage(self._usage.get(count, [])):
+            daily_items = self._usage.get(count, [])
+            daily_unit = _raw_unit(daily_items)
+            for day, amount in daily_usage(daily_items, unit_factor(daily_unit) or 1.0, tz):
                 daily[day] = daily.get(day, 0) + amount
             meter_hours: dict[str, float] = {}  # assigned, not added: a repeated hour must not double count
             for back in range(days + 1):
                 day = end - timedelta(days=back)
                 diag["hourly_days_requested"] += 1
-                try:
-                    items = _items(await self._get(f"/consumption/hourly/{count}/{day.isoformat()}/{day.isoformat()}"))
-                except HubError as exc:
+                items, error = await self._hourly_items(count, day)
+                if items is None:
                     diag["hourly_failures"] += 1
-                    diag["last_error"] = exc.message
-                    log.warning("Hourly water for meter %s on %s failed: %s", count, day, exc.message)
+                    diag["last_error"] = error
+                    log.warning("Hourly water for meter %s on %s failed: %s", count, day, error)
                     continue
-                rows = hourly_usage(items, tz)
+                unit = _raw_unit(items)
+                factor = unit_factor(unit)
+                if unit and diag["unit"] is None:
+                    diag["unit"], diag["unit_factor"] = unit, factor or 1.0
+                    diag["unit_unknown"] = unit if factor is None else None
+                rows, bad = hourly_rows(items, tz, factor or 1.0)
+                if bad:
+                    diag["unparsed_items"] += len(bad)
+                    diag["bad_stamp"] = diag["bad_stamp"] or str(bad[0])
                 if rows:
                     diag["hourly_days_with_data"] += 1
                 if items and diag["sample_stamp"] is None:
-                    diag["sample_stamp"] = str(items[0].get("consDate") or items[0].get("date"))
-                meter_hours.update(rows)
+                    diag["sample_stamp"] = str(_pick(items[0], STAMP_FIELDS))
+                day_rows = dict(rows)
+                values = [day_rows[k] for k in sorted(day_rows)]
+                if looks_cumulative(values):
+                    keys = sorted(day_rows)
+                    day_rows = {b: day_rows[b] - day_rows[a] for a, b in zip(keys, keys[1:])}
+                    diag["cumulative"] = True
+                meter_hours.update(day_rows)
                 await asyncio.sleep(0.15)
             for hour, amount in meter_hours.items():
                 hourly[hour] = hourly.get(hour, 0) + amount
+        diag["hourly_url_format"] = "MM-DD-YYYY" if self._hourly_fmt == "mdy" else "YYYY-MM-DD"
         self.diagnostics = diag
         return sorted(daily.items()), sorted(hourly.items())
 
