@@ -137,6 +137,38 @@ A small async loading cache, modelled on Java's Caffeine. Use it for every read 
 - **Refresh:** auto-refresh every 5 s while the tab is visible.
 - **Charts:** reuse the SVG chart helpers in `insights.js`. Respect dark mode tokens.
 
+### Manual refresh controls in Admin (the user asked for these)
+
+There are two kinds of refresh, both at the top of the Admin tab and repeated on each brand and cache row.
+
+- **Refresh raw data:** go back to the source (devices on the LAN, brand clouds, meters, weather), bypassing every cache, and store the result.
+  - **Everything:**
+    - re-run discovery: Kasa, Sonos, Govee, Hue bridge
+    - reload every adapter's `devices()`, with a 15 s timeout here instead of 4 s
+    - run `collect_once()`: water hourly and daily, Smart Meter Texas 15-min and daily, weather, Rain Bird log
+    - put the results into the caches
+  - **Per brand:** a refresh button on each brand row. It re-runs discovery and the read for that brand only, with its own timeout.
+  - **History backfill (28 days):** same as Insights → "Fetch last 4 weeks", and also reachable here.
+  - **Endpoints:**
+    - `POST /api/admin/refresh/raw` with `{brands?: [..], collect?: bool, backfill_days?: int}`
+    - It returns per-brand `{ok, ms, devices, error}`.
+    - Runs are single-flight: a second click while one is running joins it instead of starting another.
+    - Rate-limit to one run per brand every 10 s, with a 60 s cooldown after a lockout, so Rain Bird and Schlage aren't hammered.
+- **Refresh cache data:**
+  - **Clear and reload:** clear the L1 caches (all, or one), then warm them again. It is cheaper than a raw refresh and does no device discovery.
+  - **Clear only:** a "Clear without reloading" option empties the caches; the next request loads fresh.
+  - **Endpoints:** `POST /api/admin/cache/refresh` with `{cache?: name, key?: str, reload: bool}`. It returns stats before and after, for each cache.
+- **UI behaviour:**
+  - Buttons show a spinner and elapsed time.
+  - When done, they show a result line, for example "Rain Bird: 2 zones, 812 ms" or "Smart Meter Texas: failed, password rejected".
+  - The Admin page then re-reads `/api/admin/telemetry`.
+- **Logging:** each manual refresh is recorded in the Admin "Recent activity" list with who ran it, when, what, how long it took and the result. It is kept in memory (last 50).
+- **Tests:**
+  - a raw refresh bypasses the cache and updates it
+  - a cache refresh calls the loader again
+  - single flight and the per-brand rate limit
+  - a signed-in person is required for POST; the script token is read-only for Admin
+
 ## Step 4: verify and ship
 
 1. `python -m pytest -q tests` must pass (143 now, plus the new ones).
