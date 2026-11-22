@@ -216,11 +216,22 @@ async function renderInsights(fetch = true) {
         line: { name: "Evaporation", color: C.et, values: ins.series.map((r) => r.et0_in) } });
     } else $("#chart-weather").insertAdjacentHTML("beforeend", `<p class="note">Set your location above.</p>`);
   }
+  body.insertAdjacentHTML(ins.checks?.some((c) => c.ok === false) ? "afterbegin" : "beforeend", checksHtml(ins));
   body.insertAdjacentHTML("beforeend", zonesHtml(ins) + `
     <div id="flow-box"></div>
     ${ins.leak ? `<p class="note">Overnight use (1–5 AM, no watering): about ${fmtNum(ins.leak.gallons_per_hour, 1)} gal/hour over ${ins.leak.nights} nights${ins.leak.suspect ? ", which is high" : ", normal"}.</p>` : ""}`);
   bindZoneCards(ins);
   renderFlowTests(ins);
+}
+
+// ---------- data check: why the water-to-sprinkler link is or isn't captured ----------
+function checksHtml(ins) {
+  if (!ins.checks?.length) return "";
+  const missing = ins.checks.filter((c) => c.ok === false).length;
+  return `<div class="section-title"><span>Data check</span><span class="muted small">${missing ? `${missing} to fix` : "all good"}</span></div>
+    <div class="card">${ins.checks.map((c) => `
+      <div class="row rec"><span class="status ${c.ok === true ? "status-good" : c.ok === false ? "status-warning" : "status-neutral"}" aria-hidden="true">${c.ok === true ? "✓" : c.ok === false ? "!" : "…"}</span>
+        <div class="main"><span class="name">${esc(c.title)}</span><span class="sub wrap">${esc(c.detail)}</span></div></div>`).join("")}</div>`;
 }
 
 // ---------- zones: advice, flow and photos ----------

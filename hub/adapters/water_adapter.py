@@ -12,11 +12,14 @@ token expires and the hub signs in again with it.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 import time
 import uuid
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -52,15 +55,30 @@ def daily_usage(items: list[dict]) -> list[tuple[str, float]]:
     return sorted(out)
 
 
-def hourly_usage(items: list[dict]) -> list[tuple[str, float]]:
+def local_hour(stamp: str, tz) -> str | None:
+    """'YYYY-MM-DDTHH' in the home's time zone. A stamp with Z or an offset is converted;
+    one without is taken as already local."""
+    stamp = stamp.strip()
+    if len(stamp) < 13:
+        return None
+    try:
+        aware = stamp.endswith("Z") or re.search(r"[+-]\d{2}:?\d{2}$", stamp[10:]) is not None
+        if aware:
+            return datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone(tz).strftime("%Y-%m-%dT%H")
+        return datetime.fromisoformat(stamp[:19]).strftime("%Y-%m-%dT%H")
+    except ValueError:
+        return stamp[:10] + "T" + stamp[11:13] if stamp[10] in "T " else None
+
+
+def hourly_usage(items: list[dict], tz=None) -> list[tuple[str, float]]:
     """[('YYYY-MM-DDTHH', amount)] from hourly items like {"consDate": "2026-11-20T05:00:00", "cons": 12}."""
+    tz = tz or ZoneInfo("America/Chicago")
     out = []
     for item in items:
-        stamp, amount = str(item.get("consDate") or item.get("date") or ""), item.get("cons")
-        if len(stamp) < 13:
-            continue
+        hour = local_hour(str(item.get("consDate") or item.get("date") or ""), tz)
         try:
-            out.append((stamp[:10] + "T" + stamp[11:13], float(amount)))
+            if hour:
+                out.append((hour, float(item.get("cons"))))
         except (TypeError, ValueError):
             continue
     return sorted(out)
@@ -89,6 +107,7 @@ class WaterAdvisorAdapter(Adapter):
         self._meters: list[dict] = []
         self._usage: dict[str, list[dict]] = {}
         self._at = float("-inf")
+        self.diagnostics: dict = {}   # what the last hourly fetch managed, shown in Insights → Data check
 
     @property
     def config(self) -> dict:
@@ -172,24 +191,48 @@ class WaterAdvisorAdapter(Adapter):
             ))
         return out
 
-    async def history(self, days: int = 14) -> tuple[list[tuple[str, float]], list[tuple[str, float]]]:
-        """(daily rows, hourly rows) for all meters added together, for the analytics history."""
+    async def history(self, days: int = 14, tz_name: str = "America/Chicago"
+                      ) -> tuple[list[tuple[str, float]], list[tuple[str, float]]]:
+        """(daily rows, hourly rows) for all meters added together, for the analytics history.
+
+        Hourly readings are requested one day at a time, the way the My Water Advisor website does
+        (it always sends the same date as start and end), not as one long range.
+        """
         await self._refresh()
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:  # noqa: BLE001 - unknown zone name: fall back to Central
+            tz = ZoneInfo("America/Chicago")
         end = date.today()
-        start = end - timedelta(days=days)
         daily: dict[str, float] = {}
         hourly: dict[str, float] = {}
+        diag: dict[str, Any] = {"checked": datetime.now().isoformat(timespec="minutes"), "hourly_days_requested": 0,
+                                "hourly_days_with_data": 0, "hourly_failures": 0, "sample_stamp": None, "last_error": None}
         for meter in self._meters:
             count = str(meter.get("meterCount"))
             for day, amount in daily_usage(self._usage.get(count, [])):
                 daily[day] = daily.get(day, 0) + amount
-            try:
-                items = _items(await self._get(f"/consumption/hourly/{count}/{start.isoformat()}/{end.isoformat()}"))
-            except HubError as exc:
-                log.warning("Hourly water for meter %s failed: %s", count, exc.message)
-                continue
-            for hour, amount in hourly_usage(items):
+            meter_hours: dict[str, float] = {}  # assigned, not added: a repeated hour must not double count
+            for back in range(days + 1):
+                day = end - timedelta(days=back)
+                diag["hourly_days_requested"] += 1
+                try:
+                    items = _items(await self._get(f"/consumption/hourly/{count}/{day.isoformat()}/{day.isoformat()}"))
+                except HubError as exc:
+                    diag["hourly_failures"] += 1
+                    diag["last_error"] = exc.message
+                    log.warning("Hourly water for meter %s on %s failed: %s", count, day, exc.message)
+                    continue
+                rows = hourly_usage(items, tz)
+                if rows:
+                    diag["hourly_days_with_data"] += 1
+                if items and diag["sample_stamp"] is None:
+                    diag["sample_stamp"] = str(items[0].get("consDate") or items[0].get("date"))
+                meter_hours.update(rows)
+                await asyncio.sleep(0.15)
+            for hour, amount in meter_hours.items():
                 hourly[hour] = hourly.get(hour, 0) + amount
+        self.diagnostics = diag
         return sorted(daily.items()), sorted(hourly.items())
 
     def names(self) -> dict[str, str]:

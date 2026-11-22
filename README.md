@@ -221,6 +221,17 @@ From those it works out:
 - **What the lawn needed:** last 7 days of evaporation × 0.7 (warm-season turf) − 80% of rain, compared with what each zone got. Enter each zone's area (sq ft) in the Sprinklers screen to get inch-based advice ("Zone 4: overwatered, try 32 min a week instead of 60").
 - **Rain skips** from recent and forecast rain, and **leak warnings** when water keeps flowing between 1 and 5 AM with no watering.
 
+### Data check: why the water-to-sprinkler link is or isn't captured
+
+Insights → Water ends with a **Data check** card (and moves it to the top when something is missing). It walks the chain and says which link is broken and what to do:
+
+1. **Sprinkler runs recorded:** the hub logs a run when it sees it start (it polls the controller every 30 seconds), and replays the controller's programs for past weeks once water data exists.
+2. **Hourly water readings:** My Water Advisor is asked for hourly data one day at a time, as its own website does (a long date range may be refused). The check shows how many days returned data and the last error.
+3. **Watering hours with a meter reading:** how many hours have both sprinkler minutes and a reading.
+4. **Meter clock matches the sprinklers:** if the meter stamps an hour by its end, or in unlabelled UTC, the hub finds the offset (−12 to +12 hours) that makes water use line up with sprinkler minutes, corrects for it, and tells you. Needs about 6 watering hours and 2 days of hourly data.
+5. **Gallons per minute by zone:** a zone is only estimated if its hour of the day has at least 3 watering-free days to compare against (a program that waters at the same hour every day leaves none) and its minutes vary enough to tell zones apart. Otherwise it shows "learning", and the **flow tests** measure it directly.
+6. **Weather history.**
+
 ### Rain Bird programs
 
 - **Any controller:** run one of its programs now, from the Sprinklers screen.

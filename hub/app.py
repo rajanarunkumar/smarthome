@@ -33,7 +33,7 @@ from . import backup as backup_mod
 from .config import Secrets, data_dir
 from . import weather as weather_api
 from .energy import EnergyStore, build_energy
-from .history import HistoryStore, build_insights, confirm_with_meter
+from .history import HistoryStore, apply_shift, best_hour_shift, build_insights, confirm_with_meter
 from .irrigation import SmartPrograms
 from .flowtest import FlowTests
 from .history import minutes_by_hour
@@ -102,15 +102,16 @@ class Hub:
                 problems.append(f"Weather: {exc.message}")
         if self.water.active:
             try:
-                daily, hourly = await self.water.history(days=days)
+                daily, hourly = await self.water.history(days=days, tz_name=(location or {}).get("timezone", "America/Chicago"))
                 self.history.put_water_daily(daily)
                 self.history.put_water_hourly(hourly)
                 report["water_days"], report["water_hours"] = len(daily), len(hourly)
+                report["hourly_days_with_data"] = self.water.diagnostics.get("hourly_days_with_data")
                 from datetime import datetime
                 since = date.today() - timedelta(days=30)
                 busy = set(minutes_by_hour(self.history.runs(since)))
                 report["flow_tests_measured"] = self.flowtests.update_measurements(
-                    self.history.water_hourly(since), busy, datetime.now())
+                    self.history.aligned_hourly(since)[0], busy, datetime.now())
             except HubError as exc:
                 problems.append(f"Water: {exc.message}")
         if self.smt.active:
@@ -130,7 +131,13 @@ class Hub:
                 last = (date.fromisoformat(observed[:10]) if observed else date.today()) - timedelta(days=1)
                 if last >= first:
                     hourly = self.history.water_hourly(first)
-                    runs = confirm_with_meter(await self.rainbird.past_runs(first, last), hourly) if hourly else []
+                    replayed = await self.rainbird.past_runs(first, last)
+                    # Work out the meter's clock offset from the unfiltered replay first; otherwise a meter that is
+                    # an hour off would reject every replayed run and leave nothing to detect the offset from.
+                    align = best_hour_shift(hourly, replayed)
+                    if align["confident"] and align["shift"]:
+                        hourly = apply_shift(hourly, align["shift"])
+                    runs = confirm_with_meter(replayed, hourly) if hourly else []
                     self.history.replace_inferred(runs, first, last)
                     report["sprinkler_runs_reconstructed"] = len(runs)
             except Exception as exc:  # noqa: BLE001
@@ -919,7 +926,8 @@ async def insights(request: Request, days: int = 28):
     hub = hub_of(request)
     days = max(7, min(days, 90))
     data = build_insights(hub.history, hub.rainbird.zone_label, hub.rainbird.zone_areas(), days,
-                          measured=hub.flowtests.measured_gpm(), photo_advice=hub.photo_advice)
+                          measured=hub.flowtests.measured_gpm(), photo_advice=hub.photo_advice,
+                          water_diag=hub.water.diagnostics)
     return {**data, "location": hub.secrets.get("location")}
 
 

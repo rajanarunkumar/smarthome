@@ -1,6 +1,6 @@
 # Smart home hub: handover
 
-Read this first in a new session, then `docs/HANDOVER.md` (Mac session) and `.claude/NEXT.md`. Branch: `claude/brave-edison-9evhkk`. Last updated 2026-11-22. Tests: 109 passing.
+Read this first in a new session, then `docs/HANDOVER.md` (Mac session) and `.claude/NEXT.md`. Branch: `claude/brave-edison-9evhkk`. Last updated 2026-11-22. Tests: 119 passing.
 
 ## What this is
 
@@ -27,7 +27,7 @@ python3.13 -m venv .venv && . .venv/bin/activate   # 3.13 needed for Ecovacs and
 pip install -r requirements.txt
 python -m hub                       # 127.0.0.1:8420
 tailscale serve --bg 8420
-python -m pytest -q tests           # 109 tests, ~45 s
+python -m pytest -q tests           # 119 tests, ~45 s
 ```
 
 ## Layout
@@ -83,6 +83,8 @@ Subclass `Adapter` (`hub/adapters/base.py`): set `brand`, `label`, `prefixes`, i
 - **Backfill:** Insights → "Fetch last 4 weeks" (also runs once at start, then every 3 h) pulls 28 days of hourly water, SMT 15-min, weather, and replays Rain Bird programs for past weeks, kept only where the water meter shows water (`confirm_with_meter`).
 
 ## Hard-won facts and decisions
+
+- **Water-to-sprinkler correlation** (fixed 2026-11-22 after the user asked why it wasn't captured; none of it seen on real data yet): (1) hourly water is now requested **one day at a time** (the My Water Advisor site's own JS always sends start == end; a 28-day range may be refused and used to fail silently); (2) hourly stamps with `Z`/offset are converted to the home time zone (from `location.timezone`), naive ones are taken as local; (3) `history.best_hour_shift` finds a meter clock offset by correlation and `aligned_hourly` applies it (also used for flow tests and for confirming replayed runs, detected from the unfiltered replay first); (4) `zone_flow` skips hours-of-day with fewer than 3 watering-free samples instead of falling back to an overall median (that fallback biased zone 2 by ~8% in the end-to-end test); (5) `data_checks()` + Insights "Data check" card explain which link is missing; `WaterAdvisorAdapter.diagnostics` holds the last hourly fetch result. `tests/test_correlation.py` runs the whole chain (controller poller → log → meter → gal/min) at meter offsets 0, +1 and +6.
 
 - **S3 backups** (`hub/backup.py`, Settings → Backup): nightly 03:30 (retry hourly after a failure) tar.gz of a SQLite-online-backup snapshot of `hub.db` + `secrets.json` + optional photos, **AES-256-GCM encrypted on the Mac** (`~/.smarthome/backup.key`, excluded from the archive), uploaded with `s3:PutObject` only (SSE-S3). The user chose S3 over git for secrets because git history is permanent and the repo may be shared; never commit `~/.smarthome` or encrypted copies of it. Settings are saved only after a first upload succeeds. Restore: `python -m hub.backup restore FILE --key KEY --to DIR`. The recovery key is shown only to a signed-in person (not the script token). Untested against real S3: tests use a fake client and the real AES-GCM/tar/SQLite code. Open: Keychain-backed key storage; restore-from-S3 button (currently download the `.enc` with the AWS console/CLI).
 

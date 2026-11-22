@@ -367,3 +367,4 @@ button.tile-icon:active { transform: scale(.92); }
   .dtile, .stile, .tile-icon, .chip-btn { transition: none; }
   .dtile:active, .stile:active, .chip-btn:active, button.tile-icon:active { transform: none; }
 }
+.rec .status.status-neutral { background: var(--line); color: var(--ink) !important; }
