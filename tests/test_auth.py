@@ -146,3 +146,43 @@ def test_passkey_login_options_are_public(env):
     _, client = env
     resp = client.post("/api/auth/passkey/login/options", headers={"Origin": ORIGIN})
     assert resp.status_code == 200 and resp.json()["options"]["rpId"] == "hub.example.ts.net"
+
+
+# iPhone app handoff
+def _pkce():
+    import base64
+    import hashlib
+    import secrets as s
+
+    verifier = s.token_urlsafe(48)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    return verifier, challenge
+
+
+def test_app_handoff_issues_revocable_device_token(env):
+    hub, client = env
+    verifier, challenge = _pkce()
+    assert client.post("/api/auth/app/code", json={"code_challenge": challenge},
+                       headers={"Origin": ORIGIN}).status_code == 401  # must be signed in on the web
+    client.cookies.set("hub_session", hub.auth.create_session("me@example.com", "google"))
+    redirect = client.post("/api/auth/app/code", json={"code_challenge": challenge},
+                           headers={"Origin": ORIGIN}).json()["redirect"]
+    assert redirect.startswith("smarthome://signed-in?code=")
+    code = redirect.split("code=")[1]
+    client.cookies.clear()
+    # Wrong verifier fails and burns the code.
+    assert client.post("/api/auth/app/token", json={"code": code, "code_verifier": "x" * 43}).status_code == 401
+    assert client.post("/api/auth/app/token", json={"code": code, "code_verifier": verifier}).status_code == 400
+
+    client.cookies.set("hub_session", hub.auth.create_session("me@example.com", "google"))
+    code = client.post("/api/auth/app/code", json={"code_challenge": challenge},
+                       headers={"Origin": ORIGIN}).json()["redirect"].split("code=")[1]
+    client.cookies.clear()
+    token = client.post("/api/auth/app/token", json={"code": code, "code_verifier": verifier}).json()["token"]
+    auth = {"Authorization": f"Bearer {token}"}
+    assert client.get("/api/rooms", headers=auth).status_code == 200
+    assert client.get("/api/auth/me", headers=auth).json()["email"] == "me@example.com"
+    apps = client.get("/api/auth/apps", headers=auth).json()
+    assert len(apps) == 1
+    assert client.delete(f"/api/auth/apps/{apps[0]['id']}", headers=auth).status_code == 200
+    assert client.get("/api/rooms", headers=auth).status_code == 401

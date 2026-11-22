@@ -236,7 +236,10 @@ PUBLIC_PATHS = {
     "/api/auth/passkey/login/options",
     "/api/auth/passkey/login",
     "/api/auth/logout",
+    "/api/auth/app/token",
 }
+# Code exchange for the iPhone app: no browser, so no Origin header; the PKCE verifier protects it.
+NO_ORIGIN_PATHS = {"/api/auth/app/token"}
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 
@@ -255,14 +258,18 @@ async def authenticate(request: Request, call_next):
 
     authorization = request.headers.get("authorization", "")
     if authorization.startswith("Bearer "):
-        if not hmac.compare_digest(authorization[7:].strip(), hub.secrets.access_token()):
+        bearer = authorization[7:].strip()
+        if hmac.compare_digest(bearer, hub.secrets.access_token()):
+            request.state.user = {"email": None, "method": "api-token"}
+        elif bearer.startswith("app_") and (app_user := hub.auth.app_user(bearer)):
+            request.state.user = app_user  # iPhone app, unlocked with Face ID on the phone
+        else:
             return _deny(401, "Wrong API token")
-        request.state.user = {"email": None, "method": "api-token"}
     else:
         session = hub.auth.session(request.cookies.get(SESSION_COOKIE))
         # Cookie-authenticated or sign-in requests that change state must come
         # from the hub's own pages (cross-site request forgery protection).
-        if request.method not in SAFE_METHODS and (session or path in PUBLIC_PATHS):
+        if request.method not in SAFE_METHODS and (session or path in PUBLIC_PATHS) and path not in NO_ORIGIN_PATHS:
             if request.headers.get("origin") not in hub.auth.origins:
                 return _deny(403, "Request from an address that isn't allowed")
         request.state.user = session
@@ -539,6 +546,40 @@ async def list_passkeys(request: Request):
 @app.delete("/api/auth/passkeys/{passkey_id}")
 async def delete_passkey(request: Request, passkey_id: str):
     hub_of(request).auth.delete_passkey(_email(request), passkey_id)
+    return {"ok": True}
+
+
+class AppCodeIn(BaseModel):
+    code_challenge: str
+
+
+class AppTokenIn(BaseModel):
+    code: str = Field(max_length=64)
+    code_verifier: str = Field(min_length=43, max_length=128)
+    label: str = Field("iPhone app", max_length=60)
+
+
+@app.post("/api/auth/app/code")
+async def app_code(request: Request, body: AppCodeIn):
+    """Signed-in web page -> one-time code for the iPhone app's smarthome:// callback."""
+    code = hub_of(request).auth.app_code(_email(request), body.code_challenge)
+    return {"redirect": f"{Auth.APP_REDIRECT}?code={code}"}
+
+
+@app.post("/api/auth/app/token")
+async def app_token(request: Request, body: AppTokenIn):
+    token, email = hub_of(request).auth.app_token(body.code, body.code_verifier, body.label)
+    return {"token": token, "email": email}
+
+
+@app.get("/api/auth/apps")
+async def list_app_tokens(request: Request):
+    return hub_of(request).auth.app_tokens(_email(request))
+
+
+@app.delete("/api/auth/apps/{token_id}")
+async def revoke_app_token(request: Request, token_id: str):
+    hub_of(request).auth.revoke_app_token(_email(request), token_id)
     return {"ok": True}
 
 

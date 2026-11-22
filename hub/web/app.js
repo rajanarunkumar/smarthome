@@ -850,11 +850,37 @@ async function finishGoogleRedirect() {
   } catch (err) { showLogin(); toast(err.message); return false; }
 }
 
+// The iPhone app opens /?app_challenge=… in a sign-in sheet; after signing in here,
+// a tap hands it a one-time code through its smarthome:// link.
+const APP_KEY = "hub-app-challenge";
+(() => {
+  const c = new URLSearchParams(location.search).get("app_challenge");
+  if (c) { try { sessionStorage.setItem(APP_KEY, c); } catch {} history.replaceState(null, "", "/"); }
+})();
+function offerAppConnect() {
+  let challenge = null;
+  try { challenge = sessionStorage.getItem(APP_KEY); } catch {}
+  if (!challenge) return false;
+  openSheet("Connect the iPhone app", `
+    <p>Let the Smart Home app on this iPhone control your home? It will ask for Face ID each time it opens.</p>
+    <button class="pill primary big" id="app-connect">Connect the iPhone app</button>`);
+  $("#app-connect", sheet).addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    try {
+      const r = await api("POST", "/api/auth/app/code", { code_challenge: challenge });
+      try { sessionStorage.removeItem(APP_KEY); } catch {}
+      location.href = r.redirect;
+    } catch (err) { toast(err.message); e.target.disabled = false; }
+  });
+  return true;
+}
+
 async function afterSignIn(offerPasskey) {
   state.me = await api("GET", "/api/auth/me");
   state.signedIn = state.me.signed_in;
   document.querySelector(".tabs").hidden = false;
   switchTab(state.tab);
+  if (offerAppConnect()) return;
   if (offerPasskey && canPasskey() && !hint.get()) offerFaceId();
 }
 

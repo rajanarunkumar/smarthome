@@ -15,8 +15,11 @@ Config lives in ~/.smarthome/secrets.json under "auth":
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
+import hmac
 import json
+import re
 import secrets
 import sqlite3
 import time
@@ -81,6 +84,13 @@ class Auth:
                 label       TEXT NOT NULL,
                 created     INTEGER NOT NULL,
                 last_used   INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS app_tokens (
+                token_hash TEXT PRIMARY KEY,
+                email      TEXT NOT NULL,
+                label      TEXT NOT NULL,
+                created    INTEGER NOT NULL,
+                last_used  INTEGER
             );
             """
         )
@@ -160,6 +170,51 @@ class Auth:
         if token:
             self.db.execute("DELETE FROM sessions WHERE token_hash = ?", (self._hash(token),))
             self.db.commit()
+
+    # Native app: a signed-in web session hands a one-time code to the iPhone app
+    # (PKCE-protected), which trades it for a long-lived, revocable device token.
+    APP_REDIRECT = "smarthome://signed-in"
+
+    def app_code(self, email: str, code_challenge: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{43}", code_challenge or ""):
+            raise HubError(400, "Bad app sign-in request.")
+        return self._put(Pending("app-code", code_challenge, "", email, time.time() + 120))
+
+    def app_token(self, code: str, code_verifier: str, label: str) -> tuple[str, str]:
+        pending = self._take(code, "app-code")
+        digest = base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode()).digest()).rstrip(b"=").decode()
+        if not hmac.compare_digest(digest, str(pending.value)):
+            raise HubError(401, "App sign-in check failed. Please try again.")
+        if not self._allowed(pending.email or ""):
+            raise HubError(403, "This Google account isn't allowed.")
+        token = "app_" + secrets.token_urlsafe(32)
+        self.db.execute(
+            "INSERT INTO app_tokens (token_hash, email, label, created) VALUES (?, ?, ?, ?)",
+            (self._hash(token), pending.email, label[:60] or "iPhone app", int(time.time())),
+        )
+        self.db.commit()
+        return token, pending.email or ""
+
+    def app_user(self, token: str) -> dict | None:
+        token_hash = self._hash(token)
+        row = self.db.execute("SELECT email FROM app_tokens WHERE token_hash = ?", (token_hash,)).fetchone()
+        if row is None or not self._allowed(row[0]):
+            return None
+        self.db.execute("UPDATE app_tokens SET last_used = ? WHERE token_hash = ?", (int(time.time()), token_hash))
+        self.db.commit()
+        return {"email": row[0], "method": "ios-app"}
+
+    def app_tokens(self, email: str) -> list[dict]:
+        rows = self.db.execute(
+            "SELECT token_hash, label, created, last_used FROM app_tokens WHERE email = ? ORDER BY created", (email,)
+        ).fetchall()
+        return [{"id": r[0][:16], "label": r[1], "created": r[2], "last_used": r[3]} for r in rows]
+
+    def revoke_app_token(self, email: str, token_id: str) -> None:
+        if not re.fullmatch(r"[0-9a-f]{16}", token_id):
+            raise HubError(404, "Unknown app")
+        self.db.execute("DELETE FROM app_tokens WHERE email = ? AND token_hash LIKE ?", (email, token_id + "%"))
+        self.db.commit()
 
     # Google
     def google_start(self, origin: str) -> str:

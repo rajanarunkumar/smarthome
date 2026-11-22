@@ -130,6 +130,7 @@ On the iPhone (Tailscale on), open the `https://…ts.net` address in Safari, **
 - **Google** (OpenID Connect, redirect flow) for the first sign-in on a device. Only allow-listed Google accounts get in.
 - **Face ID / Touch ID** passkeys after that. Sessions last 12 hours, then one Face ID tap.
 - **API token** (`Authorization: Bearer …`) for scripts such as Siri Shortcuts, which can't do Face ID.
+- **iPhone app** (planned, native): signs in through this page once (PKCE handoff), then keeps its own revocable token in the Keychain behind Face ID. See `docs/HANDOVER.md`.
 - Requests that change anything must come from one of the hub's own addresses (CSRF protection).
 
 Settings live in `~/.smarthome/secrets.json` under `auth`: `google_client_id`, `allowed_emails`, `origins` and `session_hours`. In Google Cloud, the OAuth client (type *Web application*) needs each origin as an **Authorized JavaScript origin** and each origin plus `/` as an **Authorized redirect URI**.
