@@ -20,6 +20,8 @@ deliberately **not** in this repo; they live only in `~/.smarthome/` on the MacB
 
 ## Open items, in order
 
+0. **In progress: UI speed + Admin telemetry.** Plan in [PLAN-UI-SPEED-TELEMETRY.md](PLAN-UI-SPEED-TELEMETRY.md); `/api/devices` takes 19 s and blocks every tab. Resume at step 1.
+
 1. ~~Google sign-in~~ **Done:** works on the iPhone.
    - The fix was saving the OAuth client's *Authorized redirect URIs* (origin + `/`), which had been left empty.
    - If it breaks again: `/api/auth/google/start` shows the exact `redirect_uri` the hub sends.
