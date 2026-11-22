@@ -20,7 +20,25 @@ deliberately **not** in this repo; they live only in `~/.smarthome/` on the MacB
 
 ## Open items, in order
 
-0. **In progress: UI speed + Admin telemetry.** Plan in [PLAN-UI-SPEED-TELEMETRY.md](PLAN-UI-SPEED-TELEMETRY.md); `/api/devices` takes 19 s and blocks every tab. Resume at step 1.
+0. **Done (2026-11-22): UI speed + Admin telemetry** ([plan](PLAN-UI-SPEED-TELEMETRY.md)).
+   - **Device list:** `/api/devices` went from 19 s to about 10 ms (cached).
+     - New `hub/cache.py` is a Caffeine-style L1 loading cache: refresh-after-write, expire with stale fallback, single flight, LRU, failure backoff, stats.
+     - Device reads are cached per brand: refresh after 10 s, expire after 120 s, 4 s wait per request.
+     - Scenes and schedules are cached for 30 s and expire after 10 min.
+     - A warmer runs every 15 s while the app is in use, every 5 min when idle.
+     - After a change, the hub patches that device in the cache and re-reads the brand 1.5 s later.
+     - `?fresh=1` bypasses the cache.
+   - **Admin tab:**
+     - New `hub/telemetry.py` and `hub/web/admin.js`, reading `GET /api/admin/telemetry`.
+     - Shows process, host, event-loop lag, per-route p50/p95, per-brand timings and errors, caches, background jobs, slow requests and a ring of warning logs.
+     - Manual refresh buttons call `POST /api/admin/refresh/raw` and `POST /api/admin/cache/refresh`. They need a signed-in person; the script token can only read.
+   - **Front end:**
+     - Stale renders are discarded, so a tab can no longer show another tab's content.
+     - The previous tab's reads are cancelled on switch; every request has a timeout.
+     - Toggles flip the tile in place.
+     - No sticky `:hover` on touch.
+     - Header refresh button (fresh read); skeletons while loading.
+   - **Known: Smart Meter Texas's first read is slow** (40 s or more, and it holds its lock during the 28-day backfill). The cache shows it as "slow to answer" instead of blocking. A possible fix in `smt_adapter` is to not hold `_lock` for `devices()` while `intervals()` runs.
 
 1. ~~Google sign-in~~ **Done:** works on the iPhone.
    - The fix was saving the OAuth client's *Authorized redirect URIs* (origin + `/`), which had been left empty.

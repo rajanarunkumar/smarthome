@@ -157,6 +157,7 @@ function bindInsightControls() {
 async function renderInsights(fetch = true) {
   if (insightView === "energy") return renderEnergy(fetch);
   if (fetch) state.insights = await api("GET", `/api/insights?days=${insightDays}`);
+  if (state.tab !== "insights") return;  // the user moved on while this loaded
   const ins = state.insights;
   const css = getComputedStyle(document.documentElement);
   const color = (n) => css.getPropertyValue(`--viz-${n}`).trim();
@@ -378,6 +379,7 @@ function fmtSlot(start, end) {
 
 async function renderEnergy(fetch = true) {
   if (fetch) state.energy = await api("GET", `/api/energy?days=${insightDays}`);
+  if (state.tab !== "insights") return;
   const en = state.energy;
   const css = getComputedStyle(document.documentElement);
   const C = { devices: css.getPropertyValue("--viz-1").trim(), hvac: css.getPropertyValue("--viz-2").trim(), other: css.getPropertyValue("--viz-3").trim() };

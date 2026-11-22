@@ -1,7 +1,7 @@
 # Plan: snappier UI, faster hub, Admin telemetry (2026-11-21)
 
 The user asked for three things: fix tabs and toggles that feel stuck or sticky, make the app faster, and add an **Admin** area with system telemetry and observability.
-Nothing below is implemented yet. Pick up from step 1.
+**Status: implemented 2026-11-22** (see docs/HANDOVER.md). Insights/energy/weather were not cached: they already answer in about 10 ms.
 
 ## What was measured (Mac, 23:30 CST)
 

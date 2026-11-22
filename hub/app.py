@@ -6,11 +6,13 @@ import asyncio
 import hmac
 import logging
 import sqlite3
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Body, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -32,6 +34,8 @@ from .adapters.sonos_adapter import SonosAdapter
 from .adapters.thinq_adapter import ThinQAdapter
 from .adapters.water_adapter import WaterAdvisorAdapter
 from .auth import SESSION_COOKIE, Auth
+from .cache import LoadingCache
+from .telemetry import Telemetry
 from . import backup as backup_mod
 from .config import Secrets, data_dir
 from . import weather as weather_api
@@ -46,6 +50,14 @@ from .models import DAYS, Device, DevicePatch, HubError, Schedule, ScheduleIn, S
 
 log = logging.getLogger("hub")
 WEB_DIR = Path(__file__).parent / "web"
+DEVICE_TIMEOUT = 4.0       # a request waits this long for one brand, then shows its last known state
+LOAD_CAP = 60.0            # a brand's load is abandoned after this long
+RAW_TIMEOUT = 15.0         # manual "refresh raw data" waits longer
+RAW_MIN_GAP = 10.0         # per-brand rate limit for manual raw refreshes
+LOCKOUT_PAUSE = 60.0
+DISCOVERY_BRANDS = ("kasa", "sonos", "govee")
+# Settings routes under /api/<segment>/… that change a brand's account or pairing.
+PATH_BRAND = {"lgtv": "lg"}
 
 
 class Hub:
@@ -87,6 +99,21 @@ class Hub:
                                           client_factory=lambda cfg: backup_mod.make_client(cfg))
         self._collector: asyncio.Task | None = None
         self._recorder: asyncio.Task | None = None
+        self._warmer: asyncio.Task | None = None
+        self._by_brand = {a.brand: a for a in self.adapters}
+        self.telemetry = Telemetry(data_dir())
+        # L1 caches (see hub/cache.py): a slow brand never holds up the others.
+        self.device_cache = LoadingCache("devices", self._load_brand_devices, max_size=64,
+                                         refresh_after=10, expire_after=120, timeout=DEVICE_TIMEOUT)
+        self.scene_cache = LoadingCache("scenes", self._load_scenes, max_size=4,
+                                        refresh_after=30, expire_after=600, timeout=8)
+        self.schedule_cache = LoadingCache("schedules", self._load_schedules, max_size=4,
+                                           refresh_after=30, expire_after=600, timeout=8)
+        self.caches = {c.name: c for c in (self.device_cache, self.scene_cache, self.schedule_cache)}
+        self._devices_wanted = float("-inf")
+        self._raw_last: dict[str, float] = {}
+        self._raw_task: asyncio.Task | None = None
+        self._refresh_soon: dict[str, asyncio.Task] = {}
 
     async def collect_once(self, days: int = 3) -> dict:
         """Pull weather, water, electricity and past sprinkler runs into the database.
@@ -151,13 +178,17 @@ class Hub:
     async def _collect_loop(self) -> None:
         days = 28  # first pass after start: the 4-week backfill
         while True:
+            started, t0 = time.time(), time.monotonic()
             try:
                 report = await self.collect_once(days=days)
                 for p in report["problems"]:
                     log.warning("History: %s", p)
+                self.telemetry.job("history collector", started, (time.monotonic() - t0) * 1000,
+                                   not report["problems"], "; ".join(report["problems"]) or f"{days} days", 3 * 3600)
                 days = 3
             except Exception as exc:  # noqa: BLE001
                 log.warning("History collector: %s", exc)
+                self.telemetry.job("history collector", started, (time.monotonic() - t0) * 1000, False, str(exc), 3 * 3600)
             await asyncio.sleep(3 * 3600)
 
     async def _record_loop(self) -> None:
@@ -165,11 +196,30 @@ class Hub:
         from datetime import datetime
         while True:
             await asyncio.sleep(120)
+            started, t0 = time.time(), time.monotonic()
             try:
-                devices, _ = await self.devices()
+                devices, _ = await self.devices(interactive=False)
                 self.energy.observe(devices, datetime.now())
+                self.telemetry.job("activity recorder", started, (time.monotonic() - t0) * 1000, True,
+                                   f"{len(devices)} devices", 120)
             except Exception as exc:  # noqa: BLE001
                 log.debug("Activity recorder: %s", exc)
+                self.telemetry.job("activity recorder", started, (time.monotonic() - t0) * 1000, False, str(exc), 120)
+
+    async def _warm_loop(self) -> None:
+        """Keep the device cache warm: every 15 s while someone uses the app, every 5 min otherwise."""
+        while True:
+            started, t0 = time.time(), time.monotonic()
+            try:
+                idle = time.monotonic() - self._devices_wanted > 600
+                keys = [a.brand for a in self.active_adapters()
+                        if not idle or (self.device_cache.age(a.brand) or float("inf")) > 300]
+                n = self.device_cache.warm(keys)
+                self.telemetry.job("cache warmer", started, (time.monotonic() - t0) * 1000, True,
+                                   f"{n} refresh(es) started" + (" (idle)" if idle else ""), 15)
+            except Exception as exc:  # noqa: BLE001
+                self.telemetry.job("cache warmer", started, (time.monotonic() - t0) * 1000, False, str(exc), 15)
+            await asyncio.sleep(15)
 
     def photo_advice(self, zone: int, week_in, need_in, tmean7) -> dict | None:
         photos = self.photos.for_zone(zone, limit=2)
@@ -204,10 +254,121 @@ class Hub:
         self.irrigation.start()
         self._collector = asyncio.create_task(self._collect_loop())
         self._recorder = asyncio.create_task(self._record_loop())
+        self._warmer = asyncio.create_task(self._warm_loop())
+        self.telemetry.start()
+        logging.getLogger().addHandler(self.telemetry.logs)
         self._by_prefix = {p: a for a in self.adapters for p in a.prefixes}
 
     async def _apply(self, device_id: str, state: StateIn) -> None:
-        await self.adapter_for(device_id).set_state(device_id, state)
+        await self.set_state(device_id, state)
+
+    async def set_state(self, device_id: str, state: StateIn) -> None:
+        """Change a device, then update the cached copy so the app shows it straight away."""
+        adapter = self.adapter_for(device_id)
+        op = self.telemetry.op(adapter.brand, "set_state")
+        t0 = time.monotonic()
+        try:
+            await adapter.set_state(device_id, state)
+        except Exception as exc:
+            op.record((time.monotonic() - t0) * 1000, str(getattr(exc, "message", None) or exc))
+            raise
+        op.record((time.monotonic() - t0) * 1000)
+        self._patch_cached(adapter.brand, device_id, state)
+        self.refresh_brand_soon(adapter.brand)
+
+    def _patch_cached(self, brand: str, device_id: str, state: StateIn) -> None:
+        for d in self.device_cache.get_if_present(brand) or []:
+            if d.id != device_id:
+                continue
+            if state.on is not None:
+                d.on = state.on
+                if d.kind == "speaker":
+                    d.playing = state.on
+            for f in ("brightness", "volume", "muted", "locked"):
+                v = getattr(state, f)
+                if v is not None and hasattr(d, f):
+                    setattr(d, f, v)
+
+    def refresh_brand_soon(self, brand: str, delay: float = 1.5) -> None:
+        """Re-read one brand shortly after a change, so the cache settles on the device's real state."""
+        if brand in self._refresh_soon and not self._refresh_soon[brand].done():
+            return
+
+        async def later():
+            await asyncio.sleep(delay)
+            try:
+                await self.device_cache.refresh(brand)
+            except Exception:  # noqa: BLE001 - shown via cache stats and the next read
+                pass
+
+        self._refresh_soon[brand] = asyncio.create_task(later())
+
+    async def _load_scenes(self, _key=None) -> list:
+        results = await asyncio.gather(*(a.scenes() for a in self.active_adapters()))
+        return [scene for scenes in results for scene in scenes]
+
+    async def _load_schedules(self, _key=None) -> tuple[list[Schedule], list[str]]:
+        adapters = self.active_adapters()
+        results = await asyncio.gather(*(a.schedules() for a in adapters), return_exceptions=True)
+        schedules: list[Schedule] = []
+        errors: list[str] = []
+        for adapter, result in zip(adapters, results):
+            if isinstance(result, BaseException):
+                errors.append(f"{adapter.brand}: {getattr(result, 'message', result)}")
+            else:
+                schedules.extend(result)
+        return schedules, errors
+
+    def invalidate_brand(self, brand: str) -> None:
+        self.device_cache.invalidate(brand)
+        self.scene_cache.invalidate_all()
+        self.schedule_cache.invalidate_all()
+
+    async def raw_refresh(self, brands: list[str] | None = None, collect: bool = False,
+                          backfill_days: int | None = None) -> dict:
+        """Go back to the devices and clouds, bypassing the caches (Admin → Refresh raw data).
+        Single flight: a second call while one runs joins it."""
+        if self._raw_task and not self._raw_task.done():
+            return await asyncio.shield(self._raw_task)
+        self._raw_task = asyncio.create_task(self._raw_refresh(brands, collect, backfill_days))
+        return await asyncio.shield(self._raw_task)
+
+    async def _raw_refresh(self, brands, collect, backfill_days) -> dict:
+        active = {a.brand: a for a in self.active_adapters() if a.brand != "hub"}
+        wanted = [b for b in (brands or list(active)) if b in active]
+
+        async def one(brand: str) -> dict:
+            now = time.monotonic()
+            wait = self._raw_last.get(brand, float("-inf")) - now
+            if wait > 0:
+                return {"ok": False, "skipped": True, "error": f"refreshed moments ago; try again in {wait:.0f} s"}
+            self._raw_last[brand] = now + RAW_MIN_GAP
+            t0 = time.monotonic()
+            try:
+                adapter = active[brand]
+                if brand in DISCOVERY_BRANDS:
+                    await asyncio.wait_for(adapter.discover(), RAW_TIMEOUT)
+                result = await self.device_cache.refresh(brand, timeout=RAW_TIMEOUT)
+                return {"ok": True, "ms": round((time.monotonic() - t0) * 1000), "devices": len(result)}
+            except Exception as exc:  # noqa: BLE001
+                text = "no answer in time" if isinstance(exc, asyncio.TimeoutError) else str(getattr(exc, "message", None) or exc)
+                if "lock" in text.lower():
+                    self._raw_last[brand] = time.monotonic() + LOCKOUT_PAUSE
+                return {"ok": False, "ms": round((time.monotonic() - t0) * 1000), "error": text}
+
+        results = await asyncio.gather(*(one(b) for b in wanted))
+        out: dict = {"brands": dict(zip(wanted, results))}
+        if brands is None:
+            self.scene_cache.invalidate_all()
+            self.schedule_cache.invalidate_all()
+        if collect or backfill_days:
+            t0 = time.monotonic()
+            try:
+                report = await self.collect_once(days=backfill_days or 3)
+                out["history"] = {"ok": not report["problems"], "ms": round((time.monotonic() - t0) * 1000), **report}
+            except Exception as exc:  # noqa: BLE001
+                out["history"] = {"ok": False, "ms": round((time.monotonic() - t0) * 1000), "error": str(exc)}
+        return out
 
     def adapter_for(self, item_id: str) -> Adapter:
         adapter = self._by_prefix.get(item_id.split(":", 1)[0])
@@ -218,17 +379,54 @@ class Hub:
     def active_adapters(self) -> list[Adapter]:
         return [a for a in self.adapters if a.active]
 
-    async def devices(self) -> tuple[list[Device], list[str]]:
+    async def _load_brand_devices(self, brand: str) -> list[Device]:
+        """Cache loader: ask one brand for its devices, timed for the Admin tab."""
+        adapter = self._by_brand[brand]
+        op = self.telemetry.op(brand, "devices")
+        t0 = time.monotonic()
+        try:
+            result = await asyncio.wait_for(adapter.devices(), LOAD_CAP)
+        except asyncio.TimeoutError:
+            op.record((time.monotonic() - t0) * 1000, f"no answer in {LOAD_CAP:.0f} s", timeout=True)
+            raise
+        except Exception as exc:
+            op.record((time.monotonic() - t0) * 1000, str(getattr(exc, "message", None) or exc))
+            raise
+        op.record((time.monotonic() - t0) * 1000)
+        return result
+
+    async def devices(self, fresh: bool = False, interactive: bool = True) -> tuple[list[Device], list[str]]:
+        """All devices. Served from the L1 cache: each brand gets DEVICE_TIMEOUT seconds, after which
+        its last known devices are shown (or it's reported as still loading)."""
+        if interactive:
+            self._devices_wanted = time.monotonic()
         adapters = self.active_adapters()
-        results = await asyncio.gather(*(a.devices() for a in adapters), return_exceptions=True)
+        cache = self.device_cache
+
+        async def one(a: Adapter):
+            if fresh:
+                return await cache.refresh(a.brand, timeout=RAW_TIMEOUT)
+            return await cache.get(a.brand)
+
+        results = await asyncio.gather(*(one(a) for a in adapters), return_exceptions=True)
         devices: list[Device] = []
         errors: list[str] = []
         for adapter, result in zip(adapters, results):
+            entry = cache.entry(adapter.brand)
             if isinstance(result, BaseException):
-                log.warning("%s: %s", adapter.brand, result)
-                errors.append(f"{adapter.brand}: {getattr(result, 'message', result)}")
+                if isinstance(result, asyncio.TimeoutError):
+                    msg = "slow to answer, still trying"
+                else:
+                    msg = str(getattr(result, "message", None) or result)
+                    log.warning("%s: %s", adapter.brand, msg)
+                if entry is not None:  # fresh=True failed: keep showing what we had
+                    devices.extend(entry.value)
+                    msg += ", showing last known state"
+                errors.append(f"{adapter.brand}: {msg}")
             else:
                 devices.extend(result)
+                if entry is not None and entry.stale and entry.error:
+                    errors.append(f"{adapter.brand}: {entry.error}, showing last known state")
         self._import_hue_rooms()
         rooms = self.store.room_map()
         local_names = self.store.device_names()
@@ -269,9 +467,11 @@ async def lifespan(app: FastAPI):
     hub.irrigation.close()
     hub.flowtests.close()
     hub.backups.close()
-    for task in (hub._collector, hub._recorder):
+    for task in (hub._collector, hub._recorder, hub._warmer):
         if task:
             task.cancel()
+    hub.telemetry.stop()
+    logging.getLogger().removeHandler(hub.telemetry.logs)
     for adapter in hub.adapters:
         await adapter.close()
 
@@ -334,6 +534,47 @@ async def authenticate(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def observe(request: Request, call_next):
+    """Outermost: times every request for the Admin tab, keeps caches honest after changes,
+    and makes the browser revalidate the app's files (ETag, 304) instead of guessing."""
+    t0 = time.monotonic()
+    path = request.url.path
+    status = 500
+    try:
+        response = await call_next(request)
+        status = response.status_code
+    finally:
+        hub = getattr(request.app.state, "hub", None)
+        if hub is not None:
+            route = request.scope.get("route")
+            template = getattr(route, "path", None) if route is not None else None
+            if template is None:
+                template = path if path.startswith("/api/") else "(static files)"
+            hub.telemetry.record_request(template, status, (time.monotonic() - t0) * 1000, request.method)
+            if request.method not in SAFE_METHODS and path.startswith("/api/") and status < 400:
+                _after_change(hub, path)
+    if not path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-cache")
+    return response
+
+
+def _after_change(hub: "Hub", path: str) -> None:
+    parts = path.split("/")
+    segment = parts[2] if len(parts) > 2 else ""
+    if segment == "schedules" or segment == "irrigation":
+        hub.schedule_cache.invalidate_all()
+    elif segment in ("devices", "rooms", "scenes", "admin", "auth"):
+        pass  # handled by the route itself, or not device data
+    else:
+        brand = PATH_BRAND.get(segment, segment)
+        if brand in hub._by_brand:
+            hub.invalidate_brand(brand)
+
+
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+
 @app.exception_handler(HubError)
 async def hub_error(_: Request, exc: HubError):
     return JSONResponse({"detail": exc.message}, status_code=exc.status)
@@ -363,9 +604,9 @@ async def status(request: Request):
 
 # Devices
 @app.get("/api/devices")
-async def list_devices(request: Request):
+async def list_devices(request: Request, fresh: bool = False):
     hub = hub_of(request)
-    devices, errors = await hub.devices()
+    devices, errors = await hub.devices(fresh=fresh)
     return {"devices": devices, "rooms": hub.store.rooms(), "errors": errors}
 
 
@@ -374,7 +615,7 @@ async def set_device_state(request: Request, device_id: str, state: StateIn):
     if state.locked is False and not (request.state.user or {}).get("email"):
         # Scripts with the API token (e.g. Siri Shortcuts) may lock, never unlock.
         raise HubError(403, "Unlocking needs you to be signed in with Google or Face ID.")
-    await hub_of(request).adapter_for(device_id).set_state(device_id, state)
+    await hub_of(request).set_state(device_id, state)
     return {"ok": True}
 
 
@@ -433,7 +674,7 @@ async def set_room_state(request: Request, room_id: int, state: StateIn):
     targets = [d for d, r in hub.store.room_map().items()
                if r == room_id and not d.startswith("schlage:")]
     results = await asyncio.gather(
-        *(hub.adapter_for(d).set_state(d, state) for d in targets), return_exceptions=True
+        *(hub.set_state(d, state) for d in targets), return_exceptions=True
     )
     failed = [d for d, r in zip(targets, results) if isinstance(r, BaseException)]
     return {"ok": not failed, "failed": failed}
@@ -441,31 +682,27 @@ async def set_room_state(request: Request, room_id: int, state: StateIn):
 
 # Scenes
 @app.get("/api/scenes")
-async def list_scenes(request: Request):
-    hub = hub_of(request)
-    results = await asyncio.gather(*(a.scenes() for a in hub.active_adapters()))
-    return [scene for scenes in results for scene in scenes]
+async def list_scenes(request: Request, fresh: bool = False):
+    cache = hub_of(request).scene_cache
+    return await (cache.refresh() if fresh else cache.get())
 
 
 @app.post("/api/scenes/{scene_id}/activate")
 async def activate_scene(request: Request, scene_id: str, dynamic: bool = Body(False, embed=True)):
-    await hub_of(request).adapter_for(scene_id).activate_scene(scene_id, dynamic)
+    hub = hub_of(request)
+    await hub.adapter_for(scene_id).activate_scene(scene_id, dynamic)
+    hub.scene_cache.invalidate_all()
+    hub.refresh_brand_soon(hub.adapter_for(scene_id).brand)
     return {"ok": True}
 
 
 # Schedules
 @app.get("/api/schedules")
-async def list_schedules(request: Request):
+async def list_schedules(request: Request, fresh: bool = False):
     hub = hub_of(request)
-    adapters = hub.active_adapters()
-    results = await asyncio.gather(*(a.schedules() for a in adapters), return_exceptions=True)
-    schedules: list[Schedule] = []
-    errors: list[str] = []
-    for adapter, result in zip(adapters, results):
-        if isinstance(result, BaseException):
-            errors.append(f"{adapter.brand}: {getattr(result, 'message', result)}")
-        else:
-            schedules.extend(result)
+    cache = hub.schedule_cache
+    schedules, errors = await (cache.refresh() if fresh else cache.get())
+    schedules = list(schedules)
     names = hub.device_names()
     for s in schedules:
         s.device_names = [names.get(d, d) for d in s.device_ids]
@@ -1252,6 +1489,105 @@ async def pentair_connect(request: Request, body: LoginIn):
 async def pentair_disconnect(request: Request):
     await hub_of(request).pentair.disconnect()
     return {"ok": True}
+
+
+# Admin: telemetry and manual refresh
+@app.get("/api/admin/telemetry")
+async def admin_telemetry(request: Request):
+    hub = hub_of(request)
+    t = hub.telemetry
+    brands = []
+    statuses = await asyncio.gather(*(a.status() for a in hub.adapters), return_exceptions=True)
+    ops = t.ops_report()
+    for a, st in zip(hub.adapters, statuses):
+        entry = hub.device_cache.entry(a.brand)
+        brands.append({
+            "brand": a.brand, "label": a.label, "active": a.active,
+            "status": st if isinstance(st, dict) else {"error": str(st)},
+            "cache": None if entry is None else {"age_s": round(hub.device_cache.age(a.brand), 1),
+                                                 "stale": entry.stale, "error": entry.error, "devices": len(entry.value)},
+            "ops": ops.get(a.brand, {}),
+        })
+    jobs = dict(t.jobs)
+    try:
+        if hub.backups.active:
+            last = (hub.backups.history(1) or [None])[0]
+            if last:
+                jobs["nightly backup"] = {"runs": None, "ok": bool(last.get("ok")), "last_at": last.get("at"),
+                                          "detail": last.get("error") or last.get("key") or None}
+    except Exception:  # noqa: BLE001
+        pass
+    return {
+        "now": time.time(), "process": t.process(), "host": t.host(), "loop": t.loop(),
+        "requests": {"per_min": t.requests_per_minute(), "routes": t.routes_report(), "slow": list(t.slow)[::-1]},
+        "brands": brands, "caches": [c.snapshot() for c in hub.caches.values()],
+        "jobs": jobs, "series": list(t.series), "activity": list(t.activity),
+        "logs": t.log_report("WARNING", 50),
+    }
+
+
+@app.get("/api/admin/logs")
+async def admin_logs(request: Request, level: str = "WARNING", limit: int = 200):
+    return hub_of(request).telemetry.log_report(level, max(1, min(limit, 200)))
+
+
+class RawRefreshIn(BaseModel):
+    brands: list[str] | None = None
+    collect: bool = False
+    backfill_days: int | None = Field(None, ge=1, le=28)
+
+
+@app.post("/api/admin/refresh/raw")
+async def admin_refresh_raw(request: Request, body: RawRefreshIn = Body(RawRefreshIn())):
+    who = _email(request)
+    hub = hub_of(request)
+    t0 = time.monotonic()
+    result = await hub.raw_refresh(body.brands, body.collect, body.backfill_days)
+    ms = (time.monotonic() - t0) * 1000
+    bad = [b for b, r in result["brands"].items() if not r["ok"]]
+    what = "Raw refresh: " + (", ".join(body.brands) if body.brands else "everything") + \
+        (f" + {body.backfill_days}-day history" if body.backfill_days else " + history" if body.collect else "")
+    summary = f"{len(result['brands']) - len(bad)} ok" + (f", failed: {', '.join(bad)}" if bad else "")
+    if "history" in result:
+        summary += "; history " + ("ok" if result["history"]["ok"] else "had problems")
+    hub.telemetry.add_activity(who, what, ms, summary, ok=not bad and result.get("history", {}).get("ok", True))
+    return {**result, "ms": round(ms)}
+
+
+class CacheRefreshIn(BaseModel):
+    cache: str | None = None
+    key: str | None = None
+    reload: bool = True
+
+
+@app.post("/api/admin/cache/refresh")
+async def admin_cache_refresh(request: Request, body: CacheRefreshIn = Body(CacheRefreshIn())):
+    who = _email(request)
+    hub = hub_of(request)
+    if body.cache and body.cache not in hub.caches:
+        raise HubError(404, f"Unknown cache {body.cache}")
+    targets = [hub.caches[body.cache]] if body.cache else list(hub.caches.values())
+    t0 = time.monotonic()
+    out = {}
+    for c in targets:
+        before = {"size": len(c), "hit_rate": c.snapshot()["hit_rate"]}
+        if body.key is not None:
+            c.invalidate(body.key)
+        else:
+            c.invalidate_all()
+        errors = []
+        if body.reload:
+            keys = ([body.key] if body.key is not None else [a.brand for a in hub.active_adapters()]) \
+                if c is hub.device_cache else [None]
+            results = await asyncio.gather(*(c.refresh(k, timeout=RAW_TIMEOUT) for k in keys), return_exceptions=True)
+            errors = [f"{k}: {'no answer in time' if isinstance(r, asyncio.TimeoutError) else r}"
+                      for k, r in zip(keys, results) if isinstance(r, BaseException)]
+        out[c.name] = {"before": before, "after": {"size": len(c)}, "errors": errors}
+    ms = (time.monotonic() - t0) * 1000
+    what = ("Reload" if body.reload else "Clear") + " cache: " + (body.cache or "all") + (f" [{body.key}]" if body.key else "")
+    errs = [e for v in out.values() for e in v["errors"]]
+    hub.telemetry.add_activity(who, what, ms, "ok" if not errs else "; ".join(errs)[:200], ok=not errs)
+    return {"caches": out, "ms": round(ms)}
 
 
 app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
