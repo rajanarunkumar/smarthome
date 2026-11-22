@@ -114,6 +114,15 @@ python -m hub            # listens on this Mac only (127.0.0.1:8420)
 tailscale serve --bg 8420   # once: publishes it at https://<mac>.<tailnet>.ts.net to your own devices
 ```
 
+To keep it running, install it as a background service instead of running `python -m hub` by hand. It starts at login and restarts within about 10 seconds if it stops; the log is `~/.smarthome/logs/hub.log`.
+
+```bash
+scripts/install-service.sh            # install or update, then start
+scripts/install-service.sh uninstall  # stop and remove
+```
+
+After pulling new code, restart it with `launchctl kickstart -k gui/$(id -u)/local.smarthome.hub`. The Mac must be awake for the app to reach it: keep it plugged in (it doesn't sleep on power) with the lid open.
+
 On the iPhone (Tailscale on), open the `https://…ts.net` address in Safari, **Sign in with Google**, accept **Use Face ID next time**, then **Share → Add to Home Screen**. To pair Hue, press the round button on the Hue Bridge, then tap **Settings → Pair** within 30 seconds.
 
 ### Sign-in
