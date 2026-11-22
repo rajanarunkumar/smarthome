@@ -689,11 +689,14 @@ function renderSettings() {
       <div class="row key-row"><input type="text" inputmode="numeric" id="dyson-code" placeholder="Code from Dyson's email" autocomplete="one-time-code">
         <input type="password" id="dyson-pw" placeholder="MyDyson password" autocomplete="off">
         <button class="pill primary" id="dyson-verify">Connect</button></div>` : `
+      ${dysonStickerForm()}
+      <div class="row"><span class="sub wrap">Or, if your Dyson account has a password: enter its email and Dyson emails you a code.</span></div>
       <div class="row key-row"><input type="email" id="dyson-email" placeholder="MyDyson email" autocomplete="off">
         <input type="text" id="dyson-country" class="country" value="US" maxlength="2" aria-label="Country code">
-        <button class="pill primary" id="dyson-send">Email me a code</button></div>`,
-      "Purifiers and fans, controlled directly on your Wi‑Fi. Dyson emails you a code; the hub keeps only each device's local key, not your password.",
-      `${dyson.online ?? 0} of ${count("dyson")} on the network`)}
+        <button class="pill" id="dyson-send">Email me a code</button></div>`,
+      "Purifiers and fans, controlled directly on your Wi‑Fi. If you sign in to Dyson with Google or Apple you have no password: use the sticker on the device (its Wi‑Fi name and password). Nothing from your Dyson account is needed or stored.",
+      `${dyson.online ?? 0} of ${count("dyson")} on the network`, "dyson",
+      `<button class="pill" id="dyson-add">Add device</button>`)}
     ${accountCard("Ecovacs", ecovacs, `
       <div class="row key-row"><input type="email" id="ecovacs-email" placeholder="Ecovacs email" autocomplete="off">
         <input type="password" id="ecovacs-pw" placeholder="Password" autocomplete="off">
@@ -783,6 +786,11 @@ function renderSettings() {
   accountButton("#thinq-on", () => api("POST", "/api/thinq/account", { token: $("#thinq-token").value.trim(), country: $("#thinq-country").value.trim().toUpperCase() || "US" }),
     (r) => `LG ThinQ connected: ${r.devices} appliance(s)`);
   const val = (sel) => $(sel)?.value.trim();
+  bindDysonSticker(view, () => render(true));
+  $("#dyson-add")?.addEventListener("click", () => {
+    openSheet("Add a Dyson", `<p class="note">Find the sticker on the device or in its manual. The Wi‑Fi name starts with DYSON-. Your Dyson account isn't needed.</p>${dysonStickerForm()}`);
+    bindDysonSticker(sheet, () => { sheet.close(); });
+  });
   accountButton("#dyson-send", () => api("POST", "/api/dyson/code", { email: val("#dyson-email"), country: (val("#dyson-country") || "US").toUpperCase() }),
     () => "Check your email for Dyson's code");
   accountButton("#dyson-verify", () => api("POST", "/api/dyson/account", { code: val("#dyson-code"), password: $("#dyson-pw").value }),
@@ -1045,6 +1053,21 @@ setInterval(() => {
 
 
 // ---------- sprinklers: smart programs and zone schedules ----------
+const dysonStickerForm = () => `
+  <div class="row key-row"><input type="text" id="dyson-ssid" placeholder="Wi‑Fi name, e.g. DYSON-AB1-US-ABC1234A-438" autocomplete="off" autocapitalize="characters" spellcheck="false">
+    <input type="text" id="dyson-wifipw" placeholder="Wi‑Fi password from the sticker" autocomplete="off" spellcheck="false">
+    <input type="text" id="dyson-name" placeholder="Name, e.g. Bedroom purifier" maxlength="32">
+    <button class="pill primary" id="dyson-sticker">Add from sticker</button></div>`;
+function bindDysonSticker(root, done) {
+  $("#dyson-sticker", root)?.addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    try {
+      const r = await api("POST", "/api/dyson/sticker", { ssid: $("#dyson-ssid", root).value.trim(), wifi_password: $("#dyson-wifipw", root).value.trim(), name: $("#dyson-name", root).value.trim() });
+      toast(`Added ${r.name}. It appears in Rooms once the hub finds it on your Wi‑Fi.`); done();
+    } catch (err) { toast(err.message); e.target.disabled = false; }
+  });
+}
+
 const dayChips = (name, chosen) => `<div class="chips">${DAYS.map((x) => `
   <label class="chip"><input type="checkbox" name="${name}" value="${x}" ${chosen.includes(x) ? "checked" : ""}><span>${DAY_LABEL[x]}</span></label>`).join("")}</div>`;
 const checkedDays = (name) => [...sheet.querySelectorAll(`input[name=${name}]:checked`)].map((i) => i.value);

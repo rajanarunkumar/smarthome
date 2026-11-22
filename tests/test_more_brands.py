@@ -145,3 +145,21 @@ def test_pentair_pump_on_off(tmp_path, monkeypatch):
     with pytest.raises(HubError):  # only on/off
         asyncio.run(adapter.set_state(d.id, StateIn(brightness=50)))
     assert "s11" not in adapter.raw_fields()[0]["fields"]  # the security key never leaves the hub
+
+
+def test_dyson_sticker_setup_needs_no_account(tmp_path):
+    adapter = DysonAdapter(Secrets(tmp_path / "s.json"))
+    # A made-up sticker: Wi-Fi name DYSON-<serial>-<product code>, plus its Wi-Fi password.
+    out = asyncio.run(adapter.add_from_sticker("DYSON-AB1-US-ABC1234A-438", "SomeWifiPassword1234", "Bedroom purifier"))
+    assert out == {"connected": True, "devices": 1, "name": "Bedroom purifier"}
+    [saved] = adapter.secrets.get("dyson")["devices"]
+    assert saved["serial"] == "AB1-US-ABC1234A" and saved["name"] == "Bedroom purifier"
+    assert saved["device_type"] == "438" and saved["credential"] and "SomeWifiPassword1234" not in saved["credential"]
+    # Adding the same device again replaces it, a second device is kept alongside.
+    asyncio.run(adapter.add_from_sticker("DYSON-AB1-US-ABC1234A-438", "SomeWifiPassword1234", "Office purifier"))
+    asyncio.run(adapter.add_from_sticker("DYSON-XY9-US-ZZZ9999B-475", "AnotherPassword5678"))
+    names = {d["serial"]: d["name"] for d in adapter.secrets.get("dyson")["devices"]}
+    assert names["AB1-US-ABC1234A"] == "Office purifier" and len(names) == 2
+    with pytest.raises(HubError) as err:
+        asyncio.run(adapter.add_from_sticker("my-home-wifi", "SomeWifiPassword1234"))
+    assert err.value.status == 400 and "DYSON-" in err.value.message

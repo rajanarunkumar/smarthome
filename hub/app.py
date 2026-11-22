@@ -699,6 +699,17 @@ async def dyson_verify(request: Request, body: CodeIn):
     return await hub_of(request).dyson.verify_code(body.code, body.password)
 
 
+class DysonStickerIn(BaseModel):
+    ssid: str = Field(min_length=8, max_length=64)
+    wifi_password: str = Field(min_length=6, max_length=100)
+    name: str = Field("", max_length=32)
+
+
+@app.post("/api/dyson/sticker")
+async def dyson_sticker(request: Request, body: DysonStickerIn):
+    return await hub_of(request).dyson.add_from_sticker(body.ssid, body.wifi_password, body.name)
+
+
 @app.delete("/api/dyson/account")
 async def dyson_disconnect(request: Request):
     await hub_of(request).dyson.disconnect()

@@ -1,6 +1,6 @@
 # Smart home hub: handover
 
-Read this first in a new session, then `docs/HANDOVER.md` (Mac session) and `.claude/NEXT.md`. Branch: `claude/brave-edison-9evhkk`. Last updated 2026-11-22. Tests: 94 passing.
+Read this first in a new session, then `docs/HANDOVER.md` (Mac session) and `.claude/NEXT.md`. Branch: `claude/brave-edison-9evhkk`. Last updated 2026-11-22. Tests: 95 passing.
 
 ## What this is
 
@@ -27,7 +27,7 @@ python3.13 -m venv .venv && . .venv/bin/activate   # 3.13 needed for Ecovacs and
 pip install -r requirements.txt
 python -m hub                       # 127.0.0.1:8420
 tailscale serve --bg 8420
-python -m pytest -q tests           # 94 tests, ~40 s
+python -m pytest -q tests           # 95 tests, ~40 s
 ```
 
 ## Layout
@@ -62,7 +62,7 @@ Subclass `Adapter` (`hub/adapters/base.py`): set `brand`, `label`, `prefixes`, i
 | LG TV | aiowebostv (Py 3.12+), WoL | built, untested |
 | Govee | LAN UDP + optional cloud API key | built, untested |
 | LG ThinQ | PAT token; climate on/off; **laundry start/pause/power off/wake/delayed start, only after Remote Start is pressed on the machine** (LG API cannot pick the wash course) | built, untested |
-| Dyson | libdyson-neon, email-OTP then local MQTT | **see Open issue 1** |
+| Dyson | libdyson-neon local MQTT; set up from the device sticker (Google-linked account, no password) or email+OTP+password | built, untested on the real device |
 | Ecovacs | deebot-client (Py 3.13) | built, untested |
 | Pentair Home | pypentair read + `PUT device/device-service/user/device/{id}` `{"payload":{"d25":"1"/"0"}}` pump on/off (from homebridge-pentair-cloud). Pump's own programs are undocumented; Settings → Pentair → "Pump data" shows raw fields so they can be reverse-engineered with a real pump | built, untested |
 | Schlage | pyschlage cloud; **unlock needs a signed-in person, API token can only lock; locks excluded from room All off and from schedules; two-tap unlock in UI** | built, untested |
@@ -96,7 +96,7 @@ Subclass `Adapter` (`hub/adapters/base.py`): set `brand`, `label`, `prefixes`, i
 
 ## Open issues / next steps (priority order)
 
-1. **Dyson sign-in.** The user's Dyson is linked to a **Google account, so there is no Dyson password.** `dyson_adapter.send_code()/verify_code()` assume email+OTP+password (`libdyson-neon` `DysonAccount.login_email_otp`). `login_email_otp`'s verify step takes `(otp_code, password)`. See the Dyson section below for the plan being worked on.
+1. ~~**Dyson sign-in.**~~ Done in code: the user's Dyson is linked to a **Google account (no password)**, so Settings → Dyson now has **Add from sticker** (Wi‑Fi name `DYSON-…` + Wi‑Fi password from the device's sticker → `libdyson.get_mqtt_info_from_wifi_info`, no Dyson account). The email+OTP+password path remains for accounts that have a password. **Unverified on the real purifier**: the user needs to read the sticker and try it; if the hub doesn't find the device, check mDNS on the LAN (`_dyson_mqtt._tcp`) and that the product code on the sticker is one `libdyson.get_device` supports.
 2. **Run it on the Mac and fix reality.** Pull, install with Python 3.13, restart, connect accounts in Settings, tap "Fetch last 4 weeks". Expect breakage in: My Water Advisor response shapes, Smart Meter Texas auth, Rain Bird model quirks, ThinQ profile shapes. Ask the user to paste the exact error text from the hub.
 3. **Ask the user for their Rain Bird model** (front panel) to know whether per-zone schedule editing (ESP-RZXe/ST8) or smart programs applies.
 4. **Pentair pump schedules:** get "Pump data" output from a real pump plus the schedule shown in the Pentair app, then work out the `zp*` fields.
@@ -104,6 +104,6 @@ Subclass `Adapter` (`hub/adapters/base.py`): set `brand`, `label`, `prefixes`, i
 6. Siri/HomeKit bridge, Alexa and Google Home skills (original roadmap items 4-5).
 7. Photos: consider a fixed "photo spot" reminder; no auto-capture exists.
 
-## Dyson sign-in status
+## Where to start next
 
-See `.claude/NEXT.md` for the current work item on Dyson (kept separate so it can be updated quickly).
+See `.claude/NEXT.md`.

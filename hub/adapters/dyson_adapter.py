@@ -1,9 +1,14 @@
 """Dyson purifiers and fans, controlled locally over MQTT (libdyson-neon).
 
-Setup, once: Settings → Dyson → enter the MyDyson email, then the code Dyson
-emails you and your password. The hub downloads each device's local key and
-then talks to the devices directly on the Wi-Fi. The password, the code and the
-Dyson login token are not stored.
+Two ways to set up, once. Either way the hub then talks to the devices
+directly on the Wi-Fi, and the Dyson login is never stored.
+
+1. Email: Settings → Dyson → the MyDyson email, the code Dyson emails you,
+   and the account password. Needs a Dyson password.
+2. Sticker: for accounts made with "Sign in with Google" or Apple, which have
+   no password. Enter the Wi-Fi name (DYSON-…) and Wi-Fi password printed on
+   the sticker on the device or in its manual. libdyson derives the local key
+   from those; no Dyson account is involved.
 """
 
 from __future__ import annotations
@@ -20,13 +25,16 @@ from .base import Adapter
 log = logging.getLogger(__name__)
 
 try:
-    from libdyson import get_device
+    from libdyson import get_device, get_mqtt_info_from_wifi_info
     from libdyson.cloud import DysonAccount
     from libdyson.discovery import DysonDiscovery
+    from libdyson.const import DEVICE_TYPE_NAMES
     from libdyson.exceptions import DysonException
     AVAILABLE = True
 except ImportError:  # pragma: no cover
     AVAILABLE = False
+
+    DEVICE_TYPE_NAMES: dict = {}
 
     class DysonException(Exception):
         pass
@@ -154,6 +162,24 @@ class DysonAdapter(Adapter):
     async def disconnect(self) -> None:
         await self.close()
         self.secrets.set("dyson", None)
+
+    async def add_from_sticker(self, ssid: str, wifi_password: str, name: str = "") -> dict:
+        """Add one device from the Wi-Fi name and password on its sticker (no Dyson account)."""
+        if not AVAILABLE:
+            raise HubError(501, "Dyson support isn't installed. Run pip install -r requirements.txt.")
+        try:
+            serial, credential, device_type = get_mqtt_info_from_wifi_info(ssid.strip(), wifi_password.strip())
+        except DysonException as exc:
+            raise HubError(400, "That doesn't look like the Wi-Fi name from a Dyson sticker. It starts with "
+                                "DYSON- and looks like DYSON-AB1-US-ABC1234A-438. Copy it exactly.") from exc
+        if get_device(serial, credential, device_type) is None:
+            raise HubError(400, f"The hub doesn't support Dyson product type {device_type} yet.")
+        entry = {"serial": serial, "credential": credential, "device_type": device_type,
+                 "name": name.strip()[:32] or DEVICE_TYPE_NAMES.get(device_type, "Dyson").split(" (")[0]}
+        saved = [s for s in self.saved if s["serial"].lower() != serial.lower()] + [entry]
+        self.secrets.set("dyson", {"devices": saved})
+        self._discover()
+        return {"connected": True, "devices": len(saved), "name": entry["name"]}
 
     def _name(self, serial: str) -> str:
         return next((s["name"] for s in self.saved if s["serial"].lower() == serial.lower()), "Dyson")
