@@ -96,10 +96,11 @@ Scanned from a Mac on the home Wi-Fi on 2026-11-21 (two passes plus the ARP tabl
 | McKinney water (My Water Advisor 2) | Water: latest full day, last 7 days, this month. Read only. Uses the same calls as the mywateradvisor2.com website, which has no published API, so a site change can break it. | Settings → **McKinney water** with the My Water Advisor email and password. |
 | Rain Bird | Controllers with the LNK/LNK2 Wi‑Fi module, controlled directly on your Wi‑Fi: run any zone for 5–60 minutes, stop, rain delay (1–14 days), what's watering and time left, rain sensor, and the controller's own programs (read only). Zone names are kept in the hub. Needs Python 3.13+. | Settings → **Rain Bird** with the controller's IP address and the **controller password** set in the Rain Bird app (not your Rain Bird account password). |
 | Ring | Doorbells and cameras (indoor and outdoor): latest ring and motion, the event history, a fresh **snapshot**, motion detection on/off, floodlight and siren where the camera has them, battery and Wi‑Fi signal. No live video. Uses Ring's cloud through the unofficial `ring-doorbell` library (the one Home Assistant uses). | Settings → **Ring** with the Ring email and password, then the code Ring texts or emails. Only Ring's token is saved, never the password. The hub appears in the Ring app under Control Center → Authorized Client Devices, where it can be removed. |
+| Lennox iComfort | **S30, E30, M30 and S40** thermostats: temperature, humidity, heating or cooling now, mode (Heat, Cool, Heat·Cool, Off), set temperatures, fan (auto, on, circulate), outdoor temperature. Each zone of a zoned system is its own thermostat. Run time feeds the Electricity insights. Uses `lennoxs30api` (the library Home Assistant's Lennox integration uses). Older iComfort Wi‑Fi thermostats (myicomfort.com, before the S30) aren't supported. | Settings → **Lennox iComfort** with the iComfort app's email and password. Lennox's cloud asks for the password at every reconnect, so it's kept on the Mac (invite a second account to the home in the iComfort app if you want to revoke the hub on its own). **Or** fill in only the thermostat's IP address to connect on your Wi‑Fi with no account (thermostat → Settings → Advanced → About shows it; reserve it in your router). |
 | Nest thermostat | Temperature, humidity, heating/cooling now, mode (Heat, Cool, Heat·Cool, Off), set temperatures, Eco, fan timer. Google's official Smart Device Management API. Thermostat run time also feeds the Electricity insights. | See **Nest thermostat** below (one-time US$5 Google fee). |
 | Atmos Energy | Not supported yet: Atmos has no API, no library, and isn't on Opower. | See "Atmos Energy" below. |
 
-Govee, LG TV, LG ThinQ, Dyson, Ecovacs, Pentair, Schlage, Ring and Nest have no way to rename a device from outside their apps, so names you give those in the hub are kept in the hub. Account keys are saved only in `~/.smarthome/secrets.json` on the Mac and are never sent back to the web app.
+Govee, LG TV, LG ThinQ, Dyson, Ecovacs, Pentair, Schlage, Ring, Nest and Lennox have no way to rename a device from outside their apps, so names you give those in the hub are kept in the hub. Account keys are saved only in `~/.smarthome/secrets.json` on the Mac and are never sent back to the web app.
 
 
 - **Rooms tab:** every device grouped by room, power switches, "all on/off" per room. Tap a device to rename it (the name is written back to the brand), move it to a room, or set brightness, color and white temperature.
@@ -306,7 +307,7 @@ Atmos has no API and no maintained library; Opower doesn't cover it. Options, fr
 
 1. ~~Core hub, Kasa and Hue, native schedules~~ (done)
 2. ~~**Sign-in:** Google sign-in plus Face ID / Touch ID (passkeys), over HTTPS through Tailscale~~ (done)
-3. **More devices:** ~~LG TV, Sonos, Govee (LAN), Ring, Nest thermostat~~ (done). Next: Lennox, Leviton.
+3. **More devices:** ~~LG TV, Sonos, Govee (LAN), Ring, Nest thermostat, Lennox iComfort~~ (done). Next: Leviton.
 4. **Siri:** a "schedule" Shortcut that turns spoken requests into hub schedules, then a HomeKit bridge for direct Siri control.
 5. **Alexa and Google:** private skill and smart-home project, so both show the hub's names and rooms.
 6. **Govee private API** investigation for timers.

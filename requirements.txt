@@ -14,6 +14,7 @@ pyschlage>=2024.1  # Schlage locks
 smart-meter-texas>=0.5  # TXU / Smart Meter Texas
 pyrainbird>=6.10; python_version >= "3.13"  # Rain Bird (6.1+ needed for controllers that only speak HTTPS)
 ring-doorbell>=0.9  # Ring doorbells and cameras
+lennoxs30api>=0.2.26  # Lennox iComfort S30/E30/M30/S40
 anthropic>=2.0  # optional Claude photo analysis
 pillow>=10  # zone photo analysis
 boto3>=1.27  # S3 backups

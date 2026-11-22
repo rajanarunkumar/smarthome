@@ -14,9 +14,9 @@ const view = $("#view");
 const sheet = $("#sheet");
 const DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const DAY_LABEL = { mon: "Mon", tue: "Tue", wed: "Wed", thu: "Thu", fri: "Fri", sat: "Sat", sun: "Sun" };
-const BRAND = { kasa: "Kasa", hue: "Hue", sonos: "Sonos", lg: "LG", govee: "Govee", thinq: "LG ThinQ", dyson: "Dyson", ecovacs: "Ecovacs", pentair: "Pentair", schlage: "Schlage", smt: "Smart Meter Texas", water: "My Water Advisor", rainbird: "Rain Bird", ring: "Ring", nest: "Nest", hub: "Hub" };
+const BRAND = { kasa: "Kasa", hue: "Hue", sonos: "Sonos", lg: "LG", govee: "Govee", thinq: "LG ThinQ", dyson: "Dyson", ecovacs: "Ecovacs", pentair: "Pentair", schlage: "Schlage", smt: "Smart Meter Texas", water: "My Water Advisor", rainbird: "Rain Bird", ring: "Ring", nest: "Nest", lennox: "Lennox", hub: "Hub" };
 // These brands have no rename API, so the hub keeps the name.
-const HUB_NAMED = new Set(["govee", "lg", "thinq", "dyson", "ecovacs", "pentair", "schlage", "smt", "water", "rainbird", "ring", "nest"]);
+const HUB_NAMED = new Set(["govee", "lg", "thinq", "dyson", "ecovacs", "pentair", "schlage", "smt", "water", "rainbird", "ring", "nest", "lennox"]);
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -647,6 +647,7 @@ function renderSettings() {
   const rainbird = state.status?.rainbird || {};
   const ring = state.status?.ring || {};
   const nest = state.status?.nest || {};
+  const lennox = state.status?.lennox || {};
   const accountCard = (name, st, form, about, connectedText, key = name.toLowerCase(), extra = "") => `
     <div class="section-title"><span>${esc(name)}</span></div>
     <div class="card">${st.available === false ? `
@@ -746,6 +747,13 @@ function renderSettings() {
         <button class="pill primary" id="ring-on">Continue</button></div>`,
       "Doorbells and cameras: latest ring and motion, event history, snapshots, motion detection, lights and siren. Ring then texts or emails a code. The hub keeps Ring's token, not your password.",
       `${count("ring")} doorbell(s) and camera(s)${ring.error ? ` · ${esc(ring.error)}` : ""}`)}
+    ${accountCard("Lennox iComfort", lennox, `
+      <div class="row key-row"><input type="email" id="lennox-email" placeholder="iComfort email" autocomplete="off">
+        <input type="password" id="lennox-pw" placeholder="Password" autocomplete="off">
+        <input type="text" id="lennox-ip" placeholder="Thermostat IP (optional, local)" inputmode="decimal" autocomplete="off" spellcheck="false">
+        <button class="pill primary" id="lennox-on">Connect</button></div>`,
+      "iComfort S30, E30, M30 and S40 thermostats: temperature, humidity, heating or cooling now, mode, set temperatures and fan. Sign in with the iComfort app's email and password (kept on this Mac, since Lennox asks for it at every reconnect), or give the thermostat's IP address to connect on your Wi‑Fi without the account.",
+      `${count("lennox")} zone(s) · ${lennox.local ? "local connection" : "iComfort account"}${lennox.error ? ` · ${esc(lennox.error)}` : lennox.online === false ? " · connecting…" : ""}`, "lennox")}
     <div class="section-title"><span>Nest thermostat</span></div>
     <div class="card">${nest.connected ? `
       <div class="row"><div class="main"><span class="name">Connected</span>
@@ -896,6 +904,8 @@ function renderSettings() {
     const r = await api("POST", "/api/ring/account", { email: val("#ring-email"), password: $("#ring-pw").value });
     return r;
   }, (r) => r.needs_code ? "Enter the code Ring sent you" : `Ring connected: ${r.devices} device(s)`);
+  accountButton("#lennox-on", () => api("POST", "/api/lennox/account", { email: val("#lennox-email"), password: $("#lennox-pw").value, ip: val("#lennox-ip") || null }),
+    (r) => `Lennox connected: ${r.devices} zone(s)`);
   accountButton("#ring-verify", () => api("POST", "/api/ring/account", { code: val("#ring-code") }),
     (r) => `Ring connected: ${r.devices} device(s)`);
   $("#nest-save")?.addEventListener("click", async (e) => {
@@ -910,7 +920,7 @@ function renderSettings() {
     try { location.href = (await api("POST", "/api/nest/link")).url; }
     catch (err) { toast(err.message); e.target.disabled = false; }
   });
-  for (const b of ["dyson", "ecovacs", "pentair", "schlage", "smt", "water", "rainbird", "ring", "nest"]) accountButton(`#${b}-off`, () => api("DELETE", `/api/${b}/account`), () => `${BRAND[b]} disconnected`);
+  for (const b of ["dyson", "ecovacs", "pentair", "schlage", "smt", "water", "rainbird", "ring", "nest", "lennox"]) accountButton(`#${b}-off`, () => api("DELETE", `/api/${b}/account`), () => `${BRAND[b]} disconnected`);
   accountButton("#govee-off", () => api("DELETE", "/api/govee/account"), () => "Govee account disconnected");
   accountButton("#thinq-off", () => api("DELETE", "/api/thinq/account"), () => "LG ThinQ disconnected");
   $("#lg-pair")?.addEventListener("click", async (e) => {

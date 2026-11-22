@@ -72,7 +72,7 @@ Subclass `Adapter` (`hub/adapters/base.py`): set `brand`, `label`, `prefixes`, i
 | Atmos Energy | not built: no API/library; options in README | open |
 | Ring | `hub/adapters/ring_adapter.py`, ring-doorbell 0.9.x; email+password then 2FA code (password kept only in memory for 10 min); saves token + hardware_id; token_updater writes refreshed tokens; doorbell/camera kinds, events, snapshot (`GET /api/ring/{id}/snapshot`), motion/light/siren actions | built, untested on real account |
 | Nest | `hub/adapters/nest_adapter.py`, direct httpx to SDM; `PUT /api/nest/config` then Google partnerconnections redirect back to `/?code&state=nest.…`, web app posts `/api/nest/code`; refresh token stored; device list cached 60 s; °F in the UI, °C to Google; thermostat counted in energy TRACKED_KINDS | built, untested on real account |
-| Lennox iComfort | not built; waiting for the user to say local (S30/E30 IP) vs iComfort login | open |
+| Lennox iComfort | `hub/adapters/lennox_adapter.py`, lennoxs30api 0.2.26; user uses the iComfort app login (cloud); optional IP for local. Background `_run` loop: serverConnect, subscribe each system, messagePump (cloud every 10 s, LAN long-poll, never faster than 1 s), backoff 30 s→10 min, 10 min after a rejected password. Fixed `app_id` (smarthomehub+hex) saved so Lennox sees one client. PII message logging off. Zones = thermostat devices `lennox:{sysId}:{zoneId}`; fan modes as actions | built, untested on real account |
 | Leviton | not built (Matter/HomeKit) | open |
 
 ## Analytics (all in Insights)
@@ -125,3 +125,4 @@ See `.claude/NEXT.md`.
 - **Web app bug fixed:** `api()` treated any 401 as "signed out" and showed the login screen, so a brand rejecting a password (Rain Bird, Ring, Nest) looked like being logged out. Now only the hub's own "Sign in required" does that.
 - Rain Bird: `python -m hub.adapters.rainbird_adapter [IP] [--find]` CLI (versions, subnet hint, port probe, one password attempt; --find scans the /24). pyrainbird < 6.1 can't do HTTPS (verified by diffing wheels), so requirements now pin >= 6.10 and the connection test warns on old versions.
 - `loadBackup()` no longer throws when Settings re-renders mid-load.
+- Lennox iComfort added (the user's system; model not yet confirmed, must be S30/E30/M30/S40, not the old iComfort Wi-Fi).

@@ -20,6 +20,7 @@ from .adapters.ecovacs_adapter import EcovacsAdapter
 from .adapters.govee_adapter import GoveeAdapter
 from .adapters.hue_adapter import HueAdapter
 from .adapters.kasa_adapter import KasaAdapter
+from .adapters.lennox_adapter import LennoxAdapter
 from .adapters.lgtv_adapter import LgTvAdapter
 from .adapters.nest_adapter import NestAdapter
 from .adapters.pentair_adapter import PentairAdapter
@@ -69,9 +70,10 @@ class Hub:
         self.rainbird = RainBirdAdapter(self.secrets)
         self.ring = RingAdapter(self.secrets)
         self.nest = NestAdapter(self.secrets)
+        self.lennox = LennoxAdapter(self.secrets)
         self.adapters: list[Adapter] = [self.kasa, self.hue, self.sonos, self.govee, self.lgtv, self.thinq,
                                         self.dyson, self.ecovacs, self.pentair, self.schlage, self.smt, self.water,
-                                        self.rainbird, self.ring, self.nest]
+                                        self.rainbird, self.ring, self.nest, self.lennox]
         self.scheduler = HubScheduler(self.store.db, self._apply)
         self.adapters.append(self.scheduler)
         self.last_devices: dict[str, Device] = {}
@@ -877,6 +879,24 @@ async def nest_disconnect(request: Request):
     return {"ok": True}
 
 
+# Lennox iComfort: account email and password, or the thermostat's IP address for a local connection
+class LennoxIn(BaseModel):
+    email: str = Field("", max_length=254)
+    password: str = Field("", max_length=200)
+    ip: str | None = Field(None, pattern=r"^(\d{1,3}\.){3}\d{1,3}$")
+
+
+@app.post("/api/lennox/account")
+async def lennox_connect(request: Request, body: LennoxIn):
+    return await hub_of(request).lennox.connect(body.email, body.password, body.ip)
+
+
+@app.delete("/api/lennox/account")
+async def lennox_disconnect(request: Request):
+    await hub_of(request).lennox.disconnect()
+    return {"ok": True}
+
+
 @app.delete("/api/rainbird/account")
 async def rainbird_disconnect(request: Request):
     await hub_of(request).rainbird.disconnect()
@@ -1124,6 +1144,7 @@ STORED_SETTINGS = {
     "water": ("My Water Advisor email and password", "password"),
     "rainbird": ("Rain Bird controller address and password, zone names and sizes", "password"),
     "ring": ("Ring sign-in token (not the password)", "key"),
+    "lennox": ("Lennox iComfort email and password (or thermostat address)", "password"),
     "nest": ("Nest (Google Device Access) client secret and refresh token", "key"),
     "anthropic_api_key": ("Anthropic API key (photo analysis)", "key"),
     "s3_backup": ("S3 backup bucket and AWS access key", "password"),
