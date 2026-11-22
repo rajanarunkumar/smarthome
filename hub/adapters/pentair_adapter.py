@@ -190,5 +190,16 @@ class PentairAdapter(Adapter):
                  "fields": {k: v for k, v in (d.get("fields") or {}).items() if k not in SECRET_FIELDS}}
                 for d in self._devices.values()]
 
+    def readings(self) -> list[dict]:
+        """Live flow, power, speed and schedule of each IntelliFlo pump, from the last fetch."""
+        from ..pool import parse_programs, parse_reading
+        out = []
+        for dev_id, d in self._devices.items():
+            fields = d.get("fields") or {}
+            if d.get("deviceType") in RUNNING_FIELD and fields:
+                out.append({"id": f"pentair:{dev_id}", "name": (d.get("productInfo") or {}).get("nickName") or "Pool pump",
+                            "reading": parse_reading(fields), "programs": parse_programs(fields)})
+        return out
+
     async def status(self) -> dict:
         return {"connected": self.active, "available": AVAILABLE, "devices": len(self._devices)}

@@ -432,3 +432,12 @@ button, a, input, select, label, .dtile, .stile { touch-action: manipulation; }
 .pill.small { font-size: 12px; padding: 5px 10px; }
 .pill .elapsed { opacity: .7; font-variant-numeric: tabular-nums; margin-left: 4px; }
 @media (prefers-reduced-motion: reduce) { .sk, .icon-btn.spin svg { animation: none; } }
+
+/* Insights → Pool and plan */
+.wrap-btns { flex-wrap: wrap; gap: 8px; }
+.hour-bars { display: grid; grid-template-columns: repeat(24, 1fr); gap: 2px; height: 120px; align-items: end; padding-bottom: 16px; }
+.hour-bars .hb { position: relative; height: 100%; display: flex; align-items: flex-end; }
+.hour-bars .hb i { display: block; width: 100%; border-radius: 3px 3px 0 0; }
+.hour-bars .hb.paid i { background: var(--status-warning); }
+.hour-bars .hb.free i { background: var(--viz-1); }
+.hour-bars .hb span { position: absolute; bottom: -16px; left: 0; font-size: 10px; color: var(--muted); white-space: nowrap; }

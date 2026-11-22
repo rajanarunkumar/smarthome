@@ -40,6 +40,9 @@ from . import backup as backup_mod
 from .config import Secrets, data_dir
 from . import weather as weather_api
 from .energy import EnergyStore, build_energy
+from .pool import ACTIONS as POOL_ACTIONS, PoolStore, build_pool
+from .tou import tou_report
+from .bills import BillStore, bills_report, import_folder, tariff_from
 from .history import HistoryStore, align_hourly, build_insights, confirm_with_meter, missing_runs
 from .irrigation import SmartPrograms
 from .flowtest import FlowTests
@@ -93,6 +96,8 @@ class Hub:
         self.rainbird.on_run = self.history.log_run
         self.irrigation = SmartPrograms(self.store.db, self.history, self.rainbird)
         self.energy = EnergyStore(self.store.db)
+        self.pool = PoolStore(self.store.db)
+        self.bills = BillStore(self.store.db)
         self.photos = PhotoStore(self.store.db, data_dir() / "photos")
         self.flowtests = FlowTests(self.store.db, self.rainbird)
         self.backups = backup_mod.Backups(self.secrets, self.store.db, data_dir(),
@@ -200,6 +205,8 @@ class Hub:
             try:
                 devices, _ = await self.devices(interactive=False)
                 self.energy.observe(devices, datetime.now())
+                for pump in self.pentair.readings():
+                    self.pool.record(pump["reading"], datetime.now())
                 self.telemetry.job("activity recorder", started, (time.monotonic() - t0) * 1000, True,
                                    f"{len(devices)} devices", 120)
             except Exception as exc:  # noqa: BLE001
@@ -1262,6 +1269,99 @@ async def energy(request: Request, days: int = 28):
     return build_energy(hub.energy, tmean, days)
 
 
+DEFAULT_TARIFF = {"free_start": 20, "free_end": 4, "energy_cents": None, "delivery_cents": None, "monthly_fee": None}
+
+
+def tariff_of(hub) -> dict:
+    """Free hours and prices: the latest imported bill, overridden by anything set by hand."""
+    latest = hub.bills.latest()
+    from_bill = tariff_from(latest) if latest else {}
+    manual = {k: v for k, v in (hub.secrets.get("tariff") or {}).items() if v is not None}
+    return {**DEFAULT_TARIFF, **from_bill, **manual}
+
+
+class TariffIn(BaseModel):
+    free_start: int = Field(20, ge=0, le=23)
+    free_end: int = Field(4, ge=0, le=23)
+    energy_cents: float | None = Field(None, ge=0, le=100)
+    delivery_cents: float | None = Field(None, ge=0, le=100)
+    monthly_fee: float | None = Field(None, ge=0, le=200)
+
+
+@app.get("/api/bills")
+async def bills(request: Request):
+    hub = hub_of(request)
+    return {**bills_report(hub.bills.all()), "tariff": tariff_of(hub)}
+
+
+class BillImportIn(BaseModel):
+    folder: str = Field("~/Downloads/TXU Invoices", max_length=300)
+
+
+@app.post("/api/bills/import")
+async def bills_import(request: Request, body: BillImportIn):
+    """Read TXU bill PDFs from a folder in your home folder on the Mac."""
+    _email(request)
+    from pathlib import Path
+    folder = Path(body.folder).expanduser().resolve()
+    if not folder.is_dir() or Path.home().resolve() not in folder.parents:
+        raise HubError(400, "Give a folder inside your home folder on the Mac, e.g. ~/Downloads/TXU Invoices.")
+    return await asyncio.to_thread(import_folder, hub_of(request).bills, folder)
+
+
+@app.get("/api/tariff")
+async def get_tariff(request: Request):
+    return tariff_of(hub_of(request))
+
+
+@app.put("/api/tariff")
+async def put_tariff(request: Request, body: TariffIn):
+    hub_of(request).secrets.set("tariff", body.model_dump())
+    return tariff_of(hub_of(request))
+
+
+@app.get("/api/tou")
+async def tou(request: Request, days: int = 28):
+    from datetime import date, timedelta
+    hub = hub_of(request)
+    days = max(7, min(days, 90))
+    since = date.today() - timedelta(days=days)
+    intervals = {s: v for s, v in hub.energy.intervals(since).items() if s[:10] < date.today().isoformat()}
+    return tou_report(intervals, tariff_of(hub)) or {"empty": True}
+
+
+@app.get("/api/pool")
+async def pool(request: Request, days: int = 14):
+    from datetime import datetime
+    hub = hub_of(request)
+    pumps = hub.pentair.readings()
+    pump = pumps[0] if pumps else None
+    data = build_pool(hub.pool, pump["programs"] if pump else [], pump["reading"] if pump else None,
+                      tariff_of(hub), datetime.now(), max(7, min(days, 60)))
+    return {**data, "connected": hub.pentair.active, "pump": pump["name"] if pump else None}
+
+
+class PoolLogIn(BaseModel):
+    action: str
+    note: str | None = Field(None, max_length=200)
+    at: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$")
+
+
+@app.post("/api/pool/maintenance")
+async def pool_log(request: Request, body: PoolLogIn):
+    from datetime import datetime
+    if body.action not in POOL_ACTIONS:
+        raise HubError(400, "Unknown maintenance action.")
+    at = datetime.fromisoformat(body.at) if body.at else datetime.now()
+    return hub_of(request).pool.log(body.action, at, body.note)
+
+
+@app.delete("/api/pool/maintenance/{log_id}")
+async def pool_log_delete(request: Request, log_id: int):
+    hub_of(request).pool.delete_log(log_id)
+    return {"ok": True}
+
+
 @app.get("/api/insights")
 async def insights(request: Request, days: int = 28):
     hub = hub_of(request)
@@ -1385,6 +1485,7 @@ STORED_SETTINGS = {
     "nest": ("Nest (Google Device Access) client secret and refresh token", "key"),
     "anthropic_api_key": ("Anthropic API key (photo analysis)", "key"),
     "s3_backup": ("S3 backup bucket and AWS access key", "password"),
+    "tariff": ("Electricity plan: free hours and prices from your bill", "config"),
 }
 DATA_GROUPS = {
     "Rooms and names": ["rooms", "device_rooms", "device_names"],
@@ -1392,6 +1493,8 @@ DATA_GROUPS = {
     "Schedules and programs": ["hub_schedules", "irrigation_programs", "irrigation_decisions", "flow_tests"],
     "Water, sprinklers and weather history": ["watering", "water_hourly", "water_daily", "weather"],
     "Electricity history": ["energy_interval", "device_activity"],
+    "Pool pump history": ["pool_samples", "pool_maintenance"],
+    "Electricity bills": ["bills"],
     "Zone photos": ["zone_photos"],
     "Backup log": ["backups"],
 }

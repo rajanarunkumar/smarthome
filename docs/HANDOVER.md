@@ -20,6 +20,16 @@ deliberately **not** in this repo; they live only in `~/.smarthome/` on the MacB
 
 ## Open items, in order
 
+0a. **Done (2026-11-22): pool pump health, time-of-use and bills.**
+   - `hub/pool.py`: the recorder stores the IntelliFlo's flow, W, speed, estimated psi and target every 2 min (`pool_samples`), at the pump's own clock; repeats are skipped.
+     - Health = power at the same target flow vs. a clean baseline (the cleanest day, or the 48 h after a logged backwash/clean if lower). The shape of the rise picks the action: jump → skimmer (a), steady climb → backwash (b), backwash didn't help → clean filter (c), can't hold flow / pinned speed / power swinging → water level (d).
+     - Logged fixes (`pool_maintenance`) get a before/after power comparison.
+     - Also reports programs that run in paid hours, kWh free vs. paid per day, and gallons per kWh at each flow.
+   - `hub/tou.py`: whole-house free (8 PM–4 AM) vs. paid split from the 15-min meter data, the paid hours just before 8 PM, and night delivery cost.
+   - `hub/bills.py`: reads TXU bill PDFs (`python -m hub.bills import ~/Downloads/"TXU Invoices"` or `POST /api/bills/import`) into the `bills` table. The latest bill sets the prices (`tariff_of`); `PUT /api/tariff` overrides. Both bill layouts (plan "12" with the night delivery discount, plan "24" without) add up to the cent.
+   - UI: Insights → Pool (new), and the plan, average day and bills on Insights → Electricity.
+   - **Open:** Pentair's cloud stopped updating at 11:07 on 2026-11-22 (device clock `s1`); the Pool view flags readings older than 10 min. Check whether the pump only reports while the Pentair app is open. Health needs about a day of fresh readings before it shows a baseline.
+
 0. **Done (2026-11-22): UI speed + Admin telemetry** ([plan](PLAN-UI-SPEED-TELEMETRY.md)).
    - **Device list:** `/api/devices` went from 19 s to about 10 ms (cached).
      - New `hub/cache.py` is a Caffeine-style L1 loading cache: refresh-after-write, expire with stale fallback, single flight, LRU, failure backoff, stats.
