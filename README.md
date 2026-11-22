@@ -176,6 +176,25 @@ It refuses a folder that isn't empty (add `--force` to overwrite) and rejects an
 
 Notes: the AWS secret key is stored in `secrets.json` like the other logins (or use `aws configure` so it isn't stored by the hub). The archive contains your plain-text service passwords, which is why it's encrypted before it leaves the Mac. Don't put the recovery key in the same bucket.
 
+## LG ThinQ with a Google (or Apple) sign-in
+
+The hub only ever needs a **token**, never your LG password, so there is nothing to change in the hub itself. The question is whether LG's token page lets you in:
+1. Open **connect-pat.lgthinq.com** and choose the same sign-in you use in the ThinQ app (for example **Continue with Google**) if it's offered.
+2. Community reports say that page may accept only an LG email-and-password account (LG doesn't confirm this either way). If so: create an ordinary LG account (email + password), **invite it as a member of your home in the ThinQ app** (the menu name varies by app version), and make the token with that account. I haven't verified that appliances shared this way show up in LG's API, so check the Settings card says how many appliances it found.
+
+## Rain Bird: when it won't connect
+
+**Settings → Rain Bird → Test connection** (before connecting, or **Test** once connected) walks through it and says which step fails. It sends at most one request to the controller, and never while the hub is paused, so testing can't cause a lockout.
+
+| What you see | Meaning | What to do |
+|---|---|---|
+| *Nothing answers at 192.168.x.x* | Wrong IP, the module is offline, or this Mac is on a different network (a guest network, for example) | Look for the module in your router's device list (often named RainBird or LNK), check its light, use the Mac on the same Wi-Fi |
+| *Rejected the password* | The controller wants the **local** password set for the Wi-Fi module in the Rain Bird app, not your Rain Bird account password | Reconnect with the right one. The hub stops polling after one rejection |
+| *Locked itself after repeated wrong passwords* | The controller blocks further attempts (HTTP 430) | Wait 15 minutes, or unplug it for a few seconds. The hub pauses its own polling for 16 minutes so it can't extend the lockout |
+| *Busy with another request* | The controller handles **one request at a time** (the Rain Bird app counts) | Close the Rain Bird app and retry. The hub now sends its own requests one at a time |
+
+A controller without a Wi-Fi module (LNK or LNK2) or built-in Wi-Fi has no network address at all and can't be reached by any app other than at the panel. Older controllers that don't answer the combined state request are read with simpler requests (no time-remaining).
+
 ## Hub schedules
 
 Kasa and Hue schedules are saved on the plug or bridge and run even when the Mac is off. Every other device with an on/off (the Pentair pump, Govee, Dyson, Sonos, the LG TV, Ecovacs) can now be scheduled too, at set times. Those schedules run **in the hub**, so the Mac must be awake: System Settings → Energy → turn on "Prevent automatic sleeping when the display is off". The Schedules tab labels them **Hub (this Mac)**. Locks can't be scheduled.

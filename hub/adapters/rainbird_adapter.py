@@ -48,6 +48,45 @@ WATCH_SECONDS = 30
 HUB_RUN_WINDOW = 4 * 3600  # a run counts as hub-started if the hub asked for that zone this recently
 DAY_NAMES = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"]
 HUB_DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+LOCKOUT_MINUTES = 16      # the controller says "wait 15 minutes"; one more so we don't knock on the minute
+BACKOFF_MAX_SECONDS = 300
+
+
+def error_kind(exc: Exception) -> str:
+    """lockout | auth | busy | certificate | nack | connection | other, from the library's exception types."""
+    names = {c.__name__ for c in type(exc).__mro__}
+    for kind, name in (("lockout", "RainbirdAuthLockoutException"), ("auth", "RainbirdAuthException"),
+                       ("busy", "RainbirdDeviceBusyException"), ("certificate", "RainbirdCertificateError"),
+                       ("nack", "RainbirdDeviceNackError"), ("connection", "RainbirdConnectionError")):
+        if name in names:
+            return kind
+    if isinstance(exc, (OSError, asyncio.TimeoutError)):
+        return "connection"
+    return "other"
+
+
+def explain(exc: Exception, host: str) -> str:
+    """What went wrong with the controller, and what to do, in plain words."""
+    kind = error_kind(exc)
+    if kind == "lockout":
+        return ("The controller has locked itself after repeated wrong passwords. Wait 15 minutes, or unplug the controller for "
+                "a few seconds to reboot it. The hub has stopped trying so it doesn't extend the lockout.")
+    if kind == "auth":
+        return ("The controller rejected the password. It's the local password set for the Wi-Fi module in the Rain Bird app, "
+                "not your Rain Bird account password. The hub has stopped trying; connect again with the right one.")
+    if kind == "busy":
+        return ("The controller is busy with another request. It handles one at a time, and the Rain Bird app counts. "
+                "Close the Rain Bird app and try again.")
+    if kind == "certificate":
+        return "The controller's secure connection failed its certificate check."
+    if kind == "nack":
+        return "The controller refused that command (NACK). This model may not support it."
+    if kind == "connection":
+        return (f"Can't reach {host or 'the controller'}. Check the IP address (your router's device list shows the Rain Bird "
+                "module), that this Mac is on the same Wi-Fi as the controller, and that the module's light shows it's online.")
+    return f"{type(exc).__name__}: {exc}"
+
+
 DAY_ABBR = {"MONDAY": "Mon", "TUESDAY": "Tue", "WEDNESDAY": "Wed", "THURSDAY": "Thu", "FRIDAY": "Fri",
             "SATURDAY": "Sat", "SUNDAY": "Sun"}
 
@@ -159,6 +198,7 @@ class RainBirdAdapter(Adapter):
         self._zone_scheds: dict[int, dict] = {}
         self._schedule_raw: Any = None
         self.watch_error: str | None = None   # why the poller can't read the controller, shown in Insights
+        self._halt_until = float("-inf")      # after a rejected password or a lockout the hub stops knocking until then
         self._state_mode: str | None = None   # combined, or legacy for controllers that don't answer it
         self._lock = asyncio.Lock()
         # Watering log: called with (started, zone, minutes, source) when a run ends.
@@ -204,24 +244,40 @@ class RainBirdAdapter(Adapter):
         return SimpleNamespace(irrigation_state=1 if active else 0, active_station=active[0] if active else 0,
                                remaining_runtime=0, delay_setting=delay or 0, sensor_state=sensor, seasonal_adjust=100)
 
+    async def _watch_once(self, delay: float) -> float:
+        """One poll. Returns how long to wait before the next one: a rejected password or a lockout stops
+        the polling (it would only extend a lockout), and an unreachable controller is retried with a growing delay."""
+        if not self.active or self._halted():
+            return WATCH_SECONDS if not self._halted() else min(delay, 60)
+        try:
+            async with self._lock:
+                ctl = await self._controller()
+                self._state = await self._read_state(ctl)
+                self._state_at = time.monotonic()
+            self.observe(self._state, datetime.now())
+            self.watch_error = None
+            return WATCH_SECONDS
+        except Exception as exc:  # noqa: BLE001 - keep watching
+            message = explain(exc, self.config.get("host", ""))
+            if message != self.watch_error:  # say it once, at warning level, so it isn't silent
+                log.warning("Rain Bird watch: %s", message)
+            self.watch_error = message
+            await self.close()
+            kind = error_kind(exc)
+            if kind == "lockout":
+                self._halt_until = time.monotonic() + LOCKOUT_MINUTES * 60
+                return LOCKOUT_MINUTES * 60
+            if kind == "auth":
+                self._halt_until = float("inf")  # until connect() is given a password
+                return 15 * 60
+            return min(max(delay, WATCH_SECONDS) * 2, BACKOFF_MAX_SECONDS)
+
     async def _watch(self) -> None:
         """Poll the controller so every run is logged, even ones started by its own programs."""
+        delay = WATCH_SECONDS
         while True:
-            if self.active:
-                try:
-                    async with self._lock:
-                        ctl = await self._controller()
-                        self._state = await self._read_state(ctl)
-                        self._state_at = time.monotonic()
-                    self.observe(self._state, datetime.now())
-                    self.watch_error = None
-                except Exception as exc:  # noqa: BLE001 - keep watching
-                    message = f"{type(exc).__name__}: {exc}"
-                    if message != self.watch_error:  # say it once, at warning level, so it isn't silent
-                        log.warning("Rain Bird watch: %s", message)
-                    self.watch_error = message
-                    await self.close()
-            await asyncio.sleep(WATCH_SECONDS)
+            delay = await self._watch_once(delay)
+            await asyncio.sleep(delay)
 
     def observe(self, state: Any, now: datetime) -> None:
         """Turn controller states into runs: when the active zone changes, the previous run ended."""
@@ -239,7 +295,12 @@ class RainBirdAdapter(Adapter):
         name = (self.config.get("zone_names") or {}).get(str(zone))
         return f"Zone {zone}" + (f" ({name})" if name else "")
 
+    def _halted(self) -> bool:
+        return time.monotonic() < self._halt_until
+
     async def _controller(self, cfg: dict | None = None) -> Any:
+        if cfg is None and self._halted():  # never keep sending a password the controller has refused
+            raise HubError(409, self.watch_error or "The hub paused its connection to the controller. Connect again in Settings.")
         cfg = cfg or self.config
         if self._ctl is None:
             self._session = aiohttp.ClientSession()
@@ -252,19 +313,54 @@ class RainBirdAdapter(Adapter):
     async def connect(self, host: str, password: str) -> dict:
         if not AVAILABLE:
             raise HubError(501, "Rain Bird support needs Python 3.13 or newer on the hub Mac. See the README.")
-        cfg = {"host": host.strip(), "password": password, "zone_names": self.config.get("zone_names") or {}}
+        cfg = {"host": host.strip(), "password": password, "zone_names": self.config.get("zone_names") or {},
+               "zone_areas": self.config.get("zone_areas") or {}}
         await self.close()
         try:
             await self._controller(cfg)
-        except RainbirdAuthException as exc:
+        except Exception as exc:  # noqa: BLE001 - every library failure gets a plain explanation
             await self.close()
-            raise HubError(401, "The controller didn't accept that password. It's the controller password "
-                                "set in the Rain Bird app, not your account password.") from exc
-        except (RainbirdApiException, OSError, asyncio.TimeoutError) as exc:
-            await self.close()
-            raise HubError(504, f"Couldn't reach a Rain Bird controller at {host}: {exc}") from exc
+            kind = error_kind(exc)
+            raise HubError({"lockout": 423, "auth": 401}.get(kind, 504), explain(exc, host)) from exc
         self.secrets.set("rainbird", cfg)
+        self._halt_until, self.watch_error = float("-inf"), None  # a good password: resume polling
         return {"connected": True, "devices": 1, "zones": len(self._zones), "model": self._model}
+
+    async def diagnose(self, host: str, password: str) -> list[dict]:
+        """Step-by-step connection test: is the address reachable, then does the controller accept the password.
+        It makes at most one controller request, so testing can't trigger a lockout by itself."""
+        steps: list[dict] = []
+        if host == self.config.get("host") and self._halted():
+            return [{"ok": False, "title": "The hub has paused its own connection", "detail": self.watch_error or "Connect again in Settings."}]
+        ports = {}
+        for port in (443, 80):
+            try:
+                _, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=3)
+                writer.close()
+                ports[port] = True
+            except (OSError, asyncio.TimeoutError):
+                ports[port] = False
+        if not any(ports.values()):
+            return [{"ok": False, "title": f"Nothing answers at {host}",
+                     "detail": "Ports 443 and 80 are both closed or silent. Check the IP address (your router's device list shows the Rain Bird "
+                               "Wi-Fi module, often named RainBird or LNK), that the module's light shows it's online, and that this Mac is on the "
+                               "same Wi-Fi network as the controller (not a guest network)."}]
+        steps.append({"ok": True, "title": f"{host} is reachable", "detail": f"Port {443 if ports[443] else 80} is open."})
+        if not AVAILABLE:
+            steps.append({"ok": False, "title": "Rain Bird support isn't installed", "detail": "It needs Python 3.13 or newer on the hub Mac."})
+            return steps
+        session = aiohttp.ClientSession()
+        try:
+            ctl = await create_controller(session, host, password or "")
+            model = await ctl.get_model_and_version()
+            zones = await ctl.get_available_stations()
+            steps.append({"ok": True, "title": "The controller accepted the connection",
+                          "detail": f"{model.model_name}, {len(zones.active_set)} zone(s)."})
+        except Exception as exc:  # noqa: BLE001
+            steps.append({"ok": False, "title": "The controller didn't accept the connection", "detail": explain(exc, host)})
+        finally:
+            await session.close()
+        return steps
 
     async def disconnect(self) -> None:
         await self.close()
@@ -325,29 +421,32 @@ class RainBirdAdapter(Adapter):
         return {DEVICE_ID: "Sprinklers"} if self.active else {}
 
     async def set_state(self, device_id: str, state: StateIn) -> None:
-        ctl = await self._controller()
         try:
-            if state.zone is not None:
-                if state.zone not in self._zones:
-                    raise HubError(400, f"Zone {state.zone} isn't set up on this controller.")
-                self._hub_started[state.zone] = time.monotonic()
-                await ctl.irrigate_zone(state.zone, state.minutes or 10)
-            elif state.action == "stop" or state.on is False:
-                if self._sequence and not self._sequence.done():
-                    self._sequence.cancel()
-                await ctl.stop_irrigation()
-            elif state.action and state.action.startswith("program_"):
-                program = int(state.action.split("_", 1)[1])
-                if program not in self._program_ids:
-                    raise HubError(400, "That program isn't set up on the controller.")
-                await ctl.set_program(program)
-            elif state.rain_delay_days is not None:
-                await ctl.set_rain_delay(state.rain_delay_days)
-            else:
-                raise HubError(400, "Pick a zone to run, Stop, or a rain delay.")
-        except RainbirdApiException as exc:
-            raise HubError(502, f"The controller didn't accept that: {exc}") from exc
+            async with self._lock:  # the controller handles one request at a time; more than one gets a 503
+                await self._set_state_locked(await self._controller(), state)
+        except (RainbirdApiException, OSError, asyncio.TimeoutError) as exc:
+            raise HubError(502, explain(exc, self.config.get("host", ""))) from exc
         self._state_at = float("-inf")  # never
+
+    async def _set_state_locked(self, ctl: Any, state: StateIn) -> None:
+        if state.zone is not None:
+            if state.zone not in self._zones:
+                raise HubError(400, f"Zone {state.zone} isn't set up on this controller.")
+            self._hub_started[state.zone] = time.monotonic()
+            await ctl.irrigate_zone(state.zone, state.minutes or 10)
+        elif state.action == "stop" or state.on is False:
+            if self._sequence and not self._sequence.done():
+                self._sequence.cancel()
+            await ctl.stop_irrigation()
+        elif state.action and state.action.startswith("program_"):
+            program = int(state.action.split("_", 1)[1])
+            if program not in self._program_ids:
+                raise HubError(400, "That program isn't set up on the controller.")
+            await ctl.set_program(program)
+        elif state.rain_delay_days is not None:
+            await ctl.set_rain_delay(state.rain_delay_days)
+        else:
+            raise HubError(400, "Pick a zone to run, Stop, or a rain delay.")
 
     async def past_runs(self, first_day, last_day) -> list[dict]:
         """What the controller's programs would have run on past days (for the 4-week backfill)."""
@@ -386,13 +485,13 @@ class RainBirdAdapter(Adapter):
 
         start_times = sorted(dtime.fromisoformat(s) for s in starts)
         week = {getattr(DayOfWeek, DAY_NAMES[HUB_DAYS.index(d)]) for d in days}
-        ctl = await self._controller()
         try:
-            await ctl.set_zone_schedule(zone, timedelta(minutes=minutes), start_times,
-                                        ProgramFrequency.CUSTOM, week)
-            saved = (await ctl.get_schedule()).zone_schedules.get(zone)
-        except RainbirdApiException as exc:
-            raise HubError(502, f"The controller didn't accept the schedule: {exc}") from exc
+            async with self._lock:
+                ctl = await self._controller()
+                await ctl.set_zone_schedule(zone, timedelta(minutes=minutes), start_times, ProgramFrequency.CUSTOM, week)
+                saved = (await ctl.get_schedule()).zone_schedules.get(zone)
+        except (RainbirdApiException, OSError, asyncio.TimeoutError) as exc:
+            raise HubError(502, explain(exc, self.config.get("host", ""))) from exc
         self._programs_at = float("-inf")
         result = zone_schedule_dict(saved) if saved else None
         # Start times are stored in 10-minute steps, so compare what was asked to what came back.
@@ -423,7 +522,7 @@ class RainBirdAdapter(Adapter):
     async def status(self) -> dict:
         return {"connected": self.active, "available": AVAILABLE, "zone_scheduled": self.zone_scheduled, "devices": 1 if self.active else 0,
                 "zones": len(self._zones), "host": self.config.get("host"),
-                "watch_error": self.watch_error}
+                "watch_error": self.watch_error, "paused": self._halted()}
 
     async def close(self) -> None:
         if self._session is not None:

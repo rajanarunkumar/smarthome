@@ -679,7 +679,7 @@ function renderSettings() {
         <span class="sub wrap">${count("thinq")} appliance(s). Washers and dryers start only after Remote Start is pressed on the machine.</span></div>
         <button class="pill danger" id="thinq-off">Disconnect</button></div>` : `
       <div class="row"><div class="main"><span class="name">Not connected</span>
-        <span class="sub wrap">Sign in at <b>connect-pat.lgthinq.com</b> with your LG account, choose <b>Add new token</b>, tick every permission, and paste the token here.</span></div></div>
+        <span class="sub wrap">Sign in at <b>connect-pat.lgthinq.com</b> (choose the same sign-in you use in the ThinQ app, such as Continue with Google, if it's offered), choose <b>Add new token</b>, tick every permission, and paste the token here. If the page only takes an LG email and password, see the README.</span></div></div>
       <div class="row key-row"><input type="password" id="thinq-token" placeholder="Personal access token" autocomplete="off" spellcheck="false">
         <input type="text" id="thinq-country" value="US" maxlength="2" aria-label="Country code" class="country">
         <button class="pill primary" id="thinq-on">Connect</button></div>`}
@@ -720,9 +720,11 @@ function renderSettings() {
     ${accountCard("Rain Bird", rainbird, `
       <div class="row key-row"><input type="text" inputmode="decimal" id="rainbird-host" placeholder="Controller IP, e.g. 192.168.1.40" autocomplete="off">
         <input type="password" id="rainbird-pw" placeholder="Controller password" autocomplete="off">
+        <button class="pill" id="rainbird-test">Test connection</button>
         <button class="pill primary" id="rainbird-on">Connect</button></div>`,
       "Sprinklers with the Rain Bird LNK Wi‑Fi module, controlled directly on your Wi‑Fi. Use the controller password from the Rain Bird app (not your account password). Find the IP in the Rain Bird app's controller settings or your router's device list.",
-      `${esc(rainbird.host || "")} · ${rainbird.zones ?? 0} zone(s)`, "rainbird")}
+      `${rainbird.paused ? "Paused: " + esc(rainbird.watch_error || "") : `${esc(rainbird.host || "")} · ${rainbird.zones ?? 0} zone(s)`}`, "rainbird",
+      `<button class="pill" id="rainbird-test">Test</button>`)}
     <div class="section-title"><span>Photo analysis (optional)</span></div>
     <div class="card">${state.status?.claude?.connected ? `
       <div class="row"><div class="main"><span class="name">Claude is on</span>
@@ -822,6 +824,19 @@ function renderSettings() {
           <span class="sub-value">${esc(f?.value ?? f)} ${esc(f?.unit ?? "")}</span></div>`).join("")}</div></div>`).join("")
         + `<p class="note">Secret fields (security key, Wi‑Fi details) are left out. Sharing this helps work out how the Pentair app stores the pump's own schedules.</p>`);
     } catch (err) { toast(err.message); }
+  });
+  $("#rainbird-test")?.addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    const label = e.target.textContent;
+    e.target.textContent = "Testing…";
+    try {
+      const r = await api("POST", "/api/rainbird/test", { host: val("#rainbird-host") || null, password: $("#rainbird-pw") ? $("#rainbird-pw").value : null });
+      openSheet("Rain Bird connection test", r.steps.map((st) => `
+        <div class="row rec"><span class="status ${st.ok ? "status-good" : "status-warning"}" aria-hidden="true">${st.ok ? "✓" : "!"}</span>
+          <div class="main"><span class="name">${esc(st.title)}</span><span class="sub wrap">${esc(st.detail)}</span></div></div>`).join(""));
+    } catch (err) { toast(err.message); }
+    e.target.disabled = false;
+    e.target.textContent = label;
   });
   accountButton("#rainbird-on", () => api("POST", "/api/rainbird/account", { host: val("#rainbird-host"), password: $("#rainbird-pw").value }),
     (r) => `Rain Bird connected: ${r.zones} zone(s)`);

@@ -791,6 +791,22 @@ async def rainbird_connect(request: Request, body: RainBirdIn):
     return await hub_of(request).rainbird.connect(body.host, body.password)
 
 
+class RainBirdTestIn(BaseModel):
+    host: str | None = Field(None, pattern=r"^\d{1,3}(\.\d{1,3}){3}$")
+    password: str | None = Field(None, max_length=100)
+
+
+@app.post("/api/rainbird/test")
+async def rainbird_test(request: Request, body: RainBirdTestIn = Body(RainBirdTestIn())):
+    """Step-by-step connection test. Uses what's typed, or the saved settings. At most one controller request."""
+    rb = hub_of(request).rainbird
+    host = body.host or rb.config.get("host")
+    if not host:
+        raise HubError(400, "Enter the controller's IP address first.")
+    password = body.password if body.password is not None else rb.config.get("password", "")
+    return {"steps": await rb.diagnose(host, password or "")}
+
+
 @app.delete("/api/rainbird/account")
 async def rainbird_disconnect(request: Request):
     await hub_of(request).rainbird.disconnect()

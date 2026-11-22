@@ -209,7 +209,8 @@ class ThinQAdapter(Adapter):
             raise HubError(504, f"Couldn't reach LG ThinQ: {exc}") from exc
         data = r.json() if r.content else {}
         if r.status_code in (401, 403):
-            raise HubError(401, "LG rejected the token. Make a new one at connect-pat.lgthinq.com.")
+            raise HubError(401, "LG rejected the token. Make a new one at connect-pat.lgthinq.com, signed in with the account your "
+                                "appliances are on (Google sign-in accounts: see the README).")
         if r.status_code >= 400:
             err = data.get("error") or {}
             raise HubError(502, f"LG ThinQ said: {err.get('message') or r.status_code}")
