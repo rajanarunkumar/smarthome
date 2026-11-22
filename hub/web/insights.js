@@ -3,6 +3,7 @@
 // Colors come from --viz-* tokens in style.css (validated for color-blind separation in light and dark).
 
 const SVGNS = "http://www.w3.org/2000/svg";
+const photoUrl = (id) => `/api/photos/${encodeURIComponent(id)}`;
 let insightDays = 28;
 let insightTable = false;
 let insightView = "water";
@@ -215,17 +216,147 @@ async function renderInsights(fetch = true) {
         line: { name: "Evaporation", color: C.et, values: ins.series.map((r) => r.et0_in) } });
     } else $("#chart-weather").insertAdjacentHTML("beforeend", `<p class="note">Set your location above.</p>`);
   }
-  body.insertAdjacentHTML("beforeend", `
-    <div class="section-title"><span>Zones, last ${ins.days} days</span></div>
-    ${ins.zones.length ? `<div class="table-wrap"><table class="viz-table"><thead><tr><th>Zone</th><th>Runs</th><th>Minutes</th><th>Gal/min</th><th>Gallons</th><th>Inches</th></tr></thead>
-      <tbody>${ins.zones.map((z) => `<tr><td>${esc(z.label)}</td><td>${z.runs}</td><td>${fmtNum(z.minutes)}</td>
-        <td>${z.gpm == null ? `<span class="muted">learning</span>` : `${fmtNum(z.gpm, 1)}`}</td><td>${fmtNum(z.gallons)}</td>
-        <td>${z.inches == null ? (z.area_sqft ? "–" : `<span class="muted">add area</span>`) : fmtNum(z.inches, 2)}</td></tr>`).join("")}</tbody></table></div>
-      <p class="note">Gal/min is worked out by matching each sprinkler run to the hourly water meter, after taking out the household's normal use for that hour. Inches need each zone's area (Sprinklers → zone settings).</p>`
-      : `<p class="note">No sprinkler runs recorded yet. The hub logs every run it sees from now on.</p>`}
+  body.insertAdjacentHTML("beforeend", zonesHtml(ins) + `
+    <div id="flow-box"></div>
     ${ins.leak ? `<p class="note">Overnight use (1–5 AM, no watering): about ${fmtNum(ins.leak.gallons_per_hour, 1)} gal/hour over ${ins.leak.nights} nights${ins.leak.suspect ? ", which is high" : ", normal"}.</p>` : ""}`);
+  bindZoneCards(ins);
+  renderFlowTests(ins);
 }
 
+// ---------- zones: advice, flow and photos ----------
+const ADVICE = {
+  increase: ["Water more", "serious"], reduce: ["Water less", "warning"], keep: ["Keep as is", "good"],
+  inspect: ["Check the heads", "warning"], wait: ["Take a photo", "neutral"],
+};
+
+function flowText(z) {
+  if (z.gpm == null) return `<span class="muted">gal/min: learning</span>`;
+  if (z.gpm_source === "flow test") return `${fmtNum(z.gpm, 1)} gal/min <span class="muted">(flow test${z.flow_tests > 1 ? `, ${z.flow_tests} runs` : ""})</span>`;
+  return `${fmtNum(z.gpm, 1)}${z.plus_minus != null ? ` ± ${fmtNum(z.plus_minus, 1)}` : ""} gal/min <span class="muted">(estimated from ${z.samples} hours)</span>`;
+}
+
+function zonesHtml(ins) {
+  if (!ins.zones.length) return `<div class="section-title"><span>Zones</span></div><p class="note">No sprinkler runs recorded yet.</p>`;
+  return `<div class="section-title"><span>Zones</span>${ins.need_week_in != null ? `<span class="muted small">Lawn needed ${fmtNum(ins.need_week_in, 2)} in last week</span>` : ""}</div>
+    <div class="card">${ins.zones.map((z) => {
+      const a = z.advice || { action: "wait", change_pct: 0, reason: "" };
+      const [label, level] = ADVICE[a.action] || ADVICE.wait;
+      const pct = a.change_pct ? ` ${a.change_pct > 0 ? "+" : "−"}${Math.abs(a.change_pct)}%` : "";
+      const photo = a.photo;
+      return `
+      <div class="row zone-card">
+        ${photo ? `<img class="zone-thumb" src="${photoUrl(photo.id)}" alt="Latest photo of ${esc(z.label)}" data-zone-photos="${z.zone}">`
+                : `<button class="zone-thumb empty" data-zone-photos="${z.zone}" aria-label="Photos of ${esc(z.label)}">📷</button>`}
+        <div class="main">
+          <span class="name">${esc(z.label)} <span class="chip-status status-${level}">${label}${pct}</span></span>
+          <span class="sub wrap">${esc(a.reason)}</span>
+          <span class="sub wrap">${flowText(z)} · last week ${z.week_in != null ? `${fmtNum(z.week_in, 2)} in` : `${fmtNum(z.minutes)} min in ${ins.days} days`}${photo && photo.green_share != null ? ` · ${Math.round(photo.green_share * 100)}% green` : ""}</span>
+        </div>
+        <label class="pill photo-btn" aria-label="Take a photo of ${esc(z.label)}">Photo
+          <input type="file" accept="image/*" capture="environment" data-zone-upload="${z.zone}" hidden></label>
+      </div>`; }).join("")}</div>
+    <p class="note">Photos work best in daylight, from the same spot each time, aimed at the grass. The hub measures how green each one is on the Mac${state.status?.claude?.connected ? ", and Claude looks for signs of too much or too little water" : "; add an Anthropic API key in Settings to have Claude assess them too"}.</p>`;
+}
+
+// Photos from an iPhone can be large or HEIC: draw onto a canvas and send a JPEG.
+async function photoToJpeg(file) {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, 2048 / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(bitmap.width * scale); canvas.height = Math.round(bitmap.height * scale);
+  canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  return new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.88));
+}
+
+async function uploadZonePhoto(zone, file) {
+  toast("Analysing the photo…");
+  const blob = await photoToJpeg(file);
+  const res = await fetch(`/api/rainbird/zones/${zone}/photos`, { method: "POST", body: blob, credentials: "same-origin", headers: { "Content-Type": "image/jpeg" } });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || `Error ${res.status}`);
+  const p = data.photo;
+  toast(p.green_share == null ? "Saved. No grass found in that photo; aim at the lawn." : `Saved: ${Math.round(p.green_share * 100)}% green${p.ai ? `. Claude: ${p.ai.summary}` : ""}${p.ai_error ? ` (${p.ai_error})` : ""}`);
+}
+
+function bindZoneCards(ins) {
+  view.querySelectorAll("[data-zone-upload]").forEach((input) => input.addEventListener("change", async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    try { await uploadZonePhoto(input.dataset.zoneUpload, file); await renderInsights(true); }
+    catch (err) { toast(err.message); }
+    input.value = "";
+  }));
+  view.querySelectorAll("[data-zone-photos]").forEach((el) => el.addEventListener("click", () =>
+    openZonePhotos(ins.zones.find((z) => String(z.zone) === el.dataset.zonePhotos))));
+}
+
+async function openZonePhotos(zone) {
+  const list = await api("GET", `/api/rainbird/zones/${zone.zone}/photos`);
+  openSheet(`${zone.label}: photos`, `
+    <label class="pill primary photo-btn">Take a photo<input type="file" accept="image/*" capture="environment" id="zp-new" hidden></label>
+    ${list.length ? list.map((p) => `
+      <div class="card photo-card">
+        <img src="${photoUrl(p.id)}" alt="${esc(zone.label)} on ${esc(p.taken)}">
+        <div class="pad">
+          <span class="name small">${esc(new Date(p.taken).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }))}
+            · ${p.green_share == null ? "no grass found" : `${Math.round(p.green_share * 100)}% green`}</span>
+          ${p.ai ? `<p class="note"><b>Claude: ${esc(p.ai.verdict)}</b> (${esc(p.ai.confidence)} confidence${p.ai.dormant ? ", looks dormant" : ""}). ${esc(p.ai.summary)}
+            ${p.ai.observations.length ? `<br>${p.ai.observations.map(esc).join(" · ")}` : ""}</p>` : ""}
+          <div class="inline">
+            ${state.status?.claude?.connected ? `<button class="pill" data-assess="${p.id}">${p.ai ? "Ask Claude again" : "Ask Claude"}</button>` : ""}
+            <button class="pill danger" data-del-photo="${p.id}">Delete</button>
+          </div>
+        </div>
+      </div>`).join("") : `<p class="note">No photos yet. Stand in the same spot each time so changes show up.</p>`}`);
+  $("#zp-new", sheet).addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try { await uploadZonePhoto(zone.zone, file); openZonePhotos(zone); } catch (err) { toast(err.message); }
+  });
+  sheet.querySelectorAll("[data-assess]").forEach((b) => b.addEventListener("click", async () => {
+    b.disabled = true; b.textContent = "Asking Claude…";
+    try { await api("POST", `/api/photos/${b.dataset.assess}/assess`); openZonePhotos(zone); }
+    catch (err) { toast(err.message); b.disabled = false; }
+  }));
+  sheet.querySelectorAll("[data-del-photo]").forEach((b) => b.addEventListener("click", async () => {
+    if (b.dataset.armed !== "1") { b.dataset.armed = "1"; b.textContent = "Tap again to delete"; return; }
+    try { await api("DELETE", `/api/photos/${b.dataset.delPhoto}`); openZonePhotos(zone); } catch (err) { toast(err.message); }
+  }));
+}
+
+// ---------- flow tests ----------
+async function renderFlowTests(ins) {
+  const box = $("#flow-box");
+  if (!box) return;
+  let data;
+  try { data = await api("GET", "/api/rainbird/flow-tests"); } catch { return; }
+  const planned = data.tests.filter((t) => t.status === "planned");
+  const recent = data.tests.filter((t) => t.status !== "planned").slice(0, 8);
+  const when = (iso) => new Date(iso).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" });
+  box.innerHTML = `
+    <div class="section-title"><span>Measure gal/min</span></div>
+    <div class="card pad">
+      <p class="note">A flow test runs each zone by itself for a few minutes in its own hour after midnight, when the house uses almost no water, then reads that hour from the water meter. It's more accurate than the estimate. Six zones a night; the Mac must be awake.</p>
+      ${planned.length ? `<p class="note"><b>Planned:</b> ${planned.slice().reverse().map((t) => `zone ${t.zone} at ${esc(when(t.start))}`).join(", ")}</p>
+        <button class="pill danger" id="flow-cancel">Cancel the plan</button>`
+      : `<div class="inline"><select id="flow-min" aria-label="Minutes per zone">${[5, 10, 15].map((m) => `<option value="${m}" ${m === 10 ? "selected" : ""}>${m} min per zone</option>`).join("")}</select>
+        <button class="pill primary" id="flow-plan">Test all zones tonight</button></div>`}
+      ${recent.length ? `<div class="table-wrap flow-table"><table class="viz-table"><thead><tr><th>Zone</th><th>When</th><th>Result</th></tr></thead><tbody>
+        ${recent.map((t) => `<tr><td>${t.zone}</td><td>${esc(when(t.start))}</td><td>${t.status === "measured" ? `${fmtNum(t.gpm, 1)} gal/min` : `<span class="muted">${esc(t.status === "ran" ? "waiting for the meter" : t.note || t.status)}</span>`}</td></tr>`).join("")}
+      </tbody></table></div>` : ""}
+    </div>`;
+  $("#flow-plan")?.addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    try {
+      const zones = ins.zones.map((z) => z.zone);
+      const rows = await api("POST", "/api/rainbird/flow-tests", { zones, minutes: Number($("#flow-min").value) });
+      toast(`Planned ${rows.length} zone test(s), starting 12:05 AM`); renderFlowTests(ins);
+    } catch (err) { toast(err.message); e.target.disabled = false; }
+  });
+  $("#flow-cancel")?.addEventListener("click", async () => {
+    try { await api("DELETE", "/api/rainbird/flow-tests"); toast("Flow test cancelled"); renderFlowTests(ins); } catch (err) { toast(err.message); }
+  });
+}
 
 // ---------- Electricity view ----------
 function fmtSlot(start, end) {

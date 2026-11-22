@@ -34,6 +34,9 @@ from . import weather as weather_api
 from .energy import EnergyStore, build_energy
 from .history import HistoryStore, build_insights, confirm_with_meter
 from .irrigation import SmartPrograms
+from .flowtest import FlowTests
+from .history import minutes_by_hour
+from .photos import PhotoStore, assess_with_claude, zone_advice
 from .scheduler import HubScheduler
 from .models import DAYS, Device, DevicePatch, HubError, Schedule, ScheduleIn, StateIn
 
@@ -71,6 +74,8 @@ class Hub:
         self.rainbird.on_run = self.history.log_run
         self.irrigation = SmartPrograms(self.store.db, self.history, self.rainbird)
         self.energy = EnergyStore(self.store.db)
+        self.photos = PhotoStore(self.store.db, data_dir() / "photos")
+        self.flowtests = FlowTests(self.store.db, self.rainbird)
         self._collector: asyncio.Task | None = None
         self._recorder: asyncio.Task | None = None
 
@@ -98,6 +103,11 @@ class Hub:
                 self.history.put_water_daily(daily)
                 self.history.put_water_hourly(hourly)
                 report["water_days"], report["water_hours"] = len(daily), len(hourly)
+                from datetime import datetime
+                since = date.today() - timedelta(days=30)
+                busy = set(minutes_by_hour(self.history.runs(since)))
+                report["flow_tests_measured"] = self.flowtests.update_measurements(
+                    self.history.water_hourly(since), busy, datetime.now())
             except HubError as exc:
                 problems.append(f"Water: {exc.message}")
         if self.smt.active:
@@ -147,7 +157,35 @@ class Hub:
             except Exception as exc:  # noqa: BLE001
                 log.debug("Activity recorder: %s", exc)
 
+    def photo_advice(self, zone: int, week_in, need_in, tmean7) -> dict | None:
+        photos = self.photos.for_zone(zone, limit=2)
+        if not photos:
+            return {**zone_advice(None, None, None, week_in, need_in, tmean7), "photo": None}
+        latest = photos[0]
+        prev = photos[1]["green_share"] if len(photos) > 1 else None
+        advice = zone_advice(latest["green_share"], prev, latest["ai"], week_in, need_in, tmean7)
+        return {**advice, "photo": {"id": latest["id"], "taken": latest["taken"], "green_share": latest["green_share"],
+                                    "ai": latest["ai"]}}
+
+    def claude_context(self, zone: int) -> str:
+        """What Claude is told alongside a zone photo: zone, size and the last week's water and weather."""
+        from datetime import date, timedelta
+        data = build_insights(self.history, self.rainbird.zone_label, self.rainbird.zone_areas(), 7,
+                              measured=self.flowtests.measured_gpm())
+        z = next((x for x in data["zones"] if x["zone"] == zone), {})
+        lines = [f"Zone: {self.rainbird.zone_label(zone)}", f"Date: {date.today().isoformat()}"]
+        if z.get("area_sqft"):
+            lines.append(f"Area: {z['area_sqft']:.0f} sq ft")
+        s = data["summary"]
+        lines.append(f"Last 7 days: rain {s['rain_in']} in, reference evapotranspiration {s['et0_in']} in"
+                     + (f", mean temperature {data['tmean7_f']} °F" if data.get("tmean7_f") else ""))
+        if z.get("week_in") is not None and data.get("need_week_in") is not None:
+            lines.append(f"Irrigation applied to this zone in the last 7 days: {z['week_in']} in; estimated need {data['need_week_in']} in")
+        lines.append("Assess this zone's watering from the photo.")
+        return "\n".join(lines)
+
     def start_background(self) -> None:
+        self.flowtests.start()
         self.irrigation.start()
         self._collector = asyncio.create_task(self._collect_loop())
         self._recorder = asyncio.create_task(self._record_loop())
@@ -214,6 +252,7 @@ async def lifespan(app: FastAPI):
     hub.start_background()
     yield
     hub.irrigation.close()
+    hub.flowtests.close()
     for task in (hub._collector, hub._recorder):
         if task:
             task.cancel()
@@ -294,6 +333,7 @@ async def status(request: Request):
     brands = await asyncio.gather(*(a.status() for a in hub.adapters))
     return {
         **{a.brand: s for a, s in zip(hub.adapters, brands)},
+        "claude": {"connected": bool(hub.secrets.get("anthropic_api_key"))},
         "user": (request.state.user or {}).get("email"),
     }
 
@@ -821,8 +861,100 @@ async def energy(request: Request, days: int = 28):
 async def insights(request: Request, days: int = 28):
     hub = hub_of(request)
     days = max(7, min(days, 90))
-    data = build_insights(hub.history, hub.rainbird.zone_label, hub.rainbird.zone_areas(), days)
+    data = build_insights(hub.history, hub.rainbird.zone_label, hub.rainbird.zone_areas(), days,
+                          measured=hub.flowtests.measured_gpm(), photo_advice=hub.photo_advice)
     return {**data, "location": hub.secrets.get("location")}
+
+
+# Zone photos
+@app.post("/api/rainbird/zones/{zone}/photos")
+async def add_zone_photo(request: Request, zone: int):
+    """Body: the photo itself (image/jpeg, image/png or image/heic)."""
+    from datetime import datetime
+    hub = hub_of(request)
+    if not (request.headers.get("content-type") or "").startswith("image/"):
+        raise HubError(415, "Send the photo as an image.")
+    body = await request.body()
+    photo = await hub.photos.add(zone, body, datetime.now())
+    key = hub.secrets.get("anthropic_api_key")
+    if key:
+        try:
+            ai = await asyncio.to_thread(assess_with_claude, key, body, hub.claude_context(zone))
+            hub.photos.set_ai(photo["id"], ai)
+            photo = hub.photos.get(photo["id"])
+        except HubError as exc:
+            photo["ai_error"] = exc.message
+    return {"photo": photo, "advice": hub.photo_advice(zone, None, None, None)}
+
+
+@app.get("/api/rainbird/zones/{zone}/photos")
+async def zone_photos(request: Request, zone: int):
+    return hub_of(request).photos.for_zone(zone)
+
+
+@app.get("/api/photos/{photo_id}")
+async def photo_file(request: Request, photo_id: int):
+    from fastapi.responses import FileResponse
+    return FileResponse(hub_of(request).photos.path(photo_id), media_type="image/jpeg")
+
+
+@app.delete("/api/photos/{photo_id}")
+async def delete_photo(request: Request, photo_id: int):
+    hub_of(request).photos.delete(photo_id)
+    return {"ok": True}
+
+
+@app.post("/api/photos/{photo_id}/assess")
+async def reassess_photo(request: Request, photo_id: int):
+    hub = hub_of(request)
+    key = hub.secrets.get("anthropic_api_key")
+    if not key:
+        raise HubError(409, "Add an Anthropic API key in Settings → Photo analysis first.")
+    photo = hub.photos.get(photo_id)
+    ai = await asyncio.to_thread(assess_with_claude, key, hub.photos.path(photo_id).read_bytes(),
+                                 hub.claude_context(photo["zone"]))
+    hub.photos.set_ai(photo_id, ai)
+    return hub.photos.get(photo_id)
+
+
+class ApiKeyIn(BaseModel):
+    api_key: str = Field(min_length=20, max_length=300, pattern=r"^sk-ant-[A-Za-z0-9_-]+$")
+
+
+@app.put("/api/settings/claude")
+async def set_claude_key(request: Request, body: ApiKeyIn):
+    hub_of(request).secrets.set("anthropic_api_key", body.api_key)
+    return {"ok": True}
+
+
+@app.delete("/api/settings/claude")
+async def clear_claude_key(request: Request):
+    hub_of(request).secrets.set("anthropic_api_key", None)
+    return {"ok": True}
+
+
+# Flow tests
+class FlowTestIn(BaseModel):
+    zones: list[int] = Field(min_length=1, max_length=24)
+    minutes: int = Field(10, ge=3, le=30)
+
+
+@app.get("/api/rainbird/flow-tests")
+async def list_flow_tests(request: Request):
+    hub = hub_of(request)
+    return {"tests": hub.flowtests.tests(), "measured": hub.flowtests.measured_gpm()}
+
+
+@app.post("/api/rainbird/flow-tests")
+async def plan_flow_tests(request: Request, body: FlowTestIn):
+    from datetime import datetime
+    return hub_of(request).flowtests.schedule(body.zones, body.minutes, datetime.now())
+
+
+@app.delete("/api/rainbird/flow-tests")
+async def cancel_flow_tests(request: Request):
+    hub_of(request).flowtests.cancel()
+    return {"ok": True}
 
 
 @app.get("/api/pentair/fields")

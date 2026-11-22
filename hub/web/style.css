@@ -244,3 +244,14 @@ svg.viz { max-width: 100%; height: auto; display: block; }
 .segmented button { border: 0; background: none; padding: 6px 12px; border-radius: 999px; font-size: 14px; color: var(--muted); }
 .segmented button.on { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
 .rec .name, .row .name.small { white-space: normal; overflow: visible; }
+.zone-card { align-items: flex-start; }
+.zone-thumb { flex: none; width: 56px; height: 56px; border-radius: 12px; object-fit: cover; border: 0; background: var(--bg); font-size: 22px; cursor: pointer; }
+.chip-status { display: inline-block; margin-left: 6px; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; vertical-align: 2px; }
+.chip-status.status-neutral { background: var(--line); color: var(--ink); }
+.chip-status.status-warning { color: #0b0b0b; }
+.photo-btn { flex: none; cursor: pointer; }
+.photo-card { margin: 12px 0; overflow: hidden; }
+.photo-card img { width: 100%; max-height: 320px; object-fit: cover; display: block; }
+.flow-table { margin-top: 10px; }
+.section-title .small { font-size: 12px; text-transform: none; letter-spacing: 0; font-weight: 400; }
+.zone-card .name { white-space: normal; overflow: visible; }

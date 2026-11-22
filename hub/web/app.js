@@ -627,6 +627,16 @@ function renderSettings() {
         <button class="pill primary" id="rainbird-on">Connect</button></div>`,
       "Sprinklers with the Rain Bird LNK Wi‑Fi module, controlled directly on your Wi‑Fi. Use the controller password from the Rain Bird app (not your account password). Find the IP in the Rain Bird app's controller settings or your router's device list.",
       `${esc(rainbird.host || "")} · ${rainbird.zones ?? 0} zone(s)`, "rainbird")}
+    <div class="section-title"><span>Photo analysis (optional)</span></div>
+    <div class="card">${state.status?.claude?.connected ? `
+      <div class="row"><div class="main"><span class="name">Claude is on</span>
+        <span class="sub wrap">Zone photos are also sent to Claude (Anthropic) to look for signs of too much or too little water. Each photo costs a few cents of API use.</span></div>
+        <button class="pill danger" id="claude-off">Turn off</button></div>` : `
+      <div class="row"><div class="main"><span class="name">Greenness only</span>
+        <span class="sub wrap">The hub measures how green each zone photo is, on the Mac. To also have Claude assess photos, paste an Anthropic API key from <b>console.anthropic.com → API keys</b>. Photos are then sent to Anthropic.</span></div></div>
+      <div class="row key-row"><input type="password" id="claude-key" placeholder="sk-ant-…" autocomplete="off" spellcheck="false">
+        <button class="pill primary" id="claude-on">Turn on</button></div>`}
+    </div>
     ${accountCard("Smart Meter Texas", smt, `
       <div class="row key-row"><input type="text" id="smt-user" placeholder="Smart Meter Texas username" autocomplete="off">
         <input type="password" id="smt-pw" placeholder="Password" autocomplete="off">
@@ -706,6 +716,8 @@ function renderSettings() {
   });
   accountButton("#rainbird-on", () => api("POST", "/api/rainbird/account", { host: val("#rainbird-host"), password: $("#rainbird-pw").value }),
     (r) => `Rain Bird connected: ${r.zones} zone(s)`);
+  accountButton("#claude-on", () => api("PUT", "/api/settings/claude", { api_key: val("#claude-key") }), () => "Claude photo analysis is on");
+  accountButton("#claude-off", () => api("DELETE", "/api/settings/claude"), () => "Claude photo analysis is off");
   for (const b of ["dyson", "ecovacs", "pentair", "schlage", "smt", "water", "rainbird"]) accountButton(`#${b}-off`, () => api("DELETE", `/api/${b}/account`), () => `${BRAND[b]} disconnected`);
   accountButton("#govee-off", () => api("DELETE", "/api/govee/account"), () => "Govee account disconnected");
   accountButton("#thinq-off", () => api("DELETE", "/api/thinq/account"), () => "LG ThinQ disconnected");

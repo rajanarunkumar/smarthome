@@ -53,7 +53,20 @@ def test_zone_flow_recovers_each_zones_gpm():
         s.put_water_hourly([(f"{d.isoformat()}T03", household(3) + 30 * 5.0)])
     flow = zone_flow(s.runs(TODAY - timedelta(days=30)), s.water_hourly(TODAY - timedelta(days=30)))
     # Zone 1 never runs alone, but hours with zone 2 alone let the fit separate them.
-    assert flow == {1: {"gpm": 8.0, "samples": 7}, 2: {"gpm": 5.0, "samples": 14}}
+    assert flow == {1: {"gpm": 8.0, "samples": 7, "plus_minus": 0.0}, 2: {"gpm": 5.0, "samples": 14, "plus_minus": 0.0}}
+
+
+def test_zone_flow_range_widens_with_noise():
+    import random
+    s = store()
+    fill(s, {1: 8.0, 2: 5.0})
+    rng = random.Random(4)
+    for n in range(1, 14, 2):
+        d = TODAY - timedelta(days=n)
+        s.log_run(datetime(d.year, d.month, d.day, 3, 0), 2, 30)
+        s.put_water_hourly([(f"{d.isoformat()}T03", household(3) + 30 * 5.0 + rng.uniform(-15, 15))])
+    flow = zone_flow(s.runs(TODAY - timedelta(days=30)), s.water_hourly(TODAY - timedelta(days=30)))
+    assert abs(flow[2]["gpm"] - 5.0) <= 0.5 and 0 < flow[2]["plus_minus"] < 1.5
 
 
 def test_zones_always_paired_identically_are_not_guessed():

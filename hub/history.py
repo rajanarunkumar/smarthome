@@ -175,7 +175,20 @@ def zone_flow(runs: list[dict], hourly: dict[str, float], min_samples: int = 3) 
     solution = _solve(ata, atb)
     if solution is None:
         return {}
-    return {z: {"gpm": round(g, 1), "samples": counts[z]} for z, g in zip(zones, solution) if g > 0.2}
+    # ± range: residual spread × the diagonal of (AᵀA)⁻¹, as in ordinary least squares.
+    used = [(hz, ex) for hz, ex in rows if all(z in index for z in hz)]
+    resid = [ex - sum(m * solution[index[z]] for z, m in hz.items()) for hz, ex in used]
+    dof = len(used) - len(zones)
+    sigma2 = sum(r * r for r in resid) / dof if dof > 0 else None
+    out = {}
+    for z, g in zip(zones, solution):
+        if g <= 0.2:
+            continue
+        unit = [1.0 if i == index[z] else 0.0 for i in range(len(zones))]
+        col = _solve(ata, unit)
+        se = (sigma2 * col[index[z]]) ** 0.5 if sigma2 is not None and col and col[index[z]] > 0 else None
+        out[z] = {"gpm": round(g, 1), "samples": counts[z], "plus_minus": round(1.96 * se, 1) if se is not None else None}
+    return out
 
 
 def confirm_with_meter(runs: list[dict], hourly: dict[str, float], min_extra_gallons: float = 10.0) -> list[dict]:
@@ -282,14 +295,18 @@ def recommendations(series: list[dict], flow: dict[int, dict], zone_minutes_week
 
 
 def build_insights(store: HistoryStore, zone_label, areas: dict[int, float], days: int = 30,
-                   today: date | None = None) -> dict:
+                   today: date | None = None, measured: dict[int, dict] | None = None,
+                   photo_advice=None) -> dict:
     """Everything the Insights tab shows, for the last `days` days plus the forecast."""
     today = today or date.today()
     since = today - timedelta(days=days - 1)
     learn_since = today - timedelta(days=90)  # flow estimates use more history than the chart shows
     runs_all = store.runs(learn_since)
     hourly_all = store.water_hourly(learn_since)
-    flow = zone_flow(runs_all, hourly_all)
+    estimated = zone_flow(runs_all, hourly_all)
+    measured = measured or {}
+    # A flow test beats the statistical estimate: it's a direct measurement.
+    flow = {**estimated, **{z: {"gpm": m["gpm"], "samples": m["tests"]} for z, m in measured.items()}}
     runs = [r for r in runs_all if r["started"][:10] >= since.isoformat()]
     weather = store.weather(since)
     day_list = sorted({(since + timedelta(days=n)).isoformat() for n in range(days)}
@@ -305,31 +322,42 @@ def build_insights(store: HistoryStore, zone_label, areas: dict[int, float], day
             week_minutes[r["zone"]] += r["minutes"]
     leak = overnight_leak(hourly_all, set(minutes_by_hour(runs_all)))
     past = [r for r in series if not r["forecast"]]
-    measured = [r for r in past if r["total_gal"] is not None]
-    total = sum(r["total_gal"] for r in measured)
-    sprinkler = sum(r["sprinkler_gal"] for r in measured)
+    measured_days = [r for r in past if r["total_gal"] is not None]
+    total = sum(r["total_gal"] for r in measured_days)
+    sprinkler = sum(r["sprinkler_gal"] for r in measured_days)
+    last7 = [r for r in series if not r["forecast"]][-7:]
+    need_week = max(sum(r["et0_in"] or 0 for r in last7) * TURF_KC - sum(r["rain_in"] or 0 for r in last7) * EFFECTIVE_RAIN, 0) if last7 else None
+    temps = [w.get("tmean_f") for d, w in weather.items() if d <= today.isoformat() and w.get("tmean_f") is not None][-7:]
+    tmean7 = sum(temps) / len(temps) if temps else None
     zones = []
     for z in sorted(set(zone_totals) | set(flow) | set(areas)):
         gpm = flow.get(z, {}).get("gpm")
         minutes = zone_totals[z]["minutes"]
         gallons = minutes * gpm if gpm else None
         inches = gallons / (areas[z] * GALLONS_PER_SQFT_INCH) if gallons and areas.get(z) else None
+        week_in = (week_minutes.get(z, 0) * gpm / (areas[z] * GALLONS_PER_SQFT_INCH)) if gpm and areas.get(z) else None
         zones.append({"zone": z, "label": zone_label(z), "runs": zone_totals[z]["runs"], "minutes": round(minutes),
                       "gpm": gpm, "samples": flow.get(z, {}).get("samples", 0),
+                      "gpm_source": "flow test" if z in measured else ("estimated" if z in estimated else None),
+                      "estimated_gpm": estimated.get(z, {}).get("gpm"), "plus_minus": estimated.get(z, {}).get("plus_minus"),
+                      "measured_gpm": measured.get(z, {}).get("gpm"), "flow_tests": measured.get(z, {}).get("tests", 0),
                       "gallons": round(gallons) if gallons else None, "inches": round(inches, 2) if inches else None,
-                      "area_sqft": areas.get(z)})
+                      "week_in": round(week_in, 2) if week_in is not None else None,
+                      "area_sqft": areas.get(z),
+                      "advice": photo_advice(z, week_in, need_week, tmean7) if photo_advice else None})
     return {
         "days": days,
         "summary": {
-            "total_gal": round(total) if measured else None,
-            "sprinkler_gal": round(sprinkler) if measured else None,
-            "sprinkler_share": round(sprinkler / total, 2) if measured and total else None,
+            "total_gal": round(total) if measured_days else None,
+            "sprinkler_gal": round(sprinkler) if measured_days else None,
+            "sprinkler_share": round(sprinkler / total, 2) if measured_days and total else None,
             "rain_in": round(sum(r["rain_in"] or 0 for r in past), 2),
             "et0_in": round(sum(r["et0_in"] or 0 for r in past), 2),
             "minutes": round(sum(r["minutes"] for r in past)),
         },
         "series": series, "zones": zones, "leak": leak,
         "recommendations": recommendations(series, flow, dict(week_minutes), areas, zone_label, leak, today.isoformat()),
-        "has_water": bool(measured), "has_hourly": bool(hourly_all), "has_weather": bool(weather),
+        "need_week_in": round(need_week, 2) if need_week is not None else None, "tmean7_f": round(tmean7) if tmean7 else None,
+        "has_water": bool(measured_days), "has_hourly": bool(hourly_all), "has_weather": bool(weather),
         "has_runs": bool(runs_all),
     }
