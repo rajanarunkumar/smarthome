@@ -7,9 +7,10 @@ A self-built hub that controls every smart device in the house from **one iPhone
 ```
  iPhone web app ─┐                         ┌─► Hue Bridge     (local API; schedules run on the bridge)
  Siri Shortcuts ─┤                         ├─► Kasa plugs     (local protocol; schedules run on the plug)
+                 │                         ├─► Sonos          (local; alarms run on the speaker)
  Alexa skill ────┼─►  hub on the MacBook  ─┼─► Leviton, Lennox (HomeKit, local)      ┐
  Google project ─┘    (Python, this repo)  ├─► Leviton Matter, Nest Thermostat (Matter)├ planned
-                                           ├─► LG TV, Sonos   (local)                ┘
+                                           ├─► LG TV          (local)                ┘
                                            └─► Govee, Smart Life, Ring, Nest cams (cloud APIs)  planned
 ```
 
@@ -27,7 +28,7 @@ Decisions so far:
 |---|---|---|
 | Hue | ✅ Bridge schedules (hub-created); Hue app automations listed and can be switched on/off | Hue Bridge |
 | Kasa | ✅ Rules on the plug (verified on the HS103 and KP405) | The plug |
-| Sonos | ✅ Alarms (planned) | The speaker |
+| Sonos | ✅ Alarms (Sonos chime, set time, one hour) | The speaker |
 | Smart Life (Tuya) | ⚠️ Cloud timers, needs a free Tuya developer project | Tuya cloud |
 | Lennox E30 | ⚠️ Can switch between the thermostat's schedules | Thermostat |
 | Govee | ❌ Not in the public API; investigating the app's private API | Hub |
@@ -47,7 +48,7 @@ Decisions so far:
 | **LG** (ThinQ appliances, webOS TV) | `aiowebostv` for the TV (accept a prompt on the TV); ThinQ personal access token for appliances | TV ✅ / appliances ☁️ | Some newer ThinQ | Planned. |
 | **Sony** (Bravia TV) | Bravia IP control with a pre-shared key set on the TV | ✅ | – | Planned. Not seen in the scan; it was probably off. |
 | **Lennox** iComfort E30 thermostat | HomeKit (unpaired; code in the thermostat's settings) | ✅ | – | Planned. |
-| **Sonos** (Beam, Amp) | `soco`, local | ✅ | – | Planned. |
+| **Sonos** (Beam, Amp) | `soco`, local | ✅ | – | **Built.** Play/pause, volume, Sonos favorites, alarms. Room "All on" skips speakers. |
 | **Ring** (doorbells) | Unofficial `ring_doorbell` library (Ring login + 2FA once, refresh token kept on the hub) for events, snapshots, lights, siren, alarm modes | ☁️ | – | Planned. **Stays linked to Alexa** through the Ring skill for announcements and live view. |
 | **Nest** (thermostat, cams, doorbell, Protect) | Thermostat: Matter, shared from Google Home. Cams and doorbell: Google Device Access ($5 one-time). Protect: no API | ✅ / ☁️ | Thermostat | Planned. |
 | **Amazon Echo** | Voice front end. Hub reaches Alexa through its own private skill | ☁️ | Matter controller; two Echos are Thread border routers | Leviton Matter devices are paired here today. |
@@ -76,7 +77,7 @@ Scanned from a Mac on the home Wi-Fi on 2026-11-21 (two passes plus the ARP tabl
 
 ## The hub (phase 1: built)
 
-`hub/` is a Python server (FastAPI) with a web app for the iPhone. It currently covers **Kasa** and **Hue**:
+`hub/` is a Python server (FastAPI) with a web app for the iPhone. It currently covers **Kasa**, **Hue** and **Sonos**:
 
 - **Rooms tab:** every device grouped by room, power switches, "all on/off" per room. Tap a device to rename it (the name is written back to the brand), move it to a room, or set brightness, color and white temperature.
 - **Scenes tab:** your Hue scenes by room, including dynamic scenes.
@@ -91,6 +92,15 @@ pip install -r requirements.txt
 python -m hub            # listens on this Mac only (127.0.0.1:8420)
 tailscale serve --bg 8420   # once: publishes it at https://<mac>.<tailnet>.ts.net to your own devices
 ```
+
+To keep it running, install it as a background service instead of running `python -m hub` by hand. It starts at login and restarts within about 10 seconds if it stops; the log is `~/.smarthome/logs/hub.log`.
+
+```bash
+scripts/install-service.sh            # install or update, then start
+scripts/install-service.sh uninstall  # stop and remove
+```
+
+The Mac must be awake for the app to reach it: keep it plugged in (it never sleeps on power) with the lid open. Schedules keep running regardless, because they live on the devices.
 
 On the iPhone (Tailscale on), open the `https://…ts.net` address in Safari, **Sign in with Google**, accept **Use Face ID next time**, then **Share → Add to Home Screen**. To pair Hue, press the round button on the Hue Bridge, then tap **Settings → Pair** within 30 seconds.
 
@@ -111,7 +121,7 @@ Tests: `pip install -r requirements-dev.txt && python -m pytest tests`.
 
 1. ~~Core hub, Kasa and Hue, native schedules~~ (done)
 2. ~~**Sign-in:** Google sign-in plus Face ID / Touch ID (passkeys), over HTTPS through Tailscale~~ (done)
-3. **More devices:** Leviton and Lennox (HomeKit), Leviton Matter and Nest Thermostat (Matter), LG TV, Sonos, Govee, Ring.
+3. **More devices:** ~~Sonos~~ (done), Leviton and Lennox (HomeKit), Leviton Matter and Nest Thermostat (Matter), LG TV, Govee, Ring.
 4. **Siri:** a "schedule" Shortcut that turns spoken requests into hub schedules, then a HomeKit bridge for direct Siri control.
 5. **Alexa and Google:** private skill and smart-home project, so both show the hub's names and rooms.
 6. **Govee private API** investigation for timers.

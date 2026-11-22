@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from .adapters.hue_adapter import HueAdapter
 from .adapters.kasa_adapter import KasaAdapter
+from .adapters.sonos_adapter import SonosAdapter
 from .auth import SESSION_COOKIE, Auth
 from .config import Secrets, data_dir
 from .models import Device, DevicePatch, HubError, Schedule, ScheduleIn, StateIn
@@ -33,6 +34,7 @@ class Hub:
         self.auth = Auth(self.secrets, self.store.db)
         self.kasa = KasaAdapter()
         self.hue = HueAdapter(self.secrets)
+        self.sonos = SonosAdapter(self.secrets)
 
     def adapter_for(self, item_id: str):
         prefix = item_id.split(":", 1)[0]
@@ -40,10 +42,12 @@ class Hub:
             return self.kasa
         if prefix in {"hue", "huev1", "hueapp"}:
             return self.hue
+        if prefix in {"sonos", "sonosalarm"}:
+            return self.sonos
         raise HubError(404, f"Unknown item {item_id}")
 
     def active_adapters(self):
-        return [self.kasa] + ([self.hue] if self.hue.paired else [])
+        return [self.kasa, self.sonos] + ([self.hue] if self.hue.paired else [])
 
     async def devices(self) -> tuple[list[Device], list[str]]:
         adapters = self.active_adapters()
@@ -73,7 +77,7 @@ class Hub:
             self.store.set_device_room(hub_id, room["id"])
 
     def device_names(self) -> dict[str, str]:
-        return {**self.kasa.names(), **self.hue.names()}
+        return {**self.kasa.names(), **self.hue.names(), **self.sonos.names()}
 
 
 @asynccontextmanager
@@ -81,6 +85,7 @@ async def lifespan(app: FastAPI):
     hub = Hub()
     app.state.hub = hub
     asyncio.create_task(hub.kasa.discover())
+    asyncio.create_task(hub.sonos.discover())
     yield
     await hub.kasa.close()
     await hub.hue.close()
@@ -159,6 +164,7 @@ async def status(request: Request):
     return {
         "hue": await hub.hue.status(),
         "kasa": {"devices": len(hub.kasa.names())},
+        "sonos": {"speakers": len(hub.sonos.names())},
         "user": (request.state.user or {}).get("email"),
     }
 
@@ -175,6 +181,14 @@ async def list_devices(request: Request):
 async def set_device_state(request: Request, device_id: str, state: StateIn):
     await hub_of(request).adapter_for(device_id).set_state(device_id, state)
     return {"ok": True}
+
+
+@app.get("/api/devices/{device_id}/favorites")
+async def device_favorites(request: Request, device_id: str):
+    adapter = hub_of(request).adapter_for(device_id)
+    if not hasattr(adapter, "favorites"):
+        return []
+    return await adapter.favorites(device_id)
 
 
 @app.patch("/api/devices/{device_id}")
@@ -224,6 +238,9 @@ async def delete_room(request: Request, room_id: int):
 async def set_room_state(request: Request, room_id: int, state: StateIn):
     hub = hub_of(request)
     targets = [d for d, r in hub.store.room_map().items() if r == room_id]
+    if state.on:
+        # "All on" is for lights and plugs; it should not start music.
+        targets = [d for d in targets if hub.adapter_for(d) is not hub.sonos]
     results = await asyncio.gather(
         *(hub.adapter_for(d).set_state(d, state) for d in targets), return_exceptions=True
     )

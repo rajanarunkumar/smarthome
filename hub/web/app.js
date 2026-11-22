@@ -14,7 +14,7 @@ const view = $("#view");
 const sheet = $("#sheet");
 const DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const DAY_LABEL = { mon: "Mon", tue: "Tue", wed: "Wed", thu: "Thu", fri: "Fri", sat: "Sat", sun: "Sun" };
-const BRAND = { kasa: "Kasa", hue: "Hue" };
+const BRAND = { kasa: "Kasa", hue: "Hue", sonos: "Sonos" };
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -105,6 +105,7 @@ function errorsHtml() {
 function deviceSub(d) {
   const parts = [BRAND[d.brand] || d.brand];
   if (!d.online) parts.push("Not responding");
+  else if (d.kind === "speaker") parts.push(`${d.on ? "Playing" : "Paused"} · volume ${d.volume ?? "?"}`);
   else if (d.on && d.brightness) parts.push(`${d.brightness}%`);
   else parts.push(d.on ? "On" : "Off");
   return parts.join(" · ");
@@ -119,7 +120,7 @@ function deviceRow(d) {
         <span class="name">${esc(d.name)}</span>
         <span class="sub">${esc(deviceSub(d))}</span>
       </button>
-      <label class="switch" aria-label="${esc(d.name)} power">
+      <label class="switch" aria-label="${esc(d.name)} ${d.kind === "speaker" ? "play" : "power"}">
         <input type="checkbox" data-power="${esc(d.id)}" ${d.on ? "checked" : ""} ${d.online ? "" : "disabled"}>
         <span></span>
       </label>
@@ -201,6 +202,10 @@ function openDevice(id) {
     <label class="field"><span>Room</span><select id="f-room">${roomOptions}</select></label>
     ${caps.has("brightness") ? `<label class="field"><span>Brightness <b id="f-bri-v">${d.brightness ?? 100}%</b></span>
       <input type="range" id="f-bri" min="1" max="100" value="${d.brightness ?? 100}"></label>` : ""}
+    ${caps.has("volume") ? `<label class="field"><span>Volume <b id="f-vol-v">${d.volume ?? 0}</b></span>
+      <input type="range" id="f-vol" min="0" max="100" value="${d.volume ?? 0}"></label>` : ""}
+    ${caps.has("favorites") ? `<label class="field"><span>Play a Sonos favorite</span>
+      <select id="f-fav"><option value="">Loading…</option></select></label>` : ""}
     ${caps.has("color") ? `<label class="field"><span>Color</span><input type="color" id="f-color" value="${esc(d.color || "#ffffff")}"></label>` : ""}
     ${caps.has("color_temp") ? `<label class="field"><span>White: cool to warm</span>
       <input class="temp-range" type="range" id="f-ct" min="${d.mirek_min ?? 153}" max="${d.mirek_max ?? 500}" value="${d.mirek ?? 366}"></label>` : ""}
@@ -226,6 +231,22 @@ function openDevice(id) {
     $("#f-bri-v", sheet).textContent = `${e.target.value}%`;
     send({ brightness: Number(e.target.value) });
   });
+  $("#f-vol", sheet)?.addEventListener("input", (e) => {
+    $("#f-vol-v", sheet).textContent = e.target.value;
+    send({ volume: Number(e.target.value) });
+  });
+  const fav = $("#f-fav", sheet);
+  if (fav) {
+    api("GET", `/api/devices/${encodeURIComponent(id)}/favorites`).then((list) => {
+      fav.innerHTML = `<option value="">${list.length ? "Choose…" : "No favorites in the Sonos app"}</option>` +
+        list.map((f) => `<option>${esc(f)}</option>`).join("");
+    }).catch((err) => { fav.innerHTML = `<option value="">Couldn't load favorites</option>`; toast(err.message); });
+    fav.addEventListener("change", async () => {
+      if (!fav.value) return;
+      try { await api("POST", `/api/devices/${encodeURIComponent(id)}/state`, { favorite: fav.value }); toast(`Playing ${fav.value}`); }
+      catch (err) { toast(err.message); }
+    });
+  }
   $("#f-color", sheet)?.addEventListener("input", (e) => send({ color: e.target.value }));
   $("#f-ct", sheet)?.addEventListener("input", (e) => send({ mirek: Number(e.target.value) }));
 }
@@ -281,6 +302,7 @@ function fmtDays(days) {
 }
 function fmtAction(a) {
   if (!a) return "";
+  if (a.volume) return `Alarm at volume ${a.volume}`;
   return a.on ? (a.brightness ? `On at ${a.brightness}%` : "Turn on") : "Turn off";
 }
 
@@ -332,14 +354,14 @@ function openNewSchedule() {
       <label class="chip"><input type="checkbox" name="s-dev" value="${esc(d.id)}"><span>${esc(d.name)}</span></label>`).join("")}</div></div>
     <div class="field"><span>Action</span><div class="inline">
       <select id="s-on"><option value="1">Turn on</option><option value="0">Turn off</option></select>
-      <input type="number" id="s-bri" min="1" max="100" placeholder="Brightness % (optional)"></div></div>
+      <input type="number" id="s-bri" min="1" max="100" placeholder="Brightness or volume % (optional)"></div></div>
     <div class="field"><span>When</span><div class="inline">
       <select id="s-type"><option value="time">At a time</option><option value="sunset">Sunset</option><option value="sunrise">Sunrise</option></select>
       <input type="time" id="s-time" value="07:00">
       <input type="number" id="s-offset" value="0" min="-180" max="180" title="Minutes after (negative for before)" hidden></div></div>
     <div class="field"><span>Days</span><div class="chips">${DAYS.map((d) => `
       <label class="chip"><input type="checkbox" name="s-day" value="${d}" checked><span>${DAY_LABEL[d]}</span></label>`).join("")}</div></div>
-    <p class="note">Kasa plugs support times, sunrise and sunset. The Hue Bridge supports set times.</p>
+    <p class="note">Kasa plugs support times, sunrise and sunset. The Hue Bridge supports set times. Sonos speakers get an alarm (Sonos chime, plays for an hour) at a set time.</p>
     <button class="pill primary" id="s-save">Save schedule</button>`);
 
   const type = $("#s-type", sheet);
@@ -354,7 +376,7 @@ function openNewSchedule() {
     const body = {
       name: $("#s-name", sheet).value.trim() || "Schedule",
       device_ids: checked("s-dev"),
-      action: { on, brightness: on ? bri : null },
+      action: { on, brightness: on ? bri : null, volume: on ? bri : null },
       trigger: type.value === "time"
         ? { type: "time", time: $("#s-time", sheet).value }
         : { type: type.value, offset_min: Number($("#s-offset", sheet).value) || 0 },

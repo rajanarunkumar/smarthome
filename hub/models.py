@@ -23,7 +23,7 @@ class Device(BaseModel):
     brand: str
     name: str
     model: str | None = None
-    kind: Literal["plug", "dimmer", "light"]
+    kind: Literal["plug", "dimmer", "light", "speaker"]
     room_id: int | None = None
     online: bool = True
     on: bool | None = None
@@ -32,6 +32,7 @@ class Device(BaseModel):
     mirek: int | None = None
     mirek_min: int | None = None
     mirek_max: int | None = None
+    volume: int | None = None
     capabilities: list[str] = []
 
 
@@ -40,6 +41,8 @@ class StateIn(BaseModel):
     brightness: int | None = Field(None, ge=1, le=100)
     color: str | None = Field(None, pattern=HEX)
     mirek: int | None = Field(None, ge=50, le=1000)
+    volume: int | None = Field(None, ge=0, le=100)
+    favorite: str | None = Field(None, max_length=200)
 
 
 class DevicePatch(BaseModel):
@@ -50,6 +53,7 @@ class DevicePatch(BaseModel):
 class Action(BaseModel):
     on: bool
     brightness: int | None = Field(None, ge=1, le=100)
+    volume: int | None = Field(None, ge=1, le=100)
 
 
 class Trigger(BaseModel):
