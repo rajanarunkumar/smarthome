@@ -119,47 +119,119 @@ function deviceSub(d) {
   return parts.join(" · ");
 }
 
-function deviceRow(d) {
-  const dotStyle = d.on && d.color ? `style="background:${esc(d.color)}"` : "";
+// ---------- icons ----------
+const ICON_PATHS = {
+  light: '<path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-4 10.5c.7.7 1 1.5 1 2.5h6c0-1 .3-1.8 1-2.5A6 6 0 0 0 12 3z"/>',
+  plug: '<path d="M9 3v5M15 3v5M6 8h12v3a6 6 0 0 1-12 0zM12 17v4"/>',
+  speaker: '<rect x="6" y="3" width="12" height="18" rx="3"/><circle cx="12" cy="14" r="3"/><circle cx="12" cy="7.5" r="1"/>',
+  tv: '<rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 21h8"/>',
+  appliance: '<rect x="4" y="3" width="16" height="18" rx="2.5"/><circle cx="12" cy="13" r="4"/><path d="M8 6.5h.01M11 6.5h.01"/>',
+  vacuum: '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="2.5"/><path d="M12 3.5v3"/>',
+  purifier: '<path d="M12 12c0-4 1-8 4-8s3 4 0 6M12 12c4 0 8 1 8 4s-4 3-6 0M12 12c0 4-1 8-4 8s-3-4 0-6M12 12c-4 0-8-1-8-4s4-3 6 0"/>',
+  pool: '<path d="M3 16c2 0 2-1.5 4.5-1.5S10 16 12 16s2-1.5 4.5-1.5S19 16 21 16M3 20c2 0 2-1.5 4.5-1.5S10 20 12 20s2-1.5 4.5-1.5S19 20 21 20M8 13V6a2 2 0 0 1 4 0M14 13V6a2 2 0 0 1 4 0"/>',
+  lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+  unlock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.6-1.8"/>',
+  meter: '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>',
+  sprinkler: '<path d="M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11z"/>',
+  sparkle: '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z"/>',
+  power: '<path d="M12 3v8M6.3 7a8 8 0 1 0 11.4 0"/>',
+  chevron: '<path d="m9 6 6 6-6 6"/>',
+};
+ICON_PATHS.dimmer = ICON_PATHS.light;
+function icon(name, cls = "ic") {
+  return `<svg class="${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICON_PATHS[name] || ICON_PATHS.power}</svg>`;
+}
+function deviceIcon(d) {
+  if (d.kind === "lock") return icon(d.on ? "lock" : "unlock");
+  return icon(d.kind);
+}
+
+// A device is "active" when it's on, playing, running or unlocked (unlocked is a warning).
+function isActive(d) {
+  if (!d.online) return false;
+  if (d.kind === "speaker") return !!d.playing;
+  if (d.kind === "lock") return false;
+  return !!d.on;
+}
+
+function deviceTile(d) {
+  const active = isActive(d);
+  const toggles = d.capabilities.includes("onoff") && d.online;
+  const glow = active && d.color ? `style="--glow:${esc(d.color)}"` : "";
+  const unlocked = d.kind === "lock" && d.online && !d.on;
+  const iconHtml = toggles
+    ? `<button class="tile-icon" data-toggle="${esc(d.id)}" aria-label="${esc(d.name)}: turn ${active ? "off" : "on"}" aria-pressed="${active}">${deviceIcon(d)}</button>`
+    : `<span class="tile-icon">${deviceIcon(d)}</span>`;
   return `
-    <div class="row ${d.online ? "" : "offline"}">
-      <span class="dot ${d.on ? "on" : ""}" ${dotStyle} aria-hidden="true"></span>
-      <button class="main" data-open="${esc(d.id)}">
-        <span class="name">${esc(d.name)}</span>
-        <span class="sub">${esc(deviceSub(d))}</span>
+    <div class="dtile ${active ? "active" : ""} ${d.online ? "" : "offline"} ${unlocked ? "alert" : ""} ${d.color && active ? "tinted" : ""}" ${glow}>
+      ${iconHtml}
+      <button class="tile-body" data-open="${esc(d.id)}">
+        <span class="tile-name">${esc(d.name)}</span>
+        <span class="tile-status">${esc(tileStatus(d))}</span>
       </button>
-      ${d.kind === "sprinkler" && d.on ? `<button class="pill danger" data-stop="${esc(d.id)}">Stop</button>` : ""}
-      ${d.kind === "lock" ? (d.on ? `<span class="badge lock-badge">Locked</span>`
-        : `<button class="pill primary" data-lock="${esc(d.id)}" ${d.online ? "" : "disabled"}>Lock</button>`) : ""}
-      ${d.capabilities.includes("onoff") ? `<label class="switch" aria-label="${esc(d.name)} ${d.kind === "speaker" ? "play" : "power"}">
-        <input type="checkbox" data-power="${esc(d.id)}" ${d.on ? "checked" : ""} ${d.online ? "" : "disabled"}>
-        <span></span>
-      </label>` : ""}
+      ${d.kind === "sprinkler" && d.on ? `<button class="pill danger tile-act" data-stop="${esc(d.id)}">Stop</button>` : ""}
+      ${unlocked ? `<button class="pill primary tile-act" data-lock="${esc(d.id)}">Lock</button>` : ""}
     </div>`;
+}
+
+function tileStatus(d) {
+  // deviceSub without the brand prefix: the tile has less room.
+  return deviceSub(d).split(" · ").slice(1).join(" · ") || (d.on ? "On" : "Off");
+}
+
+function homeSummary() {
+  const on = state.devices.filter((d) => d.online && ["light", "dimmer"].includes(d.kind) && d.on).length;
+  const playing = state.devices.filter((d) => d.kind === "speaker" && d.playing).map((d) => d.name);
+  const unlocked = state.devices.filter((d) => d.kind === "lock" && d.online && !d.on).length;
+  const offline = state.devices.filter((d) => !d.online).length;
+  const bits = [on ? `${on} light${on > 1 ? "s" : ""} on` : "Lights off"];
+  if (playing.length) bits.push(`${playing.join(", ")} playing`);
+  if (unlocked) bits.push(`${unlocked} unlocked`);
+  if (offline) bits.push(`${offline} not responding`);
+  return bits.join(" · ");
 }
 
 function renderRooms() {
   const groups = state.rooms.map((r) => ({ room: r, devices: state.devices.filter((d) => d.room_id === r.id) }));
   const unassigned = state.devices.filter((d) => d.room_id == null);
-  let html = "";
-  for (const { room, devices } of groups) {
-    if (!devices.length) continue;
-    html += `
-      <div class="section-title"><span>${esc(room.name)}</span>
-        <span class="actions">
-          <button class="pill" data-room-power="${room.id}" data-on="true">All on</button>
-          <button class="pill" data-room-power="${room.id}" data-on="false">All off</button>
-        </span></div>
-      <div class="card">${devices.map(deviceRow).join("")}</div>`;
-  }
-  if (unassigned.length) {
-    html += `<div class="section-title"><span>No room yet</span></div>
-      <div class="card">${unassigned.map(deviceRow).join("")}</div>
-      <p class="note">Tap a device to rename it or put it in a room.</p>`;
-  }
+  const section = (title, devices, roomId) => {
+    const on = devices.filter(isActive).length;
+    const canPower = devices.some((d) => d.capabilities.includes("onoff"));
+    return `
+      <section class="room">
+        <div class="room-head">
+          <h2>${esc(title)}</h2>
+          <span class="room-count">${on ? `${on} on` : ""}</span>
+          ${roomId != null && canPower ? `<span class="room-actions">
+            <button class="chip-btn" data-room-power="${roomId}" data-on="true" aria-label="All on in ${esc(title)}">All on</button>
+            <button class="chip-btn" data-room-power="${roomId}" data-on="false" aria-label="All off in ${esc(title)}">All off</button>
+          </span>` : ""}
+        </div>
+        <div class="tile-grid">${devices.map(deviceTile).join("")}</div>
+      </section>`;
+  };
+  let html = `<p class="summary">${esc(homeSummary())}</p>`;
+  for (const { room, devices } of groups) if (devices.length) html += section(room.name, devices, room.id);
+  if (unassigned.length) html += section("No room yet", unassigned, null) + `<p class="note">Tap a device to rename it or put it in a room.</p>`;
   if (!state.devices.length) html = `<p class="empty">Looking for devices… Kasa, Sonos and Govee appear on their own; pair the Hue Bridge and LG TV in Settings.</p>`;
   view.innerHTML = html + errorsHtml();
 }
+
+view.addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-toggle]");
+  if (!btn) return;
+  const d = state.devices.find((x) => x.id === btn.dataset.toggle);
+  if (!d) return;
+  const turnOn = !isActive(d);
+  const tile = btn.closest(".dtile");
+  tile.classList.toggle("active", turnOn);  // feel instant; corrected below if it fails
+  btn.disabled = true;
+  try {
+    await api("POST", `/api/devices/${encodeURIComponent(d.id)}/state`, { on: turnOn });
+    if (d.kind === "speaker") d.playing = turnOn; else d.on = turnOn;
+  } catch (err) { toast(err.message); }
+  renderRooms();
+});
 
 view.addEventListener("change", async (e) => {
   const id = e.target.dataset.power;
@@ -370,6 +442,12 @@ function openDevice(id) {
 }
 
 // ---------- scenes ----------
+function sceneHue(name) {
+  let h = 0;
+  for (const c of name) h = (h * 31 + c.charCodeAt(0)) % 360;
+  return h;
+}
+
 function renderScenes() {
   if (!state.scenes.length) {
     view.innerHTML = `<p class="empty">No scenes yet. Hue scenes appear here after you pair the Hue Bridge in Settings.</p>`;
@@ -377,17 +455,32 @@ function renderScenes() {
   }
   const groups = {};
   for (const s of state.scenes) (groups[s.group || "Other"] ||= []).push(s);
-  view.innerHTML = Object.entries(groups).map(([group, scenes]) => `
-    <div class="section-title"><span>${esc(group)}</span></div>
+  const names = Object.keys(groups);
+  if (!state.sceneGroup || !groups[state.sceneGroup]) {
+    state.sceneGroup = names.find((g) => groups[g].some((s) => s.active)) || names[0];
+  }
+  const scenes = groups[state.sceneGroup];
+  view.innerHTML = `
+    <div class="filter-chips" role="tablist" aria-label="Room">${names.map((g) => `
+      <button role="tab" class="fchip ${g === state.sceneGroup ? "on" : ""}" aria-selected="${g === state.sceneGroup}" data-scene-group="${esc(g)}">${esc(g)}${groups[g].some((s) => s.active) ? ' <span class="live-dot" aria-label="a scene is on"></span>' : ""}</button>`).join("")}
+    </div>
     <div class="scene-grid">${scenes.map((s) => `
-      <div class="scene ${s.active ? "active" : ""}">
-        <span class="name">${esc(s.name)}</span>
-        <span class="acts">
-          <button class="pill primary" data-scene="${esc(s.id)}">Turn on</button>
-          ${s.dynamic ? `<button class="pill" data-scene="${esc(s.id)}" data-dynamic="1" title="Colors slowly shift">Dynamic</button>` : ""}
-        </span>
-      </div>`).join("")}</div>`).join("");
+      <div class="stile ${s.active ? "active" : ""}" style="--h:${sceneHue(s.name)}">
+        <button class="stile-main" data-scene="${esc(s.id)}">
+          <span class="swatch" aria-hidden="true"></span>
+          <span class="stile-name">${esc(s.name)}</span>
+          ${s.active ? `<span class="stile-state">On</span>` : ""}
+        </button>
+        ${s.dynamic ? `<button class="stile-dyn" data-scene="${esc(s.id)}" data-dynamic="1" aria-label="${esc(s.name)}, dynamic: colors slowly shift" title="Dynamic: colors slowly shift">${icon("sparkle")}</button>` : ""}
+      </div>`).join("")}</div>`;
 }
+
+view.addEventListener("click", (e) => {
+  const chip = e.target.closest("[data-scene-group]");
+  if (!chip) return;
+  state.sceneGroup = chip.dataset.sceneGroup;
+  renderScenes();
+});
 
 view.addEventListener("click", async (e) => {
   const btn = e.target.closest("[data-scene]");
