@@ -1,12 +1,24 @@
 # Smart home hub: handover
 
-Read this first in a new session. Branch: `claude/brave-edison-9evhkk`. Last updated 2026-11-22.
+Read this first in a new session, then `docs/HANDOVER.md` (Mac session) and `.claude/NEXT.md`. Branch: `claude/brave-edison-9evhkk`. Last updated 2026-11-22. Tests: 94 passing.
 
 ## What this is
 
 A self-built smart home hub for the user's home in McKinney, TX. A Python FastAPI server (`hub/`) runs on the **user's Mac**, serves a phone/iPad web app (`hub/web/`), and is reached over **Tailscale** (`tailscale serve --bg 8420`). Sign-in is Google OIDC then Face ID passkeys; scripts use a Bearer API token. The user chose this over Home Assistant. Everything private lives in `~/.smarthome/` on the Mac (`secrets.json`, `hub.db`, `photos/`), never in the repo.
 
 The user works mostly from an **iPad/iPhone on the Claude app** (cloud session) and sometimes from a Mac desktop session. Cloud sessions **cannot reach the home network or the user's accounts**: all real devices and accounts are only reachable from the Mac hub. Everything here was therefore tested with fakes and synthetic data. **Nothing has run against the user's real devices or accounts yet.** That is the biggest open risk.
+
+## Two sessions push to this branch
+
+The **Mac desktop session** (runs on the user's MacBook, can reach devices) and **cloud sessions** (iPad/iPhone Claude app, cannot reach the home network) both commit to `claude/brave-edison-9evhkk`. **Always `git fetch` and merge before pushing; never force-push.** The Mac session keeps its own notes in [`docs/HANDOVER.md`](../docs/HANDOVER.md): read both. Its key facts (as of 2026-11-21):
+
+- The hub runs on the MacBook as a **launchd service** (`scripts/install-service.sh`, label `local.smarthome.hub`), starting at login, log at `~/.smarthome/logs/hub.log`. After pulling: `launchctl kickstart -k gui/$(id -u)/local.smarthome.hub`. Dependencies must be installed into the venv the service uses (`pip install -r requirements.txt`).
+- **Working on the Mac:** Hue (51 lights), Kasa (4 plugs), Sonos (2 speakers), Google sign-in on the iPhone.
+- **Built but account not linked yet** (so the data analytics have no real data): Govee, LG TV, LG ThinQ, Dyson, Ecovacs, Pentair, Schlage, Smart Meter Texas, McKinney water, Rain Bird. Linking is done in the web app's Settings tab.
+- **Native iOS app (SwiftUI) is planned**: hub side done (PKCE handoff `/api/auth/app/code` and `/api/auth/app/token`, app tokens `app_…` that may unlock doors); the Xcode project under `ios/` isn't written and Xcode isn't installed yet.
+- Sonos native alarms and favorites exist on branch `sonos-native-alarms` (not merged; predates the current Sonos adapter).
+- The user mentioned "Muse": unclear whether it means the Muse headband; ask before building.
+- The Mac session refreshed the web UI (device tiles, scene filters, tab icons). The merged `style.css` keeps both its refresh and the Insights/zone/photo styles.
 
 ## Run it
 
@@ -15,7 +27,7 @@ python3.13 -m venv .venv && . .venv/bin/activate   # 3.13 needed for Ecovacs and
 pip install -r requirements.txt
 python -m hub                       # 127.0.0.1:8420
 tailscale serve --bg 8420
-python -m pytest -q tests           # 93 tests, ~40 s
+python -m pytest -q tests           # 94 tests, ~40 s
 ```
 
 ## Layout

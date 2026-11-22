@@ -6,8 +6,8 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="Home">
-  <meta name="theme-color" content="#f4f4f1" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#151514" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f2f2f6" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0c0c0e" media="(prefers-color-scheme: dark)">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icon.svg">
@@ -23,11 +23,11 @@
   <main id="view" class="view"></main>
 
   <nav class="tabs" aria-label="Sections">
-    <button data-tab="rooms" class="active">Rooms</button>
-    <button data-tab="scenes">Scenes</button>
-    <button data-tab="schedules">Schedules</button>
-    <button data-tab="insights">Insights</button>
-    <button data-tab="settings">Settings</button>
+    <button data-tab="rooms" class="active"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11 12 4l9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg><span>Rooms</span></button>
+    <button data-tab="scenes"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/></svg><span>Scenes</span></button>
+    <button data-tab="schedules"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>Schedules</span></button>
+    <button data-tab="insights"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V11M10 20V5M16 20v-6M21 20H3"/></svg><span>Insights</span></button>
+    <button data-tab="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg><span>Settings</span></button>
   </nav>
 
   <dialog id="sheet" class="sheet"></dialog>

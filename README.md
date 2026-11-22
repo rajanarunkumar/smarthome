@@ -114,6 +114,15 @@ python -m hub            # listens on this Mac only (127.0.0.1:8420)
 tailscale serve --bg 8420   # once: publishes it at https://<mac>.<tailnet>.ts.net to your own devices
 ```
 
+To keep it running, install it as a background service instead of running `python -m hub` by hand. It starts at login and restarts within about 10 seconds if it stops; the log is `~/.smarthome/logs/hub.log`.
+
+```bash
+scripts/install-service.sh            # install or update, then start
+scripts/install-service.sh uninstall  # stop and remove
+```
+
+After pulling new code, restart it with `launchctl kickstart -k gui/$(id -u)/local.smarthome.hub`. The Mac must be awake for the app to reach it: keep it plugged in (it doesn't sleep on power) with the lid open.
+
 On the iPhone (Tailscale on), open the `https://…ts.net` address in Safari, **Sign in with Google**, accept **Use Face ID next time**, then **Share → Add to Home Screen**. To pair Hue, press the round button on the Hue Bridge, then tap **Settings → Pair** within 30 seconds.
 
 ### Sign-in
@@ -121,6 +130,7 @@ On the iPhone (Tailscale on), open the `https://…ts.net` address in Safari, **
 - **Google** (OpenID Connect, redirect flow) for the first sign-in on a device. Only allow-listed Google accounts get in.
 - **Face ID / Touch ID** passkeys after that. Sessions last 12 hours, then one Face ID tap.
 - **API token** (`Authorization: Bearer …`) for scripts such as Siri Shortcuts, which can't do Face ID.
+- **iPhone app** (planned, native): signs in through this page once (PKCE handoff), then keeps its own revocable token in the Keychain behind Face ID. See `docs/HANDOVER.md`.
 - Requests that change anything must come from one of the hub's own addresses (CSRF protection).
 
 Settings live in `~/.smarthome/secrets.json` under `auth`: `google_client_id`, `allowed_emails`, `origins` and `session_hours`. In Google Cloud, the OAuth client (type *Web application*) needs each origin as an **Authorized JavaScript origin** and each origin plus `/` as an **Authorized redirect URI**.
