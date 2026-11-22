@@ -29,6 +29,7 @@ from .adapters.sonos_adapter import SonosAdapter
 from .adapters.thinq_adapter import ThinQAdapter
 from .adapters.water_adapter import WaterAdvisorAdapter
 from .auth import SESSION_COOKIE, Auth
+from . import backup as backup_mod
 from .config import Secrets, data_dir
 from . import weather as weather_api
 from .energy import EnergyStore, build_energy
@@ -76,6 +77,8 @@ class Hub:
         self.energy = EnergyStore(self.store.db)
         self.photos = PhotoStore(self.store.db, data_dir() / "photos")
         self.flowtests = FlowTests(self.store.db, self.rainbird)
+        self.backups = backup_mod.Backups(self.secrets, self.store.db, data_dir(),
+                                          client_factory=lambda cfg: backup_mod.make_client(cfg))
         self._collector: asyncio.Task | None = None
         self._recorder: asyncio.Task | None = None
 
@@ -186,6 +189,7 @@ class Hub:
 
     def start_background(self) -> None:
         self.flowtests.start()
+        self.backups.start()
         self.irrigation.start()
         self._collector = asyncio.create_task(self._collect_loop())
         self._recorder = asyncio.create_task(self._record_loop())
@@ -253,6 +257,7 @@ async def lifespan(app: FastAPI):
     yield
     hub.irrigation.close()
     hub.flowtests.close()
+    hub.backups.close()
     for task in (hub._collector, hub._recorder):
         if task:
             task.cancel()
@@ -1026,6 +1031,7 @@ STORED_SETTINGS = {
     "water": ("My Water Advisor email and password", "password"),
     "rainbird": ("Rain Bird controller address and password, zone names and sizes", "password"),
     "anthropic_api_key": ("Anthropic API key (photo analysis)", "key"),
+    "s3_backup": ("S3 backup bucket and AWS access key", "password"),
 }
 DATA_GROUPS = {
     "Rooms and names": ["rooms", "device_rooms", "device_names"],
@@ -1034,6 +1040,7 @@ DATA_GROUPS = {
     "Water, sprinklers and weather history": ["watering", "water_hourly", "water_daily", "weather"],
     "Electricity history": ["energy_interval", "device_activity"],
     "Zone photos": ["zone_photos"],
+    "Backup log": ["backups"],
 }
 
 
@@ -1061,6 +1068,58 @@ async def storage(request: Request):
                   for k in hub.secrets.keys()],
         "data": [{"group": g, "rows": sum(counts.get(t, 0) for t in ts)} for g, ts in DATA_GROUPS.items()],
     }
+
+
+# Encrypted backups to the user's S3 bucket
+class BackupIn(BaseModel):
+    bucket: str = Field(pattern=r"^[a-z0-9][a-z0-9.-]{2,62}$")
+    region: str = Field("us-east-1", pattern=r"^[a-z]{2}(-[a-z]+)+-\d$")
+    prefix: str = Field("smarthome", pattern=r"^[A-Za-z0-9/_-]{0,100}$")
+    access_key_id: str = Field("", max_length=128, pattern=r"^[A-Z0-9]*$")
+    secret_access_key: str = Field("", max_length=128, pattern=r"^[A-Za-z0-9/+=]*$")
+    include_photos: bool = True
+
+
+@app.get("/api/backup")
+async def backup_status(request: Request):
+    b = hub_of(request).backups
+    cfg = b.config
+    history = b.history()
+    return {
+        "configured": b.active, "bucket": cfg.get("bucket"), "region": cfg.get("region"), "prefix": cfg.get("prefix"),
+        "include_photos": cfg.get("include_photos", True), "own_keys": bool(cfg.get("access_key_id")),
+        "last_ok": next((h for h in history if h["ok"]), None), "last": history[0] if history else None,
+        "history": history, "runs_at": "3:30 AM",
+    }
+
+
+@app.put("/api/backup")
+async def backup_connect(request: Request, body: BackupIn):
+    if bool(body.access_key_id) != bool(body.secret_access_key):
+        raise HubError(400, "Enter both the access key ID and the secret, or neither to use the Mac's AWS login.")
+    cfg = {**body.model_dump(), "prefix": body.prefix.strip("/")}
+    return await hub_of(request).backups.connect(cfg)
+
+
+@app.post("/api/backup/run")
+async def backup_now(request: Request):
+    b = hub_of(request).backups
+    if not b.active:
+        raise HubError(409, "Set up the S3 bucket first.")
+    return await b.run()
+
+
+@app.delete("/api/backup")
+async def backup_off(request: Request):
+    hub_of(request).backups.disconnect()
+    return {"ok": True}
+
+
+@app.get("/api/backup/key")
+async def backup_key(request: Request):
+    """The recovery key. Only a person signed in with Google or Face ID, never the script token."""
+    _email(request)
+    return {"key": hub_of(request).backups.recovery_key()}
 
 
 @app.get("/api/pentair/fields")

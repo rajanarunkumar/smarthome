@@ -753,6 +753,9 @@ function renderSettings() {
       ${govee.account ? "" : `<div class="row"><div class="main"><span class="name">Govee</span><span class="sub wrap">${count("govee")} light(s). Without the account, a light only shows up after you turn on <b>LAN Control</b> for it in the Govee app.</span></div></div>`}
     </div>
 
+    <div class="section-title"><span>Backup to your S3 bucket</span></div>
+    <div class="card" id="backup-card"><div class="row"><span class="sub">Loading…</span></div></div>
+
     <div class="section-title"><span>Stored on this Mac</span></div>
     <div class="card" id="storage-card"><div class="row"><span class="sub">Loading…</span></div></div>
 
@@ -770,6 +773,7 @@ function renderSettings() {
     <p class="note">Rooms live in this hub. Hue rooms are imported the first time the bridge is paired.</p>`;
 
   loadStorage();
+  loadBackup();
   $("#sign-out")?.addEventListener("click", signOut);
   $("#add-passkey")?.addEventListener("click", async (e) => {
     e.target.disabled = true;
@@ -1187,4 +1191,68 @@ async function loadStorage() {
       ${plain.length ? `<div class="row"><div class="main"><span class="name small">Plain-text passwords</span>
         <span class="sub wrap">${plain.map((x) => esc(x.label)).join("; ")}. These services only accept a password, so it is stored as is, readable by your Mac user. Use a separate account for the hub where you can, and keep the Mac's disk encrypted (FileVault) and backups private.</span></div></div>` : ""}`;
   } catch (err) { box.innerHTML = `<div class="row"><span class="sub">${esc(err.message)}</span></div>`; }
+}
+
+
+async function loadBackup() {
+  const box = $("#backup-card");
+  if (!box) return;
+  let b;
+  try { b = await api("GET", "/api/backup"); } catch (err) { box.innerHTML = `<div class="row"><span class="sub">${esc(err.message)}</span></div>`; return; }
+  const when = (iso) => new Date(iso).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+  const mb = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+  if (b.configured) {
+    const ok = b.last_ok, bad = b.last && !b.last.ok ? b.last : null;
+    box.innerHTML = `
+      <div class="row"><div class="main"><span class="name">s3://${esc(b.bucket)}/${esc(b.prefix || "")}</span>
+        <span class="sub wrap">Encrypted on this Mac before upload, every night at ${esc(b.runs_at)}. ${ok ? `Last backup ${esc(when(ok.at))}, ${mb(ok.bytes)}.` : "No backup yet."}</span></div></div>
+      ${bad ? `<div class="row"><div class="main"><span class="name small">Last attempt failed</span><span class="sub wrap">${esc(when(bad.at))}: ${esc(bad.note)}</span></div></div>` : ""}
+      <div class="row"><div class="inline" style="width:100%">
+        <button class="pill primary" id="backup-run">Back up now</button>
+        <button class="pill" id="backup-key">Recovery key</button>
+        <button class="pill danger" id="backup-off">Turn off</button></div></div>`;
+    $("#backup-run").addEventListener("click", async (e) => {
+      e.target.disabled = true; e.target.textContent = "Backing up…";
+      try { const r = await api("POST", "/api/backup/run"); toast(`Backed up ${mb(r.bytes)}`); } catch (err) { toast(err.message); }
+      loadBackup();
+    });
+    $("#backup-key").addEventListener("click", showRecoveryKey);
+    $("#backup-off").addEventListener("click", async (e) => {
+      if (e.target.dataset.armed !== "1") { e.target.dataset.armed = "1"; e.target.textContent = "Tap again to turn off"; return; }
+      try { await api("DELETE", "/api/backup"); toast("Backups turned off. Existing backups in S3 are untouched."); loadBackup(); } catch (err) { toast(err.message); }
+    });
+  } else {
+    box.innerHTML = `
+      <div class="row"><div class="main"><span class="name">Not set up</span>
+        <span class="sub wrap">Nightly encrypted backup of your settings, logins, history and photos. The backup is encrypted on this Mac with a key that never leaves it, so S3 only holds ciphertext. The AWS key needs only <b>s3:PutObject</b> on the folder below.</span></div></div>
+      <div class="row key-row"><input type="text" id="bk-bucket" placeholder="Bucket name" autocapitalize="none" spellcheck="false">
+        <input type="text" id="bk-region" value="us-east-1" aria-label="AWS region" style="flex:0 0 9em">
+        <input type="text" id="bk-prefix" value="smarthome" aria-label="Folder in the bucket" style="flex:0 0 9em"></div>
+      <div class="row key-row"><input type="text" id="bk-akid" placeholder="AWS access key ID (blank: use the Mac's AWS login)" autocomplete="off" spellcheck="false">
+        <input type="password" id="bk-secret" placeholder="AWS secret access key" autocomplete="off" spellcheck="false"></div>
+      <div class="row"><label class="inline"><span>Include zone photos</span><span class="switch"><input type="checkbox" id="bk-photos" checked><span></span></span></label>
+        <button class="pill primary" id="bk-connect" style="flex:none">Connect and back up now</button></div>`;
+    $("#bk-connect").addEventListener("click", async (e) => {
+      e.target.disabled = true; e.target.textContent = "Backing up…";
+      try {
+        const r = await api("PUT", "/api/backup", { bucket: $("#bk-bucket").value.trim(), region: $("#bk-region").value.trim(), prefix: $("#bk-prefix").value.trim(),
+          access_key_id: $("#bk-akid").value.trim(), secret_access_key: $("#bk-secret").value.trim(), include_photos: $("#bk-photos").checked });
+        toast(`First backup uploaded (${mb(r.bytes)})`);
+        await loadBackup();
+        showRecoveryKey();
+      } catch (err) { toast(err.message); e.target.disabled = false; e.target.textContent = "Connect and back up now"; }
+    });
+  }
+}
+
+async function showRecoveryKey() {
+  try {
+    const { key } = await api("GET", "/api/backup/key");
+    openSheet("Recovery key", `
+      <p><b>Save this in your password manager now.</b> Without it a backup can't be opened, and if this Mac is lost the key goes with it.</p>
+      <div class="card pad"><code id="rk" style="word-break:break-all;user-select:all">${esc(key)}</code></div>
+      <div class="inline"><button class="pill" id="rk-copy">Copy</button><button class="pill primary" data-close>I've saved it</button></div>
+      <p class="note">To restore on a new Mac: download the .enc file from S3, then run <code>python -m hub.backup restore FILE.enc --key KEY --to ~/.smarthome</code> (hub stopped).</p>`);
+    $("#rk-copy", sheet).addEventListener("click", async () => { try { await navigator.clipboard.writeText(key); toast("Copied"); } catch { toast("Select the key and copy it"); } });
+  } catch (err) { toast(err.message); }
 }

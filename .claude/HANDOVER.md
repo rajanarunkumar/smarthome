@@ -1,6 +1,6 @@
 # Smart home hub: handover
 
-Read this first in a new session, then `docs/HANDOVER.md` (Mac session) and `.claude/NEXT.md`. Branch: `claude/brave-edison-9evhkk`. Last updated 2026-11-22. Tests: 101 passing.
+Read this first in a new session, then `docs/HANDOVER.md` (Mac session) and `.claude/NEXT.md`. Branch: `claude/brave-edison-9evhkk`. Last updated 2026-11-22. Tests: 109 passing.
 
 ## What this is
 
@@ -27,7 +27,7 @@ python3.13 -m venv .venv && . .venv/bin/activate   # 3.13 needed for Ecovacs and
 pip install -r requirements.txt
 python -m hub                       # 127.0.0.1:8420
 tailscale serve --bg 8420
-python -m pytest -q tests           # 101 tests, ~40 s
+python -m pytest -q tests           # 109 tests, ~45 s
 ```
 
 ## Layout
@@ -83,6 +83,8 @@ Subclass `Adapter` (`hub/adapters/base.py`): set `brand`, `label`, `prefixes`, i
 - **Backfill:** Insights → "Fetch last 4 weeks" (also runs once at start, then every 3 h) pulls 28 days of hourly water, SMT 15-min, weather, and replays Rain Bird programs for past weeks, kept only where the water meter shows water (`confirm_with_meter`).
 
 ## Hard-won facts and decisions
+
+- **S3 backups** (`hub/backup.py`, Settings → Backup): nightly 03:30 (retry hourly after a failure) tar.gz of a SQLite-online-backup snapshot of `hub.db` + `secrets.json` + optional photos, **AES-256-GCM encrypted on the Mac** (`~/.smarthome/backup.key`, excluded from the archive), uploaded with `s3:PutObject` only (SSE-S3). The user chose S3 over git for secrets because git history is permanent and the repo may be shared; never commit `~/.smarthome` or encrypted copies of it. Settings are saved only after a first upload succeeds. Restore: `python -m hub.backup restore FILE --key KEY --to DIR`. The recovery key is shown only to a signed-in person (not the script token). Untested against real S3: tests use a fake client and the real AES-GCM/tar/SQLite code. Open: Keychain-backed key storage; restore-from-S3 button (currently download the `.enc` with the AWS console/CLI).
 
 - **Storage design** (see README "Where data is stored"): `Secrets` (`hub/config.py`) is an in-memory dict written through to `~/.smarthome/secrets.json` on every `set()`: fsync'd atomic replace, `.bak` of the last good file, auto-fallback to `.bak` if the main file is unreadable, refuses to start empty if both are bad, merges hand edits made while running. `Store` (`hub/store.py`) uses SQLite WAL + `synchronous=NORMAL`, file mode 600. `GET /api/storage` reports names/counts only. Known limit: Schlage, Smart Meter Texas, My Water Advisor and Rain Bird passwords are plain text (those services need the password). Possible next step: move secrets into the macOS Keychain (`security` CLI) and keep only references in `secrets.json`.
 

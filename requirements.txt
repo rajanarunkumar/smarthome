@@ -15,3 +15,5 @@ smart-meter-texas>=0.5  # TXU / Smart Meter Texas
 pyrainbird>=6.0; python_version >= "3.13"  # Rain Bird
 anthropic>=2.0  # optional Claude photo analysis
 pillow>=10  # zone photo analysis
+boto3>=1.27  # S3 backups
+cryptography>=42  # backup encryption

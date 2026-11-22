@@ -154,6 +154,28 @@ Not stored: device state (it's read live from the devices and cached in memory o
 
 Backups: `~/.smarthome/` is the whole system. Copy it to restore on another Mac (stop the hub first). It contains passwords, so keep the copy private and encrypted; turn on FileVault. Don't commit it.
 
+## Backing up to your own S3 bucket
+
+The hub can back up `~/.smarthome/` every night at 3:30 AM to a bucket you own. The archive (a consistent snapshot of `hub.db`, `secrets.json`, optionally the zone photos) is **encrypted on the Mac with AES-256-GCM before upload**, so S3 only ever holds ciphertext. The key is created on first use and kept in `~/.smarthome/backup.key`, never inside a backup.
+
+**Set it up once (about 10 minutes):**
+1. **Bucket:** create a private bucket. Leave **Block all public access** on, turn on **Bucket Versioning**, and keep default encryption (SSE-S3). Add a **lifecycle rule** that expires objects under `smarthome/` after 30 days, because the hub never deletes anything.
+2. **IAM user** for the hub with only this policy (replace `YOUR-BUCKET`):
+   ```json
+   {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::YOUR-BUCKET/smarthome/*"}]}
+   ```
+   It can add backups but can't list, read or delete them, so a leaked hub key can't expose or destroy your history. Create an access key for that user.
+3. In the hub: **Settings → Backup to your S3 bucket**: bucket, region, folder (`smarthome`), the access key ID and secret (or leave them blank to use the Mac's `aws configure` login), then **Connect and back up now**. The settings are saved only if the first upload works, which proves the permissions.
+4. **Save the recovery key** that the app shows (also under *Recovery key*) in your password manager. Without it a backup can't be opened, and if the Mac dies the key file dies with it.
+
+**Restore on a new Mac:** download a `.enc` file from S3, stop the hub, then
+```bash
+python -m hub.backup restore hub-20261122-033000.enc --key "<recovery key>" --to ~/.smarthome
+```
+It refuses a folder that isn't empty (add `--force` to overwrite) and rejects anything in the archive that would land outside the target. Afterwards copy the recovery key back to `~/.smarthome/backup.key` if you want new backups to keep using it.
+
+Notes: the AWS secret key is stored in `secrets.json` like the other logins (or use `aws configure` so it isn't stored by the hub). The archive contains your plain-text service passwords, which is why it's encrypted before it leaves the Mac. Don't put the recovery key in the same bucket.
+
 ## Hub schedules
 
 Kasa and Hue schedules are saved on the plug or bridge and run even when the Mac is off. Every other device with an on/off (the Pentair pump, Govee, Dyson, Sonos, the LG TV, Ecovacs) can now be scheduled too, at set times. Those schedules run **in the hub**, so the Mac must be awake: System Settings → Energy → turn on "Prevent automatic sleeping when the display is off". The Schedules tab labels them **Hub (this Mac)**. Locks can't be scheduled.
