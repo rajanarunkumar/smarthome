@@ -20,12 +20,10 @@ deliberately **not** in this repo; they live only in `~/.smarthome/` on the MacB
 
 ## Open items, in order
 
-1. **Google sign-in is blocked on Google Cloud config.** Google still answers `redirect_uri_mismatch`.
-   - Done so far: the OAuth client has both *Authorized JavaScript origins* set. The *Authorized redirect URIs* were reportedly added, but Google hadn't accepted them 30+ minutes later.
-   - To check: open the client in Google Cloud and confirm **Authorized redirect URIs** contains the ts.net address **with a trailing `/`** and `http://localhost:8420/`, and that **Save** was clicked.
-   - Then on the iPhone: Sign in with Google → Turn on Face ID → Add to Home Screen.
-   - `/api/auth/google/start` shows the exact `redirect_uri` the hub sends.
-2. **Turn request logging back down** once sign-in works. The access-log change was not committed; uvicorn `log_level` is `warning` in `hub/__main__.py`.
+1. ~~Google sign-in~~ **Done:** works on the iPhone.
+   - The fix was saving the OAuth client's *Authorized redirect URIs* (origin + `/`), which had been left empty.
+   - If it breaks again: `/api/auth/google/start` shows the exact `redirect_uri` the hub sends.
+2. ~~Request logging~~ **Done:** back to `warning`.
 3. **Link the remaining brand accounts** (Settings tab).
 4. **Native iOS app (SwiftUI).**
    - **Decided:** build it. Distribution starts with free Xcode install (re-sign every 7 days); move to TestFlight if the $99 Apple Developer Program is bought.
