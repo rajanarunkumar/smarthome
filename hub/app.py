@@ -1009,6 +1009,60 @@ async def cancel_flow_tests(request: Request):
     return {"ok": True}
 
 
+# What is stored, and where (names and counts only, never values)
+STORED_SETTINGS = {
+    "access_token": ("Hub API token (for scripts)", "token"),
+    "auth": ("Google sign-in settings (client ID, allowed emails, addresses)", "config"),
+    "location": ("Weather location (city only)", "config"),
+    "hue": ("Hue Bridge key", "key"),
+    "lgtv": ("LG TV pairing key", "key"),
+    "govee_api_key": ("Govee API key", "key"),
+    "thinq": ("LG ThinQ token", "key"),
+    "dyson": ("Dyson local device keys", "key"),
+    "ecovacs": ("Ecovacs login (password hash)", "hash"),
+    "pentair": ("Pentair login tokens", "key"),
+    "schlage": ("Schlage email and password", "password"),
+    "smt": ("Smart Meter Texas username and password", "password"),
+    "water": ("My Water Advisor email and password", "password"),
+    "rainbird": ("Rain Bird controller address and password, zone names and sizes", "password"),
+    "anthropic_api_key": ("Anthropic API key (photo analysis)", "key"),
+}
+DATA_GROUPS = {
+    "Rooms and names": ["rooms", "device_rooms", "device_names"],
+    "Sign-in": ["sessions", "passkeys", "app_tokens"],
+    "Schedules and programs": ["hub_schedules", "irrigation_programs", "irrigation_decisions", "flow_tests"],
+    "Water, sprinklers and weather history": ["watering", "water_hourly", "water_daily", "weather"],
+    "Electricity history": ["energy_interval", "device_activity"],
+    "Zone photos": ["zone_photos"],
+}
+
+
+def _size(path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+@app.get("/api/storage")
+async def storage(request: Request):
+    hub = hub_of(request)
+    folder = data_dir()
+    tables = {r[0] for r in hub.store.db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    counts = {t: hub.store.db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in tables}
+    photos = list((folder / "photos").glob("*.jpg")) if (folder / "photos").exists() else []
+    return {
+        "folder": str(folder),
+        "settings_file": {"name": "secrets.json", "bytes": _size(folder / "secrets.json"),
+                          "backup": (folder / "secrets.json.bak").exists()},
+        "database": {"name": "hub.db", "bytes": _size(folder / "hub.db") + _size(folder / "hub.db-wal"), "wal": True},
+        "photos": {"count": len(photos), "bytes": sum(_size(f) for f in photos)},
+        "saved": [{"key": k, "label": STORED_SETTINGS.get(k, (k, "config"))[0], "kind": STORED_SETTINGS.get(k, (k, "config"))[1]}
+                  for k in hub.secrets.keys()],
+        "data": [{"group": g, "rows": sum(counts.get(t, 0) for t in ts)} for g, ts in DATA_GROUPS.items()],
+    }
+
+
 @app.get("/api/pentair/fields")
 async def pentair_fields(request: Request):
     return hub_of(request).pentair.raw_fields()

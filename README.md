@@ -139,6 +139,21 @@ Private data lives in `~/.smarthome/` (sign-in settings, API token, Hue key, ses
 
 Tests: `pip install -r requirements-dev.txt && python -m pytest tests`.
 
+## Where data is stored
+
+Everything lives on the Mac running the hub, in `~/.smarthome/` (owner-only, mode 700). Nothing is stored in the repo, on GitHub, or in the Claude cloud session. Settings → **Stored on this Mac** shows this live (names and counts, never values).
+
+| File | Holds | Notes |
+|---|---|---|
+| `secrets.json` (+ `.bak`) | Every setting and login: hub API token, Google sign-in config, Hue/LG/Govee/ThinQ/Dyson/Pentair keys, Anthropic key, weather city, and the logins for Schlage, Smart Meter Texas, My Water Advisor and Rain Bird (**plain-text passwords**, because those services accept only a password; Ecovacs keeps a hash) | In-memory store written through to disk on every change; crash-safe save (temp file, fsync, swap), last good copy kept as `.bak`, loaded automatically if the file is ever unreadable, and changes made to the file by hand are merged, not overwritten. Mode 600 |
+| `hub.db` (SQLite, WAL mode) | Rooms and names, sessions and passkeys, hub schedules, smart programs and decisions, flow tests, sprinkler runs, water, weather, 15-minute electricity, device activity, photo records | Crash-safe write-ahead log; mode 600 |
+| `photos/` | Zone photos (JPEG, max 2048 px) | Mode 700 folder |
+| `logs/hub.log` | Hub log (launchd service) | |
+
+Not stored: device state (it's read live from the devices and cached in memory only), Dyson/Schlage/other account sessions beyond the keys above.
+
+Backups: `~/.smarthome/` is the whole system. Copy it to restore on another Mac (stop the hub first). It contains passwords, so keep the copy private and encrypted; turn on FileVault. Don't commit it.
+
 ## Hub schedules
 
 Kasa and Hue schedules are saved on the plug or bridge and run even when the Mac is off. Every other device with an on/off (the Pentair pump, Govee, Dyson, Sonos, the LG TV, Ecovacs) can now be scheduled too, at set times. Those schedules run **in the hub**, so the Mac must be awake: System Settings → Energy → turn on "Prevent automatic sleeping when the display is off". The Schedules tab labels them **Hub (this Mac)**. Locks can't be scheduled.

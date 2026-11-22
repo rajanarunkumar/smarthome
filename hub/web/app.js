@@ -753,6 +753,9 @@ function renderSettings() {
       ${govee.account ? "" : `<div class="row"><div class="main"><span class="name">Govee</span><span class="sub wrap">${count("govee")} light(s). Without the account, a light only shows up after you turn on <b>LAN Control</b> for it in the Govee app.</span></div></div>`}
     </div>
 
+    <div class="section-title"><span>Stored on this Mac</span></div>
+    <div class="card" id="storage-card"><div class="row"><span class="sub">Loading…</span></div></div>
+
     <div class="section-title"><span>Rooms</span></div>
     <div class="card">${state.rooms.map((r) => `
       <div class="row">
@@ -766,6 +769,7 @@ function renderSettings() {
       <button class="pill primary" id="add-room" style="flex:none">Add room</button></div>
     <p class="note">Rooms live in this hub. Hue rooms are imported the first time the bridge is paired.</p>`;
 
+  loadStorage();
   $("#sign-out")?.addEventListener("click", signOut);
   $("#add-passkey")?.addEventListener("click", async (e) => {
     e.target.disabled = true;
@@ -1161,4 +1165,26 @@ function openZoneSchedule(device, zone) {
       toast("Saved and confirmed on the controller"); sheet.close();
     } catch (err) { toast(err.message); e.target.disabled = false; }
   });
+}
+
+
+async function loadStorage() {
+  const box = $("#storage-card");
+  if (!box) return;
+  try {
+    const s = await api("GET", "/api/storage");
+    const kb = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+    const plain = s.saved.filter((x) => x.kind === "password");
+    box.innerHTML = `
+      <div class="row"><div class="main"><span class="name small">Folder</span><span class="sub wrap">${esc(s.folder)} (only your Mac user can open it)</span></div></div>
+      <div class="row"><div class="main"><span class="name small">Settings and logins</span>
+        <span class="sub wrap">${esc(s.settings_file.name)}, ${kb(s.settings_file.bytes)}. Kept in memory and saved to disk on every change, with a backup copy.</span></div></div>
+      <div class="row"><div class="main"><span class="name small">History and rooms</span>
+        <span class="sub wrap">${esc(s.database.name)}, ${kb(s.database.bytes)}, crash-safe. ${s.data.filter((d) => d.rows).map((d) => `${esc(d.group)}: ${d.rows.toLocaleString()}`).join(" · ") || "Nothing yet."}</span></div></div>
+      <div class="row"><div class="main"><span class="name small">Zone photos</span><span class="sub wrap">${s.photos.count} photo(s), ${kb(s.photos.bytes)}</span></div></div>
+      <div class="row"><div class="main"><span class="name small">Saved settings (${s.saved.length})</span>
+        <span class="sub wrap">${s.saved.map((x) => esc(x.label)).join(" · ") || "None yet."}</span></div></div>
+      ${plain.length ? `<div class="row"><div class="main"><span class="name small">Plain-text passwords</span>
+        <span class="sub wrap">${plain.map((x) => esc(x.label)).join("; ")}. These services only accept a password, so it is stored as is, readable by your Mac user. Use a separate account for the hub where you can, and keep the Mac's disk encrypted (FileVault) and backups private.</span></div></div>` : ""}`;
+  } catch (err) { box.innerHTML = `<div class="row"><span class="sub">${esc(err.message)}</span></div>`; }
 }

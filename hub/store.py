@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
 
 class Store:
     def __init__(self, path: Path | str) -> None:
-        self.db = sqlite3.connect(path, check_same_thread=False)
+        self.db = sqlite3.connect(path, check_same_thread=False, timeout=15)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
+        # Write-ahead log: a crash or power cut mid-write can't corrupt the database, and the
+        # background collectors don't block the web app. NORMAL is the recommended pairing with WAL.
+        self.db.execute("PRAGMA journal_mode = WAL")
+        self.db.execute("PRAGMA synchronous = NORMAL")
+        if str(path) != ":memory:":
+            try:
+                os.chmod(path, 0o600)  # owner only; the -wal and -shm files copy this
+            except OSError:
+                pass
         self.db.executescript(
             """
             CREATE TABLE IF NOT EXISTS rooms (

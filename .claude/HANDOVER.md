@@ -1,6 +1,6 @@
 # Smart home hub: handover
 
-Read this first in a new session, then `docs/HANDOVER.md` (Mac session) and `.claude/NEXT.md`. Branch: `claude/brave-edison-9evhkk`. Last updated 2026-11-22. Tests: 95 passing.
+Read this first in a new session, then `docs/HANDOVER.md` (Mac session) and `.claude/NEXT.md`. Branch: `claude/brave-edison-9evhkk`. Last updated 2026-11-22. Tests: 101 passing.
 
 ## What this is
 
@@ -27,7 +27,7 @@ python3.13 -m venv .venv && . .venv/bin/activate   # 3.13 needed for Ecovacs and
 pip install -r requirements.txt
 python -m hub                       # 127.0.0.1:8420
 tailscale serve --bg 8420
-python -m pytest -q tests           # 95 tests, ~40 s
+python -m pytest -q tests           # 101 tests, ~40 s
 ```
 
 ## Layout
@@ -83,6 +83,8 @@ Subclass `Adapter` (`hub/adapters/base.py`): set `brand`, `label`, `prefixes`, i
 - **Backfill:** Insights → "Fetch last 4 weeks" (also runs once at start, then every 3 h) pulls 28 days of hourly water, SMT 15-min, weather, and replays Rain Bird programs for past weeks, kept only where the water meter shows water (`confirm_with_meter`).
 
 ## Hard-won facts and decisions
+
+- **Storage design** (see README "Where data is stored"): `Secrets` (`hub/config.py`) is an in-memory dict written through to `~/.smarthome/secrets.json` on every `set()`: fsync'd atomic replace, `.bak` of the last good file, auto-fallback to `.bak` if the main file is unreadable, refuses to start empty if both are bad, merges hand edits made while running. `Store` (`hub/store.py`) uses SQLite WAL + `synchronous=NORMAL`, file mode 600. `GET /api/storage` reports names/counts only. Known limit: Schlage, Smart Meter Texas, My Water Advisor and Rain Bird passwords are plain text (those services need the password). Possible next step: move secrets into the macOS Keychain (`security` CLI) and keep only references in `secrets.json`.
 
 - **Refresh timers must use `float("-inf")` for "never"**, not `0.0`: `time.monotonic()` can be small right after boot, which skipped first refreshes. Already fixed everywhere except Kasa/Sonos/Govee-cloud list timers, which still use `0.0` (harmless there, but fix if touched).
 - Rain Bird runs zones back to back, so a naive "one zone per hour" gal/min estimate fails; hence least squares and flow tests.
