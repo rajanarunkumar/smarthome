@@ -59,6 +59,26 @@ def explain(exc: Exception, local: bool) -> str:
     return f"Lennox: {msg}"
 
 
+def no_zone_detail(api: Any, local: bool) -> str:
+    """Why a connection produced no zones, in terms of what Lennox actually sent."""
+    systems = list(getattr(api, "system_list", []) or [])
+    if not systems:
+        return "Lennox accepted the sign-in but lists no thermostat on this account. Sign in with the account that set up the thermostat, or ask its owner to invite you in the iComfort app."
+    parts = []
+    for sy in systems:
+        kind = getattr(sy, "productType", None) or "unknown model"
+        status = getattr(sy, "cloud_status", None) or "no status"
+        zones = len(getattr(sy, "zone_list", []) or [])
+        parts.append(f"“{getattr(sy, 'name', None) or 'system'}” ({kind}, Lennox says {status}, {zones} zone(s) described)")
+    head = f"Lennox accepted the sign-in and found {', '.join(parts)}, but the thermostat sent no readings in {CONNECT_TIMEOUT} s."
+    if local:
+        return head + " Check the IP address and that the thermostat is on the same network as this Mac."
+    if any((getattr(sy, "cloud_status", "") or "").lower() == "offline" for sy in systems):
+        return head + " The thermostat isn't online with Lennox: check its Wi‑Fi (Menu → Settings → Wi‑Fi) and that the iComfort app shows live temperatures."
+    return head + (" Lennox's cloud often doesn't pass readings to outside apps. Connect locally instead: "
+                   "enter the thermostat's IP address (Menu → Settings → Wi‑Fi → Advanced on the thermostat) with the email left as is.")
+
+
 def zone_state(zone: Any, system: Any) -> dict:
     op = (zone.tempOperation or "off").lower()
     return {
@@ -201,8 +221,10 @@ class LennoxAdapter(Adapter):
             message = explain(exc, bool(cfg["ip"]))
             raise HubError(401 if getattr(exc, "error_code", None) in AUTH_ERRORS else 504, message) from exc
         if not self._zones(api):
+            detail = no_zone_detail(api, bool(cfg["ip"]))
+            log.warning("Lennox: %s", detail)
             await api.shutdown()
-            raise HubError(404, "Connected, but Lennox listed no thermostat zones for this account.")
+            raise HubError(404, detail)
         self.secrets.set("lennox", cfg)
         self._api, self.error, self.connected_at = api, None, time.time()
         self._task = asyncio.create_task(self._run())
