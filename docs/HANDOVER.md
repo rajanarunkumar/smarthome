@@ -20,6 +20,7 @@ deliberately **not** in this repo; they live only in `~/.smarthome/` on the MacB
 
 ## Open items, in order
 
+0b. **Done (2026-11-22): HVAC run time and health (`hub/hvac.py`, Insights → HVAC).** Every 2 min the recorder stores each Nest/Lennox thermostat's state in `hvac_samples`. Runs are split into free/paid minutes; kW per thermostat comes from `energy.device_power` against the meter; prices from the bills. Health = minutes of cooling per cooling degree-day (heating per HDD) vs the system's own baseline (best quarter of days, or 3 days after a logged filter/coil/service if lower). ≥1.15 → filter (or coil if the filter was changed in the last 60 days), then service; also flags 2 h+ runs that don't reach the set temperature, short cycling (>30% of runs under 5 min), humid air while cooling, and two thermostats heating and cooling at once. Neither thermostat is connected yet; `lennoxs30api` was missing from `.venv` and is now installed.
 0a. **Done (2026-11-22): pool pump health, time-of-use and bills.**
    - `hub/pool.py`: the recorder stores the IntelliFlo's flow, W, speed, estimated psi and target every 2 min (`pool_samples`), at the pump's own clock; repeats are skipped.
      - Health = power at the same target flow vs. a clean baseline (the cleanest day, or the 48 h after a logged backwash/clean if lower). The shape of the rise picks the action: jump → skimmer (a), steady climb → backwash (b), backwash didn't help → clean filter (c), can't hold flow / pinned speed / power swinging → water level (d).

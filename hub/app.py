@@ -39,7 +39,8 @@ from .telemetry import Telemetry
 from . import backup as backup_mod
 from .config import Secrets, data_dir
 from . import weather as weather_api
-from .energy import EnergyStore, build_energy
+from .energy import EnergyStore, build_energy, device_power
+from .hvac import ACTIONS as HVAC_ACTIONS, HvacStore, build_hvac
 from .pool import ACTIONS as POOL_ACTIONS, PoolStore, build_pool
 from .tou import tou_report
 from .bills import BillStore, bills_report, import_folder, tariff_from
@@ -98,6 +99,7 @@ class Hub:
         self.energy = EnergyStore(self.store.db)
         self.pool = PoolStore(self.store.db)
         self.bills = BillStore(self.store.db)
+        self.hvac = HvacStore(self.store.db)
         self.photos = PhotoStore(self.store.db, data_dir() / "photos")
         self.flowtests = FlowTests(self.store.db, self.rainbird)
         self.backups = backup_mod.Backups(self.secrets, self.store.db, data_dir(),
@@ -205,6 +207,7 @@ class Hub:
             try:
                 devices, _ = await self.devices(interactive=False)
                 self.energy.observe(devices, datetime.now())
+                self.hvac.record_devices(devices, datetime.now())
                 for pump in self.pentair.readings():
                     self.pool.record(pump["reading"], datetime.now())
                 self.telemetry.job("activity recorder", started, (time.monotonic() - t0) * 1000, True,
@@ -1362,6 +1365,52 @@ async def pool_log_delete(request: Request, log_id: int):
     return {"ok": True}
 
 
+def _tmean(hub, days: int) -> dict:
+    from datetime import date, timedelta
+    weather = hub.history.weather(date.today() - timedelta(days=days + 1))
+    return {d: w.get("tmean_f") if w.get("tmean_f") is not None else
+            ((w["tmax_f"] - 10) if w.get("tmax_f") is not None else None) for d, w in weather.items()}
+
+
+@app.get("/api/hvac")
+async def hvac(request: Request, days: int = 14):
+    from datetime import date, datetime, timedelta
+    hub = hub_of(request)
+    days = max(7, min(days, 60))
+    devices, _ = await hub.devices(interactive=False)
+    stats = [{"id": d.id, "name": d.name, "brand": d.brand, "online": d.online, **(d.thermostat or {})}
+             for d in devices if d.kind == "thermostat"]
+    since = date.today() - timedelta(days=60)
+    activity = hub.energy.activity(since)
+    ids = {t["id"] for t in stats} | {a["device_id"] for a in activity if a["kind"] == "thermostat"}
+    # kW per thermostat from the meter: solved with every tracked device, so the pool or dryer isn't blamed on the AC.
+    kw = {d: v["kw"] for d, v in device_power(hub.energy.intervals(since), activity).items() if d in ids}
+    data = build_hvac(hub.hvac, stats, tariff_of(hub), _tmean(hub, 60), kw, datetime.now(), days)
+    return {**data, "connected": {"nest": hub.nest.active, "lennox": hub.lennox.active}}
+
+
+class HvacLogIn(BaseModel):
+    action: str
+    device_id: str | None = Field(None, max_length=120)
+    note: str | None = Field(None, max_length=200)
+    at: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$")
+
+
+@app.post("/api/hvac/maintenance")
+async def hvac_log(request: Request, body: HvacLogIn):
+    from datetime import datetime
+    if body.action not in HVAC_ACTIONS:
+        raise HubError(400, "Unknown maintenance action.")
+    at = datetime.fromisoformat(body.at) if body.at else datetime.now()
+    return hub_of(request).hvac.log(body.action, at, body.device_id, body.note)
+
+
+@app.delete("/api/hvac/maintenance/{log_id}")
+async def hvac_log_delete(request: Request, log_id: int):
+    hub_of(request).hvac.delete_log(log_id)
+    return {"ok": True}
+
+
 @app.get("/api/insights")
 async def insights(request: Request, days: int = 28):
     hub = hub_of(request)
@@ -1494,6 +1543,7 @@ DATA_GROUPS = {
     "Water, sprinklers and weather history": ["watering", "water_hourly", "water_daily", "weather"],
     "Electricity history": ["energy_interval", "device_activity"],
     "Pool pump history": ["pool_samples", "pool_maintenance"],
+    "Heating and cooling history": ["hvac_samples", "hvac_maintenance"],
     "Electricity bills": ["bills"],
     "Zone photos": ["zone_photos"],
     "Backup log": ["backups"],
