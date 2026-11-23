@@ -125,4 +125,4 @@ See `.claude/NEXT.md`.
 - **Web app bug fixed:** `api()` treated any 401 as "signed out" and showed the login screen, so a brand rejecting a password (Rain Bird, Ring, Nest) looked like being logged out. Now only the hub's own "Sign in required" does that.
 - Rain Bird: `python -m hub.adapters.rainbird_adapter [IP] [--find]` CLI (versions, subnet hint, port probe, one password attempt; --find scans the /24). pyrainbird < 6.1 can't do HTTPS (verified by diffing wheels), so requirements now pin >= 6.10 and the connection test warns on old versions.
 - `loadBackup()` no longer throws when Settings re-renders mid-load.
-- Lennox iComfort added (the user's system; model not yet confirmed, must be S30/E30/M30/S40, not the old iComfort Wi-Fi).
+- Lennox iComfort added. The user's thermostat is an **E30** (supported by lennoxs30api, cloud or local).
