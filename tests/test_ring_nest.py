@@ -1,5 +1,6 @@
 """Ring (doorbell + cameras, two-step sign-in) and Nest (Google SDM thermostat), with fake services."""
 
+import base64
 import asyncio
 import json
 from datetime import datetime, timezone
@@ -351,3 +352,86 @@ def test_rainbird_test_warns_about_an_old_library(tmp_path, monkeypatch):
     monkeypatch.setattr(rb, "create_controller", refused)
     steps = asyncio.run(rb.RainBirdAdapter(Secrets(tmp_path / "s.json")).diagnose("192.168.1.40", "pw"))
     assert any("too old" in s["title"] for s in steps)
+
+
+# ---------------- Nest events (Pub/Sub) ----------------
+SUB = "projects/thorntree-smarthome/subscriptions/nest-events-sub"
+
+
+def event_message(traits, name=DEVICE, ack="a1"):
+    payload = {"timestamp": "2026-11-22T18:40:00Z", "resourceUpdate": {"name": name, "traits": traits}}
+    return {"ackId": ack, "message": {"data": base64.b64encode(json.dumps(payload).encode()).decode()}}
+
+
+class GoogleWithPubSub(Google):
+    def __init__(self):
+        super().__init__()
+        self.queue, self.acked, self.pull_status = [], [], 200
+
+    def __call__(self, request):
+        if request.url.host == "pubsub.googleapis.com":
+            assert request.headers["authorization"] == "Bearer at"
+            if request.url.path == f"/v1/{SUB}:pull":
+                if self.pull_status != 200:
+                    return httpx.Response(self.pull_status, json={"error": {"message": "denied"}})
+                msgs, self.queue = self.queue, []
+                return httpx.Response(200, json={"receivedMessages": msgs} if msgs else {})
+            if request.url.path == f"/v1/{SUB}:acknowledge":
+                self.acked += json.loads(request.content)["ackIds"]
+                return httpx.Response(200, json={})
+        return super().__call__(request)
+
+
+def nest_events(tmp_path, google):
+    a = nest_adapter.NestAdapter(Secrets(tmp_path / "s.json"), transport=httpx.MockTransport(google))
+    a.configure(PROJECT, "client-123.apps.googleusercontent.com", "secret-xyz", SUB)
+    a.secrets.set("nest", {**a.config, "refresh_token": "rt"})
+    return a
+
+
+def test_nest_link_asks_for_pubsub_only_when_events_are_configured(tmp_path):
+    (tmp_path / "p").mkdir(); (tmp_path / "e").mkdir()
+    plain = nest(tmp_path / "p", Google(), linked=False)
+    assert parse_qs(urlparse(plain.link_url("https://hub.example.ts.net")).query)["scope"] == [nest_adapter.SCOPE]
+    ev = nest_events(tmp_path / "e", GoogleWithPubSub())
+    scope = parse_qs(urlparse(ev.link_url("https://hub.example.ts.net")).query)["scope"][0]
+    assert scope.split() == [nest_adapter.SCOPE, nest_adapter.PUBSUB_SCOPE]
+
+
+def test_nest_events_update_the_thermostat_and_are_acknowledged(tmp_path):
+    g = GoogleWithPubSub()
+    a = nest_events(tmp_path, g)
+    recorded = []
+    a.on_update = lambda i, n, th: recorded.append((i, n, th["hvac"], th["current"]))
+
+    async def run():
+        await a._list(force=True)
+        g.queue = [event_message({"sdm.devices.traits.ThermostatHvac": {"status": "OFF"},
+                                  "sdm.devices.traits.Temperature": {"ambientTemperatureCelsius": 22.2}})]
+        assert await a.pull_events() == 1
+        assert await a.pull_events() == 0
+        return await a.devices()
+
+    (d,) = asyncio.run(run())
+    assert g.acked == ["a1"]
+    assert d.thermostat["hvac"] == "OFF" and d.thermostat["current"] == 72 and d.on is False   # no extra GET needed
+    assert recorded == [("nest:dev1", "Hallway Thermostat", "OFF", 72)]
+    (ev,) = a.recent_events()
+    assert ev["changed"] == ["Temperature", "ThermostatHvac"] and ev["t"] == "2026-11-22T18:40:00Z"
+    assert asyncio.run(a.status())["last_event_at"] == "2026-11-22T18:40:00Z"
+
+
+def test_nest_event_for_an_unknown_device_rereads_the_list(tmp_path):
+    a = nest_events(tmp_path, GoogleWithPubSub())
+    asyncio.run(a._list(force=True))
+    assert a.apply_event({"resourceUpdate": {"name": "enterprises/x/devices/new", "traits": {}}}) is None
+    assert a._devices_at == 0.0
+
+
+def test_nest_events_permission_error_is_plain(tmp_path):
+    g = GoogleWithPubSub()
+    g.pull_status = 403
+    a = nest_events(tmp_path, g)
+    with pytest.raises(HubError) as err:
+        asyncio.run(a.pull_events())
+    assert "Link again" in err.value.message and "Subscriber" in err.value.message

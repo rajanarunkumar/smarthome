@@ -100,6 +100,9 @@ class Hub:
         self.pool = PoolStore(self.store.db)
         self.bills = BillStore(self.store.db)
         self.hvac = HvacStore(self.store.db)
+        # Nest events land in the HVAC samples the moment heating or cooling starts or stops.
+        from datetime import datetime
+        self.nest.on_update = lambda device_id, name, th: self.hvac.record(device_id, name, th, datetime.now())
         self.photos = PhotoStore(self.store.db, data_dir() / "photos")
         self.flowtests = FlowTests(self.store.db, self.rainbird)
         self.backups = backup_mod.Backups(self.secrets, self.store.db, data_dir(),
@@ -1096,6 +1099,8 @@ class NestConfigIn(BaseModel):
     project_id: str = Field(min_length=8, max_length=80, pattern=r"^[A-Za-z0-9-]+$")
     client_id: str = Field(min_length=10, max_length=200, pattern=r"^[A-Za-z0-9._-]+$")
     client_secret: str = Field(min_length=8, max_length=200)
+    subscription: str | None = Field(default=None, max_length=300,
+                                     pattern=r"^(projects/[a-z][a-z0-9-]{4,29}/subscriptions/[A-Za-z][A-Za-z0-9._~%+-]{2,254})?$")
 
 
 class NestCodeIn(BaseModel):
@@ -1106,7 +1111,7 @@ class NestCodeIn(BaseModel):
 @app.put("/api/nest/config")
 async def nest_config(request: Request, body: NestConfigIn):
     hub = hub_of(request)
-    hub.nest.configure(body.project_id, body.client_id, body.client_secret)
+    hub.nest.configure(body.project_id, body.client_id, body.client_secret, body.subscription)
     return {"url": hub.nest.link_url(_origin(request))}
 
 
@@ -1118,6 +1123,11 @@ async def nest_link(request: Request):
 @app.post("/api/nest/code")
 async def nest_code(request: Request, body: NestCodeIn):
     return await hub_of(request).nest.finish_link(_origin(request), body.code, body.state)
+
+
+@app.get("/api/nest/events")
+async def nest_events(request: Request, limit: int = 50):
+    return {"events": hub_of(request).nest.recent_events(max(1, min(limit, 200)))}
 
 
 @app.delete("/api/nest/account")

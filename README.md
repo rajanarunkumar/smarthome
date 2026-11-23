@@ -195,6 +195,8 @@ Google only lets outside apps control a Nest through **Device Access**, which ne
 4. **Device Access project:** in the Device Access console, *Create project*, paste the OAuth client ID, skip events. Copy the **project ID** (a UUID).
 5. Hub: **Settings → Nest**, paste the project ID, client ID and client secret, tap **Save and link**. Google asks which home and thermostat to share; tick the thermostat. You come back to the hub and it appears in Rooms.
 
+6. **Live events (optional):** in the Device Access project enable **Pub/Sub** with a topic in your Cloud project (grant `sdm-publisher@googlegroups.com` the *Pub/Sub Publisher* role on it) and give the topic a pull subscription. Paste the subscription path (`projects/<cloud-project>/subscriptions/<name>`) in Settings → Nest before linking. The link then also asks for Pub/Sub access, and the hub pulls events with your own Google account (no service-account key). Each change (heating or cooling starting or stopping, temperature, humidity, mode, setpoints, Eco) updates the thermostat at once and is logged to the HVAC samples, so run times are exact to the minute. Recent events: `GET /api/nest/events`.
+
 The hub reads the thermostat at most once a minute (Google limits calls); temperature taps are sent once you stop tapping. "Google no longer accepts the hub's Nest link" means the link was removed or expired: tap **Link again**.
 
 ## Ring

@@ -852,7 +852,7 @@ function renderSettings() {
     <div class="section-title"><span>Nest thermostat</span></div>
     <div class="card">${nest.connected ? `
       <div class="row"><div class="main"><span class="name">Connected</span>
-        <span class="sub wrap">${count("nest")} thermostat(s)${nest.error ? ` · ${esc(nest.error)}` : ""}</span></div>
+        <span class="sub wrap">${count("nest")} thermostat(s)${nest.error ? ` · ${esc(nest.error)}` : ""}${nest.subscription ? ` · live events ${nest.events_error ? `stopped: ${esc(nest.events_error)}` : nest.last_event_at ? `on, last ${esc(new Date(nest.last_event_at).toLocaleTimeString())}` : nest.events_running ? "on, waiting for the first one" : "off"}` : " · live events off"}</span></div>
         <button class="pill" id="nest-link">Link again</button><button class="pill danger" id="nest-off">Disconnect</button></div>` : `
       <div class="row"><div class="main"><span class="name">Not connected</span>
         <span class="sub wrap">Uses Google's Device Access (a one-time US$5 fee to Google). Follow README → <b>Nest thermostat</b> to get the three values below, then link your Google account and tick the thermostat.</span></div></div>
@@ -860,6 +860,7 @@ function renderSettings() {
       <div class="row key-row"><input type="text" id="nest-project" placeholder="Device Access project ID" autocomplete="off" spellcheck="false">
         <input type="text" id="nest-client" placeholder="OAuth client ID" autocomplete="off" spellcheck="false">
         <input type="password" id="nest-secret" placeholder="OAuth client secret" autocomplete="off">
+        <input type="text" id="nest-sub" placeholder="Pub/Sub subscription (optional, for live events)" autocomplete="off" spellcheck="false">
         <button class="pill ${nest.configured ? "" : "primary"}" id="nest-save">Save and link</button></div>
       <p class="note">Redirect URI to add on the OAuth client: <b>${esc(location.origin)}/</b></p>`}
     </div>
@@ -1006,7 +1007,7 @@ function renderSettings() {
   $("#nest-save")?.addEventListener("click", async (e) => {
     e.target.disabled = true;
     try {
-      const r = await api("PUT", "/api/nest/config", { project_id: val("#nest-project"), client_id: val("#nest-client"), client_secret: $("#nest-secret").value.trim() });
+      const r = await api("PUT", "/api/nest/config", { project_id: val("#nest-project"), client_id: val("#nest-client"), client_secret: $("#nest-secret").value.trim(), subscription: val("#nest-sub") || null });
       location.href = r.url;
     } catch (err) { toast(err.message); e.target.disabled = false; }
   });

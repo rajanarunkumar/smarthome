@@ -7,18 +7,29 @@ Set up once (see README "Nest thermostat"):
    sign-in uses. Create a Device Access project with that client ID.
 3. Settings → Nest: paste the Device Access project ID, client ID and client secret, then
    "Link Google account" and choose the thermostats to share.
+4. Optional, for live events: enable Pub/Sub on the Device Access project, create a pull subscription
+   on its topic, and paste the subscription path (projects/<gcp-project>/subscriptions/<name>) in
+   Settings → Nest. The link then also asks for Pub/Sub access, so the hub pulls events with the same
+   Google account: no service-account key to keep.
 
 The hub keeps the refresh token and asks Google for short-lived access tokens. Readings refresh at most
-once a minute (Google limits how often the API may be called).
+once a minute (Google limits how often the API may be called). With events on, every trait change
+(temperature, humidity, heating/cooling starting or stopping, mode, setpoints, Eco) is applied to the
+cached thermostat as soon as Google publishes it, and handed to `on_update` so the HVAC recorder logs
+run starts and stops at the minute they happen rather than at the next 2-minute sample.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 import secrets as pysecrets
 import time
-from typing import Any
+from collections import deque
+from datetime import datetime
+from typing import Any, Callable
 from urllib.parse import urlencode
 
 import httpx
@@ -33,6 +44,9 @@ SDM_URL = "https://smartdevicemanagement.googleapis.com/v1"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 AUTH_URL = "https://nestservices.google.com/partnerconnections/{project}/auth"
 SCOPE = "https://www.googleapis.com/auth/sdm.service"
+PUBSUB_SCOPE = "https://www.googleapis.com/auth/pubsub"
+PUBSUB_URL = "https://pubsub.googleapis.com/v1"
+EVENTS_KEPT = 200
 LINK_SECONDS = 900
 REFRESH_SECONDS = 60
 T = "sdm.devices.traits."
@@ -110,6 +124,12 @@ class NestAdapter(Adapter):
         self._last_mode: dict[str, str] = {}
         self._lock = asyncio.Lock()
         self.error: str | None = None
+        self._events_task: asyncio.Task | None = None
+        self.events: deque[dict] = deque(maxlen=EVENTS_KEPT)
+        self.events_error: str | None = None
+        self.last_event_at: str | None = None
+        # Called with (hub device id, name, describe() state) whenever an event changes a thermostat.
+        self.on_update: Callable[[str, str, dict], None] | None = None
 
     @property
     def config(self) -> dict:
@@ -120,10 +140,19 @@ class NestAdapter(Adapter):
         return bool(self.config.get("refresh_token"))
 
     # ---- linking ----
-    def configure(self, project_id: str, client_id: str, client_secret: str) -> None:
-        self.secrets.set("nest", {"project_id": project_id.strip(), "client_id": client_id.strip(),
-                                  "client_secret": client_secret.strip()})
+    def configure(self, project_id: str, client_id: str, client_secret: str, subscription: str | None = None) -> None:
+        cfg = {"project_id": project_id.strip(), "client_id": client_id.strip(), "client_secret": client_secret.strip()}
+        if subscription and subscription.strip():
+            cfg["subscription"] = subscription.strip()
+        self.secrets.set("nest", cfg)
         self._access, self._devices, self._devices_at = None, [], 0.0
+
+    @property
+    def subscription(self) -> str | None:
+        return self.config.get("subscription") or None
+
+    def _scopes(self) -> str:
+        return SCOPE + (" " + PUBSUB_SCOPE if self.subscription else "")
 
     def link_url(self, origin: str) -> str:
         cfg = self.config
@@ -134,7 +163,7 @@ class NestAdapter(Adapter):
         state = "nest." + pysecrets.token_urlsafe(16)
         self._pending[state] = (origin, now + LINK_SECONDS)
         query = urlencode({"redirect_uri": origin + "/", "access_type": "offline", "prompt": "consent",
-                           "client_id": cfg["client_id"], "response_type": "code", "scope": SCOPE, "state": state})
+                           "client_id": cfg["client_id"], "response_type": "code", "scope": self._scopes(), "state": state})
         return AUTH_URL.format(project=cfg["project_id"]) + "?" + query
 
     async def finish_link(self, origin: str, code: str, state: str) -> dict:
@@ -151,10 +180,12 @@ class NestAdapter(Adapter):
                                 "Security → Third-party access, then link again.")
         self.secrets.set("nest", {**cfg, "refresh_token": body["refresh_token"]})
         self._access = (body["access_token"], time.monotonic() + body.get("expires_in", 3600) - 60)
-        await self._list(force=True)
+        await self._list(force=True)   # Google starts publishing events only after this first call
+        self._start_events()
         return {"connected": True, "devices": len(self._thermostats())}
 
     async def disconnect(self) -> None:
+        await self._stop_events()
         token = self.config.get("refresh_token")
         if token:
             try:
@@ -239,6 +270,110 @@ class NestAdapter(Adapter):
                 return dev
         raise HubError(404, "Unknown Nest thermostat")
 
+
+    # ---- events (Pub/Sub pull, with the linked account's own token) ----
+    async def start(self) -> None:
+        self._start_events()
+
+    def _start_events(self) -> None:
+        if self.active and self.subscription and (self._events_task is None or self._events_task.done()):
+            self._events_task = asyncio.create_task(self._events_loop())
+
+    async def _stop_events(self) -> None:
+        task, self._events_task = self._events_task, None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+
+    async def _events_loop(self) -> None:
+        delay = 15
+        while self.active and self.subscription:
+            try:
+                got = await self.pull_events()
+                self.events_error, delay = None, 15
+                if not got:
+                    await asyncio.sleep(2)   # pull already waited for messages; brief pause between empty pulls
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - keep pulling; say why in Settings
+                self.events_error = exc.message if isinstance(exc, HubError) else str(exc)
+                log.warning("Nest events: %s", self.events_error)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 600)
+
+    async def _pubsub(self, path: str, body: dict, timeout: float = 20) -> dict:
+        token = await self._token()
+        try:
+            resp = await self._http.post(f"{PUBSUB_URL}/{path}", json=body, timeout=timeout,
+                                         headers={"Authorization": f"Bearer {token}"})
+        except httpx.TimeoutException:
+            return {}
+        except httpx.HTTPError as exc:
+            raise HubError(504, f"Couldn't reach Google Pub/Sub: {exc}") from exc
+        if resp.status_code == 401:
+            self._access = None
+        if resp.status_code >= 400:
+            try:
+                message = (resp.json().get("error") or {}).get("message") or f"HTTP {resp.status_code}"
+            except ValueError:
+                message = f"HTTP {resp.status_code}"
+            if resp.status_code in (401, 403):
+                message += (" Tap Link again so Google also grants Pub/Sub access, and check the account has the "
+                            "Pub/Sub Subscriber role on the subscription.")
+            elif resp.status_code == 404:
+                message += " Check the subscription path in Settings → Nest."
+            raise HubError(502 if resp.status_code >= 500 else 400, f"Nest events: {message}")
+        return resp.json() if resp.content else {}
+
+    async def pull_events(self) -> int:
+        """One pull: apply each message, then acknowledge them. Returns how many arrived."""
+        sub = self.subscription
+        body = await self._pubsub(f"{sub}:pull", {"maxMessages": 100}, timeout=60)
+        received = body.get("receivedMessages", [])
+        for item in received:
+            try:
+                payload = json.loads(base64.b64decode(item.get("message", {}).get("data", "") or b"{}"))
+            except ValueError:
+                payload = {}
+            self.apply_event(payload)
+        ack = [r["ackId"] for r in received if r.get("ackId")]
+        if ack:
+            await self._pubsub(f"{sub}:acknowledge", {"ackIds": ack})
+        return len(received)
+
+    def apply_event(self, payload: dict) -> dict | None:
+        """Merge an SDM event's traits into the cached device and remember the event."""
+        update = payload.get("resourceUpdate") or {}
+        name, traits = update.get("name"), update.get("traits") or {}
+        stamp = payload.get("timestamp") or datetime.now().astimezone().isoformat(timespec="seconds")
+        self.last_event_at = stamp
+        dev = next((d for d in self._devices if d.get("name") == name), None)
+        if dev is None:
+            # A device the hub hasn't listed yet (or a relation change): reread the list next time.
+            if name or payload.get("relationUpdate"):
+                self._devices_at = 0.0
+            return None
+        for trait, value in traits.items():
+            dev.setdefault("traits", {}).setdefault(trait, {}).update(value)
+        if dev.get("type") != "sdm.devices.types.THERMOSTAT":
+            return None
+        device_id, state = self._hub_id(dev), describe(dev)
+        event = {"t": stamp, "device_id": device_id, "name": device_name(dev),
+                 "changed": sorted(t.removeprefix(T) for t in traits), "state": state, "summary": summary(state)}
+        self.events.appendleft(event)
+        if self.on_update:
+            try:
+                self.on_update(device_id, event["name"], state)
+            except Exception as exc:  # noqa: BLE001 - a recorder problem must not stop events
+                log.warning("Nest event recorder: %s", exc)
+        return event
+
+    def recent_events(self, limit: int = 50) -> list[dict]:
+        return list(self.events)[:limit]
+
     # ---- devices ----
     async def devices(self) -> list[Device]:
         await self._list()
@@ -305,7 +440,10 @@ class NestAdapter(Adapter):
     async def status(self) -> dict:
         cfg = self.config
         return {"connected": bool(cfg.get("refresh_token")), "configured": bool(cfg.get("client_id")),
-                "project_id": cfg.get("project_id"), "devices": len(self._thermostats()), "error": self.error}
+                "project_id": cfg.get("project_id"), "devices": len(self._thermostats()), "error": self.error,
+                "subscription": self.subscription, "events_running": bool(self._events_task and not self._events_task.done()),
+                "events_error": self.events_error, "last_event_at": self.last_event_at}
 
     async def close(self) -> None:
+        await self._stop_events()
         await self._http.aclose()
