@@ -46,7 +46,7 @@ def test_partial_meter_has_no_difference():
 
 
 def test_year_over_year_saving_at_todays_prices():
-    old, new = bill("2025-06-01"), bill("2026-06-01")
+    old, new = bill("2025-06-01"), bill("2026-06-01", kwh=2700.0)
     iv = {**meter(old["period_start"], 30, night=6.25, day=3.125), **meter(new["period_start"], 30, night=6.25, day=2.5)}
     rep = reconcile_report([old, new], iv)
     y = rep["bills"][1]["vs_last_year"]

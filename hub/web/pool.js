@@ -113,11 +113,11 @@ function reconcileHtml(rc) {
   const detail = (b) => `
     <details class="card pad" ${b === latest ? "open" : ""}>
       <summary><b>${esc(monthOf(b))}</b> · billed ${money(b.billed_total)}${b.complete
-        ? ` · meter rebuilds ${money(b.rebuilt_total)} (${b.difference >= 0 ? "+" : "−"}${money(Math.abs(b.difference))})`
+        ? ` · night ${usd0(partTotal(b, "night"))}, evening ${usd0(partTotal(b, "evening"))}`
         : ` · <span class="muted">meter has ${Math.round(b.coverage * 100)}% of this period${rc.missing_days ? ", fetching the rest" : ""}</span>`}</summary>
       ${b.complete ? bar(b) : ""}
-      <p class="note">${esc(shortDay(b.period_start))} – ${esc(shortDay(b.period_end))}, ${b.days} days. Meter ${fmtNum(b.meter_kwh)} kWh vs billed ${fmtNum(b.billed_kwh)};
-        free nights ${fmtNum(b.meter_free_kwh)} kWh vs billed ${fmtNum(b.billed_free_kwh)}.</p>
+      <p class="note">${esc(shortDay(b.period_start))} – ${esc(shortDay(b.period_end))}, ${b.days} days. The bill's own kWh and charges, split by part of the day as the meter recorded them${b.complete ? `; the parts add up to the bill (${b.difference >= 0 ? "+" : "−"}${money(Math.abs(b.difference))})` : ""}.
+        Check: meter ${fmtNum(b.meter_kwh)} kWh vs billed ${fmtNum(b.billed_kwh)}; free nights ${fmtNum(b.meter_free_kwh)} vs billed ${fmtNum(b.billed_free_kwh)}${b.complete ? `; priced straight from the meter ${money(b.meter_priced_total)}` : ""}.</p>
       <div class="table-wrap"><table class="viz-table"><thead><tr><th>Part of day</th><th>kWh</th><th>Energy</th><th>Delivery</th><th>Fees</th><th>Total</th><th>¢/kWh</th>${b.seasonal ? "<th>Seasonal extra</th>" : ""}</tr></thead>
         <tbody>${b.parts.map((x) => `<tr><td><i class="viz-swatch" style="background:${PART_COLOR[x.part]}"></i>${esc(x.label)} <span class="muted">${esc(x.hours)}</span></td>
           <td>${fmtNum(x.kwh)}</td><td>${x.energy ? money(x.energy) : "free"}</td><td>${money(x.delivery)}</td><td>${money(x.fees)}</td><td><b>${money(x.total)}</b></td>

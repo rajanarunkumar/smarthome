@@ -76,19 +76,32 @@ def price_parts(kwh: dict[str, float], p: dict) -> list[dict]:
 
 
 def reconcile_bill(bill: dict, intervals: dict[str, float]) -> dict:
+    """The bill's own kWh and dollars, split across the parts of the day in the meter's proportions.
+
+    TXU's free kWh and its meter-read dates don't line up exactly with the 15-minute data (the meter shows
+    3-5% fewer free-night kWh, and the period edges aren't at midnight), so pricing the raw meter misses the
+    bill by a few dollars. Instead: night = the bill's free kWh; morning, afternoon and evening share the
+    bill's paid kWh as the meter does. The parts then add up to the bill. The raw meter figures stay in
+    the result as the check."""
     m = meter_parts(intervals, bill["period_start"], bill["period_end"])
     p = prices(bill)
-    parts = price_parts(m["kwh"], p)
-    meter_kwh = sum(m["kwh"].values())
+    raw = m["kwh"]
+    meter_kwh = sum(raw.values())
+    complete = m["days_full"] >= bill["days"] - 1
+    meter_paid = meter_kwh - raw["night"]
+    kwh = ({"night": bill["free_kwh"], **{k: bill["paid_kwh"] * raw[k] / meter_paid for k in ("morning", "afternoon", "evening")}}
+           if complete and meter_paid > 0 else raw)
+    parts = price_parts(kwh, p)
     base = bill["base"] * (1 + p["fees"])
     rebuilt = sum(r["total"] for r in parts) + base + (bill.get("misc") or 0)
-    complete = m["days_full"] >= bill["days"] - 1
+    raw_total = sum(r["total"] for r in price_parts(raw, p)) + base + (bill.get("misc") or 0)
     return {"period_start": bill["period_start"], "period_end": bill["period_end"], "days": bill["days"], "plan": bill["plan"],
             "billed_total": bill["total"], "billed_kwh": bill["kwh"], "billed_free_kwh": bill["free_kwh"],
-            "meter_kwh": round(meter_kwh, 1), "meter_free_kwh": round(m["kwh"]["night"], 1),
+            "meter_kwh": round(meter_kwh, 1), "meter_free_kwh": round(raw["night"], 1),
             "coverage": round(m["days_full"] / bill["days"], 2), "complete": complete,
             "base": round(base, 2), "misc": bill.get("misc") or 0, "rebuilt_total": round(rebuilt, 2),
             "difference": round(rebuilt - bill["total"], 2) if complete else None,
+            "meter_priced_total": round(raw_total, 2),
             "parts": parts, "prices": {k: round(v, 3) for k, v in p.items()},
             "delivery_total": round(sum(r["delivery"] for r in parts), 2),
             "energy_total": round(sum(r["energy"] for r in parts), 2),
