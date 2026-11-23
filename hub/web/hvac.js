@@ -42,7 +42,7 @@ async function renderHvac(fetch = true) {
     return;
   }
   view.innerHTML = `${insightControls()}
-    ${p.recommendations.length ? `<div class="section-title"><span>Cost</span><span class="muted small">free ${clock(p.window.start * 60)}–${clock(p.window.end * 60)}</span></div>${recsHtml(p.recommendations)}` : ""}
+    ${p.recommendations.length ? `<div class="section-title"><span>Cost</span><span class="muted small">${p.prices ? `${fmtNum(p.prices.paid, 1)}¢ paid · ${fmtNum(p.prices.free, 1)}¢ free per kWh` : `free ${clock(p.window.start * 60)}–${clock(p.window.end * 60)}`}</span></div>${recsHtml(p.recommendations)}` : ""}
     ${p.systems.map(systemHtml).join("")}
     <div class="section-title"><span>Log what you did</span></div>
     <div class="card pad">
@@ -71,13 +71,14 @@ function systemHtml(s) {
   const now = l.hvac === "COOLING" ? "Cooling" : l.hvac === "HEATING" ? "Heating" : l.online === false ? "Offline" : "Idle";
   const set = l.mode === "COOL" ? l.cool : l.mode === "HEAT" ? l.heat : l.mode === "HEATCOOL" ? `${l.heat}–${l.cool}` : "Off";
   const dd = h.mode === "cool" ? "per_cdd" : "per_hdd";
+  const c = s.cost, priced = !!c, n = Math.max(s.days.length, 1);
   return `
-    <div class="section-title"><span>${esc(s.name)}</span><span class="muted small">${s.kw ? `${fmtNum(s.kw, 1)} kW from the meter` : "kW: learning from the meter"}</span></div>
+    <div class="section-title"><span>${esc(s.name)}</span><span class="muted small">${priced ? `about ${money(c.per_day)} a day` : "learning its cost from the meter"}</span></div>
     <div class="tiles">
       <div class="tile"><span class="tile-label">Now</span><span class="tile-value">${now}</span><span class="tile-sub">${l.current != null ? `${l.current} °F inside` : ""}${l.humidity != null ? ` · ${l.humidity}%` : ""}</span></div>
       <div class="tile"><span class="tile-label">Set to</span><span class="tile-value">${set ?? "–"}${typeof set === "number" ? "°" : ""}</span><span class="tile-sub">${esc((l.mode || "").toLowerCase())}</span></div>
-      <div class="tile"><span class="tile-label">Paid hours</span><span class="tile-value">${hrs(s.paid_min / Math.max(s.days.length, 1))}</span><span class="tile-sub">a day, ${hrs(s.free_min / Math.max(s.days.length, 1))} free</span></div>
-      <div class="tile"><span class="tile-label">Cost</span><span class="tile-value">${s.cost ? money(s.cost.per_month) : "–"}</span><span class="tile-sub">${s.cost ? "a month at this rate" : "once kW is known"}</span></div>
+      <div class="tile"><span class="tile-label">Paid hours</span><span class="tile-value">${priced ? `$${Math.round(c.paid_month)}` : hrs(s.paid_min / n)}</span><span class="tile-sub">${priced ? `a month, ${clock(state.hvac.window.end * 60)}–${clock(state.hvac.window.start * 60)}` : "a day"}</span></div>
+      <div class="tile"><span class="tile-label">Free hours</span><span class="tile-value">${priced ? `$${Math.round(c.free_month)}` : hrs(s.free_min / n)}</span><span class="tile-sub">${priced ? "a month, delivery only" : "a day"}</span></div>
     </div>
     <div class="card">
       <div class="row rec"><span class="status status-${lvl}" aria-hidden="true">${STATUS_ICON[lvl] || "…"}</span>
@@ -91,8 +92,11 @@ function systemHtml(s) {
         <span class="sub">${esc(new Date(m.at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }))}</span></div>
         <span class="sub-value">${m.effect ? `${m.effect.change_pct > 0 ? "+" : ""}${fmtNum(m.effect.change_pct, 1)}% run time` : `<span class="muted">measuring…</span>`}</span>
         <button class="pill small" data-hvac-del="${m.id}" aria-label="Remove this entry">✕</button></div>`).join("")}</div>` : ""}
-    ${s.days.length ? `<div class="table-wrap"><table class="viz-table"><thead><tr><th>Day</th><th>Outside</th><th>Cool</th><th>Heat</th><th>Paid</th><th>Runs</th><th>Min/°day</th></tr></thead>
+    ${s.days.length ? `<div class="table-wrap"><table class="viz-table"><thead><tr><th>Day</th><th>Outside</th>${priced
+        ? "<th>Paid kWh</th><th>Paid $</th><th>Free kWh</th><th>Free $</th><th>Total</th>"
+        : "<th>Cool</th><th>Heat</th><th>Paid</th>"}<th>Runs</th><th>Min/°day</th></tr></thead>
       <tbody>${s.days.slice().reverse().map((d) => `<tr><td>${esc(shortDay(d.day))}</td><td>${d.tmean_f != null ? `${Math.round(d.tmean_f)}°` : "–"}</td>
-        <td>${hrs(d.cool_min)}</td><td>${hrs(d.heat_min)}</td><td>${d.paid_min ? `<b>${hrs(d.paid_min)}</b>` : "0"}</td>
+        ${priced ? `<td>${fmtNum(d.paid_kwh, 1)}</td><td>${d.paid_usd ? `<b>${money(d.paid_usd)}</b>` : "$0"}</td><td>${fmtNum(d.free_kwh, 1)}</td><td>${money(d.free_usd)}</td><td>${money(d.paid_usd + d.free_usd)}</td>`
+          : `<td>${hrs(d.cool_min)}</td><td>${hrs(d.heat_min)}</td><td>${d.paid_min ? `<b>${hrs(d.paid_min)}</b>` : "0"}</td>`}
         <td>${d.cycles}${d.short ? ` <span class="muted">(${d.short} short)</span>` : ""}</td><td>${d[dd] ?? "–"}</td></tr>`).join("")}</tbody></table></div>` : ""}`;
 }

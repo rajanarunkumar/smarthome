@@ -327,11 +327,20 @@ def build_hvac(store: HvacStore, thermostats: list[dict], tariff: dict, tmean: d
         free_min = sum(r["free_min"] for r in shown)
         paid_min = sum(r["paid_min"] for r in shown)
         k = kw.get(dev)
+        prices = _prices(tariff, fees) if priced else None
         cost = None
-        if k and priced:
-            free_usd = free_min / 60 * k * night_c * fees / 100
-            paid_usd = paid_min / 60 * k * (energy_c + delivery_c) * fees / 100
-            cost = {"free": round(free_usd, 2), "paid": round(paid_usd, 2), "per_month": round((free_usd + paid_usd) / n * 30, 2)}
+        if k:
+            for r in shown:
+                r["free_kwh"] = round(r["free_min"] / 60 * k, 1)
+                r["paid_kwh"] = round(r["paid_min"] / 60 * k, 1)
+                if prices:
+                    r["free_usd"] = round(r["free_kwh"] * prices["free"] / 100, 2)
+                    r["paid_usd"] = round(r["paid_kwh"] * prices["paid"] / 100, 2)
+            if prices:
+                free_usd, paid_usd = sum(r["free_usd"] for r in shown), sum(r["paid_usd"] for r in shown)
+                cost = {"free": round(free_usd, 2), "paid": round(paid_usd, 2),
+                        "free_month": round(free_usd / n * 30, 2), "paid_month": round(paid_usd / n * 30, 2),
+                        "per_month": round((free_usd + paid_usd) / n * 30, 2), "per_day": round((free_usd + paid_usd) / n, 2)}
         key = "per_cdd" if health["mode"] == "cool" else "per_hdd"
         log = [{**f, "label": ACTIONS.get(f["action"], (f["action"], f["action"]))[1], "effect": fix_effect(rows, f, key)}
                for f in mine]
@@ -342,13 +351,14 @@ def build_hvac(store: HvacStore, thermostats: list[dict], tariff: dict, tmean: d
                         "days": shown, "free_min": round(free_min), "paid_min": round(paid_min), "cost": cost,
                         "lead_min_day": round(lead / n), "trail_min_day": round(trail / n), "maintenance": log,
                         "runs_week": len([r for r in dev_runs if r["start"] >= now - timedelta(days=7)])})
-        recs += _tou_recs(names[dev], health["mode"], shown, lead / n, trail / n, k, tariff, priced, window, fees)
+        recs += _tou_recs(names[dev], health["mode"], shown, lead / n, trail / n, k, _prices(tariff, fees) if priced else None, window)
     fight = fighting([r for r in run_list if r["start"].date().isoformat() >= since])
     if fight >= 10:
         recs.insert(0, {"level": "serious", "title": f"Heating and cooling ran at the same time for {fight:.0f} minutes",
                         "text": "Two thermostats worked against each other. Put both on the same mode, or widen the gap between "
                                 "one zone's heat setting and the other's cool setting to at least 4 °F."})
     return {"window": {"start": window[0], "end": window[1]}, "systems": systems, "recommendations": recs, "priced": priced,
+            "prices": _prices(tariff, fees) if priced else None,
             "samples": len(samples), "first_sample": samples[0]["t"] if samples else None,
             "actions": [{"action": a, "label": v[1]} for a, v in ACTIONS.items()]}
 
@@ -370,41 +380,52 @@ def _h(hour: int) -> str:
     return f"{(hour % 12) or 12} {'AM' if hour % 24 < 12 else 'PM'}"
 
 
-def _tou_recs(name: str, mode: str, rows: list[dict], lead: float, trail: float, k: float | None, tariff: dict,
-              priced: bool, window: tuple[int, int], fees: float) -> list[dict]:
-    out = []
-    if not rows:
-        return out
-    n = len(rows)
-    free = sum(r["free_min"] for r in rows)
-    paid = sum(r["paid_min"] for r in rows)
-    if free + paid == 0:
-        return out
+def _prices(tariff: dict, fees: float) -> dict:
+    """Cents per kWh as billed, fees included: paid hours pay energy + delivery, free hours delivery only."""
     energy_c, delivery_c = tariff.get("energy_cents") or 0, tariff.get("delivery_cents") or 0
     night_c = tariff.get("night_delivery_cents", delivery_c) or 0
-    rate = f" at {k:.1f} kW" if k else ""
+    return {"paid": round((energy_c + delivery_c) * fees, 2), "free": round(night_c * fees, 2)}
 
-    def money(minutes: float, cents: float, lead: str) -> str:
-        return f" {lead} ${minutes / 60 * k * cents * fees / 100 * 30:.0f} a month." if k and priced else ""
-    out.append({"level": "good" if paid <= free else "warning",
-                "title": f"{name}: {paid / (free + paid):.0%} of run time is in paid hours",
-                "text": f"{paid / n / 60:.1f} h a day paid, {free / n / 60:.1f} h a day free{rate}."
-                        + money(paid / n, energy_c + delivery_c, "Paid hours cost about")
-                        + ("" if k else " The kW comes from the meter once a few runs line up with it.")})
+
+def _tou_recs(name: str, mode: str, rows: list[dict], lead: float, trail: float, k: float | None,
+              prices: dict | None, window: tuple[int, int]) -> list[dict]:
+    """Advice in dollars a month once the system's kW is known; in hours until then."""
+    if not rows:
+        return []
+    n = len(rows)
+    free = sum(r["free_min"] for r in rows) / n
+    paid = sum(r["paid_min"] for r in rows) / n
+    if free + paid == 0:
+        return []
+    free_span, paid_span = f"{_h(window[0])}–{_h(window[1])}", f"{_h(window[1])}–{_h(window[0])}"
+    if not (k and prices):
+        return [{"level": "good" if paid <= free else "warning",
+                 "title": f"{name}: {paid / 60:.1f} h a day in paid hours, {free / 60:.1f} h free",
+                 "text": "Dollar amounts appear once the hub learns from the meter how much this system draws "
+                         "(it needs a few runs that line up with the meter's 15-minute readings)."}]
+
+    def usd_month(minutes: float, cents: float) -> float:
+        return minutes / 60 * k * cents / 100 * 30
+
+    out = []
+    paid_usd, free_usd = usd_month(paid, prices["paid"]), usd_month(free, prices["free"])
+    out.append({"level": "good" if paid_usd <= free_usd else "warning",
+                "title": f"{name}: ${paid_usd + free_usd:.0f} a month, ${paid_usd:.0f} of it in paid hours",
+                "text": f"Paid hours ({paid_span}): ${paid_usd:.0f} a month, {paid / 60 * k:.1f} kWh a day at {prices['paid']:.1f}¢ "
+                        f"(energy, delivery and fees). Free hours ({free_span}): ${free_usd:.0f} a month, "
+                        f"{free / 60 * k:.1f} kWh a day at {prices['free']:.1f}¢ for delivery."})
+    saving = prices["paid"] - prices["free"]
     if mode == "cool" and lead >= 20:
         out.append({"level": "warning",
-                    "title": f"{name}: cooling runs {lead:.0f} min a day in the 4 hours before {_h(window[0])}",
-                    "text": f"Raise the cooling setting 2–3 °F from {_h((window[0] - 4) % 24)} and bring it back down at {_h(window[0])}, "
-                            "when energy is free. The house cools back in the free hours."
-                            + money(lead, energy_c + delivery_c - night_c, "Moving them saves up to")})
+                    "title": f"{name}: cooling from {_h((window[0] - 4) % 24)} to {_h(window[0])} costs ${usd_month(lead, prices['paid']):.0f} a month",
+                    "text": f"Raise the cooling setting 2–3 °F from {_h((window[0] - 4) % 24)} and bring it back down at {_h(window[0])}. "
+                            f"The same cooling after {_h(window[0])} costs only delivery: up to ${usd_month(lead, saving):.0f} a month saved."})
     if mode == "heat" and trail >= 20:
         out.append({"level": "warning",
-                    "title": f"{name}: heating runs {trail:.0f} min a day in the 4 hours after {_h(window[1])}",
-                    "text": f"Warm the house to its morning temperature before {_h(window[1])} (free energy), and set heat "
-                            f"2 °F lower from {_h(window[1])} to 8 AM."
-                            + money(trail, energy_c + delivery_c - night_c, "Moving them saves up to")})
-    if mode == "cool" and free and priced and k:
-        out.append({"level": "good", "title": f"{name}: night cooling still costs delivery",
-                    "text": f"{free / n / 60:.1f} h a night × {k:.1f} kW × {night_c:.1f}¢ delivery."
-                            + money(free / n, night_c, "About") + " A degree warmer at night trims it."})
+                    "title": f"{name}: heating from {_h(window[1])} to {_h(window[1] + 4)} costs ${usd_month(trail, prices['paid']):.0f} a month",
+                    "text": f"Warm the house to its morning temperature before {_h(window[1])}, and set heat 2 °F lower from "
+                            f"{_h(window[1])} to 8 AM. Up to ${usd_month(trail, saving):.0f} a month saved."})
+    if mode == "cool" and free_usd >= 1:
+        out.append({"level": "good", "title": f"{name}: night cooling still costs ${free_usd:.0f} a month in delivery",
+                    "text": "Energy is free at night but Oncor delivery isn't. A degree warmer at night trims it."})
     return out

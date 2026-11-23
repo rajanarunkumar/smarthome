@@ -103,8 +103,11 @@ def test_build_prices_paid_hours_and_late_afternoon():
     out = build_hvac(store, [], TARIFF, tmean, {"lennox:1": 3.0}, START + timedelta(days=3), days=7)
     s = out["systems"][0]
     assert s["free_min"] == 0 and s["paid_min"] == 3 * 160
-    assert s["cost"]["paid"] == round(3 * 160 / 60 * 3.0 * (22.8 + 7.1) * 1.04 / 100, 2)
-    assert any("before 8 PM" in r["title"] for r in out["recommendations"])
+    assert abs(s["cost"]["paid"] - 3 * 160 / 60 * 3.0 * (22.8 + 7.1) * 1.04 / 100) < 0.02   # 8 kWh a day at 31.1¢
+    assert s["days"][0]["paid_kwh"] == 8.0 and s["days"][0]["paid_usd"] == round(8 * 31.1 / 100, 2)
+    recs = out["recommendations"]
+    assert recs[0]["title"].startswith("Upstairs: $75 a month")
+    assert any("from 4 PM to 8 PM costs $75" in r["title"] for r in recs)
 
 
 def test_record_from_devices_and_log():
