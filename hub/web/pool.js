@@ -89,7 +89,62 @@ async function renderPool(fetch = true) {
 
 // Electricity view: plan, bills and free/paid hours.
 async function planHtml(signal) {
-  const [tou, bills] = await Promise.all([api("GET", `/api/tou?days=${insightDays}`, undefined, { signal }), api("GET", "/api/bills", undefined, { signal })]);
+  const [tou, bills, rc] = await Promise.all([api("GET", `/api/tou?days=${insightDays}`, undefined, { signal }), api("GET", "/api/bills", undefined, { signal }),
+    api("GET", "/api/reconcile", undefined, { signal }).catch(() => null)]);
+  return reconcileHtml(rc) + planBody(tou, bills);
+}
+
+// Each bill against the meter: where the dollars went by part of the day, and savings against last year.
+const PART_COLOR = { night: "var(--viz-1)", morning: "var(--viz-2)", afternoon: "var(--viz-3)", evening: "var(--status-warning)" };
+const usd0 = (n) => (n == null ? "–" : `${n < 0 ? "−" : ""}$${Math.abs(Math.round(n)).toLocaleString()}`);
+const monthOf = (r) => new Date(`${r.period_end}T12:00`).toLocaleDateString([], { month: "short", year: "numeric" });
+
+function reconcileHtml(rc) {
+  if (!rc || !rc.bills?.length) return "";
+  const bills = rc.bills.slice().reverse();
+  const latest = bills.find((b) => b.complete);
+  const s = rc.savings || {};
+  const partTotal = (b, k) => b.parts.find((x) => x.part === k)?.total;
+  const bar = (b) => {
+    const sum = b.parts.reduce((a, x) => a + x.total, 0) || 1;
+    return `<div class="part-bar" role="img" aria-label="Share of the bill by part of the day">${b.parts.map((x) =>
+      `<i style="width:${(x.total / sum) * 100}%;background:${PART_COLOR[x.part]}" title="${esc(x.label)} ${money(x.total)}"></i>`).join("")}</div>`;
+  };
+  const detail = (b) => `
+    <details class="card pad" ${b === latest ? "open" : ""}>
+      <summary><b>${esc(monthOf(b))}</b> · billed ${money(b.billed_total)}${b.complete
+        ? ` · meter rebuilds ${money(b.rebuilt_total)} (${b.difference >= 0 ? "+" : "−"}${money(Math.abs(b.difference))})`
+        : ` · <span class="muted">meter has ${Math.round(b.coverage * 100)}% of this period${rc.missing_days ? ", fetching the rest" : ""}</span>`}</summary>
+      ${b.complete ? bar(b) : ""}
+      <p class="note">${esc(shortDay(b.period_start))} – ${esc(shortDay(b.period_end))}, ${b.days} days. Meter ${fmtNum(b.meter_kwh)} kWh vs billed ${fmtNum(b.billed_kwh)};
+        free nights ${fmtNum(b.meter_free_kwh)} kWh vs billed ${fmtNum(b.billed_free_kwh)}.</p>
+      <div class="table-wrap"><table class="viz-table"><thead><tr><th>Part of day</th><th>kWh</th><th>Energy</th><th>Delivery</th><th>Fees</th><th>Total</th><th>¢/kWh</th>${b.seasonal ? "<th>Seasonal extra</th>" : ""}</tr></thead>
+        <tbody>${b.parts.map((x) => `<tr><td><i class="viz-swatch" style="background:${PART_COLOR[x.part]}"></i>${esc(x.label)} <span class="muted">${esc(x.hours)}</span></td>
+          <td>${fmtNum(x.kwh)}</td><td>${x.energy ? money(x.energy) : "free"}</td><td>${money(x.delivery)}</td><td>${money(x.fees)}</td><td><b>${money(x.total)}</b></td>
+          <td>${x.cents_per_kwh ?? "–"}</td>${b.seasonal ? `<td>${money(x.seasonal_usd)}</td>` : ""}</tr>`).join("")}
+          <tr><td>Base charge</td><td></td><td></td><td></td><td></td><td>${money(b.base)}</td><td></td>${b.seasonal ? "<td></td>" : ""}</tr>
+          <tr><td><b>Total</b></td><td>${fmtNum(b.meter_kwh)}</td><td>${money(b.energy_total)}</td><td>${money(b.delivery_total)}</td><td>${money(b.fees_total)}</td>
+            <td><b>${money(b.rebuilt_total)}</b></td><td></td>${b.seasonal ? `<td><b>${money(b.seasonal.usd)}</b></td>` : ""}</tr></tbody></table></div>
+      ${b.vs_last_year ? `<p class="note">Against the same period last year, at this bill's prices: <b>${b.vs_last_year.saved >= 0 ? `${money(b.vs_last_year.saved)} saved` : `${money(-b.vs_last_year.saved)} more`}</b>
+        (${b.vs_last_year.kwh_change > 0 ? "+" : ""}${fmtNum(b.vs_last_year.kwh_change)} kWh). Weather differs from year to year, so read hot or cold months with that in mind.</p>` : ""}
+    </details>`;
+  return `
+    <div class="section-title"><span>Where each bill went</span><span class="muted small">your bills × the meter, by part of the day</span></div>
+    <div class="tiles">
+      <div class="tile"><span class="tile-label">Savings goal</span><span class="tile-value">${usd0(rc.target)}</span><span class="tile-sub">a month, against the same month last year</span></div>
+      <div class="tile"><span class="tile-label">Saved so far</span><span class="tile-value">${s.months ? usd0(s.average) : "–"}</span><span class="tile-sub">${s.months ? `a month on average, ${s.months} bill(s), ${usd0(s.total)} in all` : "starts with your next bill, compared with a year earlier"}</span></div>
+      ${latest ? `<div class="tile"><span class="tile-label">Delivery, ${esc(monthOf(latest))}</span><span class="tile-value">${usd0(latest.delivery_total)}</span><span class="tile-sub">${usd0(partTotal(latest, "night"))} of it at night, when energy is free</span></div>
+      <div class="tile"><span class="tile-label">Seasonal extra</span><span class="tile-value">${latest.seasonal ? usd0(latest.seasonal.usd) : "–"}</span><span class="tile-sub">above your mildest month: mostly heating and cooling</span></div>` : ""}
+    </div>
+    ${legend(rc.parts.map((p) => [`${p.label} ${p.hours}`, PART_COLOR[p.part]]))}
+    ${bills.map(detail).join("")}
+    <div class="table-wrap"><table class="viz-table"><thead><tr><th>Bill</th><th>Billed</th><th>Night</th><th>Morning</th><th>Afternoon</th><th>Evening</th><th>Seasonal</th><th>vs last year</th></tr></thead>
+      <tbody>${bills.map((b) => `<tr><td>${esc(monthOf(b))}</td><td><b>${usd0(b.billed_total)}</b></td>${b.complete
+        ? ["night", "morning", "afternoon", "evening"].map((k) => `<td>${usd0(partTotal(b, k))}</td>`).join("") + `<td>${b.seasonal ? usd0(b.seasonal.usd) : "–"}</td>`
+        : `<td colspan="5" class="muted">meter ${Math.round(b.coverage * 100)}%</td>`}<td>${b.vs_last_year ? usd0(b.vs_last_year.saved) : "–"}</td></tr>`).join("")}</tbody></table></div>`;
+}
+
+function planBody(tou, bills) {
   const t = bills.tariff;
   const maxH = tou.hours ? Math.max(...tou.hours.map((h) => h.kwh)) : 1;
   return `

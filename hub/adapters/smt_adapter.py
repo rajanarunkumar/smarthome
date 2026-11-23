@@ -188,6 +188,25 @@ class SmartMeterTexasAdapter(Adapter):
             await asyncio.sleep(1)  # be gentle with Smart Meter Texas
         return sorted(rows.items())
 
+    async def intervals_for(self, days: list[str]) -> list[tuple[str, float]]:
+        """15-minute kWh for the given past days ('YYYY-MM-DD'), one gentle request per day per meter."""
+        await self._ensure()
+        rows: dict[str, float] = {}
+        for iso in days:
+            back = (date.today() - date.fromisoformat(iso)).days
+            if back < 1:
+                continue
+            for meter in self._meters:
+                try:
+                    await meter.get_15min(self._client, prevdays=back)
+                except SmartMeterTexasAPIError as exc:
+                    log.info("Smart Meter Texas has no 15-minute data for %s: %s", iso, exc)
+                    continue
+                for slot, kwh in parse_intervals(meter.read_15min_consumption):
+                    rows[slot] = rows.get(slot, 0.0) + kwh
+            await asyncio.sleep(1)
+        return sorted(rows.items())
+
     def names(self) -> dict[str, str]:
         return {f"smt:{m.esiid}": "Electricity" for m in self._meters}
 

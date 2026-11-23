@@ -106,6 +106,7 @@ class Hub:
                                           client_factory=lambda cfg: backup_mod.make_client(cfg))
         self._collector: asyncio.Task | None = None
         self._recorder: asyncio.Task | None = None
+        self._meter_filler: asyncio.Task | None = None
         self._warmer: asyncio.Task | None = None
         self._by_brand = {a.brand: a for a in self.adapters}
         self.telemetry = Telemetry(data_dir())
@@ -198,6 +199,37 @@ class Hub:
                 self.telemetry.job("history collector", started, (time.monotonic() - t0) * 1000, False, str(exc), 3 * 3600)
             await asyncio.sleep(3 * 3600)
 
+    async def _meter_backfill_loop(self) -> None:
+        """Fill the meter history back to the oldest imported bill, so every bill can be checked against it.
+        10 days per batch, stored as it goes; after the first catch-up it only fills gaps."""
+        from datetime import date, timedelta
+        from .reconcile import days_needed
+        await asyncio.sleep(90)  # let the first collector pass go first
+        while True:
+            started, t0 = time.time(), time.monotonic()
+            fetched, ok, msg = 0, True, ""
+            try:
+                if self.smt.active:
+                    bills = self.bills.all()
+                    since = date.fromisoformat(min(b["period_start"] for b in bills)) if bills else date.today()
+                    need = days_needed(bills, self.energy.interval_days(since - timedelta(days=1)))
+                    tried: set[str] = set()
+                    while need:
+                        batch = [d for d in need if d not in tried][:10]
+                        if not batch:
+                            break
+                        tried.update(batch)
+                        rows = await self.smt.intervals_for(batch)
+                        self.energy.put_intervals(rows)
+                        fetched += len(batch)
+                        need = days_needed(bills, self.energy.interval_days(since - timedelta(days=1)))
+                    msg = f"{fetched} day(s) fetched, {len(need)} still missing"
+            except Exception as exc:  # noqa: BLE001
+                ok, msg = False, str(exc)
+                log.warning("Meter backfill: %s", exc)
+            self.telemetry.job("meter backfill for bills", started, (time.monotonic() - t0) * 1000, ok, msg, 6 * 3600)
+            await asyncio.sleep(6 * 3600)
+
     async def _record_loop(self) -> None:
         """Every 2 minutes, note which devices are running, for the energy analytics."""
         from datetime import datetime
@@ -264,6 +296,7 @@ class Hub:
         self.irrigation.start()
         self._collector = asyncio.create_task(self._collect_loop())
         self._recorder = asyncio.create_task(self._record_loop())
+        self._meter_filler = asyncio.create_task(self._meter_backfill_loop())
         self._warmer = asyncio.create_task(self._warm_loop())
         self.telemetry.start()
         logging.getLogger().addHandler(self.telemetry.logs)
@@ -477,7 +510,7 @@ async def lifespan(app: FastAPI):
     hub.irrigation.close()
     hub.flowtests.close()
     hub.backups.close()
-    for task in (hub._collector, hub._recorder, hub._warmer):
+    for task in (hub._collector, hub._recorder, hub._warmer, hub._meter_filler):
         if task:
             task.cancel()
     hub.telemetry.stop()
@@ -1289,6 +1322,7 @@ class TariffIn(BaseModel):
     energy_cents: float | None = Field(None, ge=0, le=100)
     delivery_cents: float | None = Field(None, ge=0, le=100)
     monthly_fee: float | None = Field(None, ge=0, le=200)
+    savings_target: float | None = Field(None, ge=0, le=1000)
 
 
 @app.get("/api/bills")
@@ -1331,6 +1365,18 @@ async def tou(request: Request, days: int = 28):
     since = date.today() - timedelta(days=days)
     intervals = {s: v for s, v in hub.energy.intervals(since).items() if s[:10] < date.today().isoformat()}
     return tou_report(intervals, tariff_of(hub)) or {"empty": True}
+
+
+@app.get("/api/reconcile")
+async def reconcile(request: Request):
+    from datetime import date
+    from .reconcile import reconcile_report
+    hub = hub_of(request)
+    bills = hub.bills.all()
+    if not bills:
+        return {"bills": [], "target": 50.0, "parts": [], "savings": {}, "missing_days": 0}
+    intervals = hub.energy.intervals(date.fromisoformat(min(b["period_start"] for b in bills)))
+    return reconcile_report(bills, intervals, tariff_of(hub).get("savings_target") or 50.0)
 
 
 @app.get("/api/pool")
