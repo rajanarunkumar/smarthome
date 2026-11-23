@@ -20,13 +20,27 @@ const HUB_NAMED = new Set(["govee", "lg", "thinq", "dyson", "ecovacs", "pentair"
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-async function api(method, path, body) {
-  const res = await fetch(path, {
-    method,
-    headers: { "Content-Type": "application/json" },
-    credentials: "same-origin",
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+// Every request has a time limit, so a slow brand can never leave a button or tab stuck.
+// `signal` lets a tab switch cancel the previous tab's reads.
+async function api(method, path, body, { timeout = method === "GET" ? 12000 : 20000, signal } = {}) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeout);
+  const onAbort = () => ctl.abort();
+  signal?.addEventListener("abort", onAbort, { once: true });
+  let res;
+  try {
+    res = await fetch(path, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: ctl.signal,
+    });
+  } catch (err) {
+    if (signal?.aborted) { const e = new Error("Cancelled"); e.name = "AbortError"; throw e; }
+    if (ctl.signal.aborted) throw new Error("The hub took too long to answer. Try again.");
+    throw new Error("Can't reach the hub. Check Wi‑Fi or Tailscale.");
+  } finally { clearTimeout(timer); signal?.removeEventListener("abort", onAbort); }
   const data = res.headers.get("content-type")?.includes("json") ? await res.json() : null;
   // Only the hub's own "Sign in required" means you're signed out. A brand saying 401 (Rain Bird, Ring or Nest
   // rejecting a password or code) is shown as an error instead.
@@ -59,8 +73,8 @@ function setSync(text) { $("#sync").textContent = text; }
 // ---------- state ----------
 const state = { tab: "rooms", devices: [], rooms: [], scenes: [], schedules: [], errors: [], hue: null, status: null, signedIn: false, me: null, passkeys: [] };
 
-async function loadDevices() {
-  const data = await api("GET", "/api/devices");
+async function loadDevices({ fresh = false, signal } = {}) {
+  const data = await api("GET", "/api/devices" + (fresh ? "?fresh=1" : ""), undefined, { signal, timeout: fresh ? 30000 : 12000 });
   state.devices = data.devices;
   state.rooms = data.rooms;
   state.errors = data.errors;
@@ -71,38 +85,89 @@ async function loadDevices() {
 document.querySelectorAll(".tabs button").forEach((btn) =>
   btn.addEventListener("click", () => switchTab(btn.dataset.tab)));
 
+const TITLES = { rooms: "Home", scenes: "Scenes", schedules: "Schedules", insights: "Insights", settings: "Settings", admin: "Admin" };
+let tabAbort = new AbortController();
+let renderSeq = 0;
+let shown = { tab: null, html: null };
+
 function switchTab(tab) {
+  if (tab === state.tab && shown.tab === tab) { window.scrollTo({ top: 0, behavior: "smooth" }); return render(true); }
+  tabAbort.abort();                 // cancel the previous tab's reads
+  tabAbort = new AbortController();
   state.tab = tab;
-  document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
-  $("#title").textContent = { rooms: "Home", scenes: "Scenes", schedules: "Schedules", insights: "Insights", settings: "Settings" }[tab];
+  shown = { tab: null, html: null };
+  document.querySelectorAll(".tabs button").forEach((b) => {
+    const on = b.dataset.tab === tab;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-current", on ? "page" : "false");
+  });
+  $("#title").textContent = TITLES[tab];
+  window.scrollTo(0, 0);
   render(true);
 }
 
-async function render(fetch = false) {
+// Draw only when the HTML actually changed, so a refresh never swaps the element under a finger.
+function setView(html) {
+  if (shown.tab === state.tab && shown.html === html) return;
+  view.innerHTML = html;
+  shown = { tab: state.tab, html };
+}
+const skeleton = (n = 6) => `<div class="skeleton">${'<div class="sk"></div>'.repeat(n)}</div>`;
+
+// Draw the tab from memory at once, then fetch and redraw, but only if the user is still on that tab
+// and no newer render has started (fixes the tab that showed another tab's content, or stayed blank).
+async function render(fetch = false, { fresh = false } = {}) {
+  const seq = ++renderSeq, tab = state.tab, signal = tabAbort.signal;
+  const live = () => seq === renderSeq && tab === state.tab;
   try {
-    if (state.tab === "rooms") { if (fetch || !state.devices.length) await loadDevices(); renderRooms(); }
-    if (state.tab === "scenes") { if (fetch) state.scenes = await api("GET", "/api/scenes"); renderScenes(); }
-    if (state.tab === "schedules") {
-      if (fetch) {
-        if (!state.devices.length) await loadDevices();
-        const data = await api("GET", "/api/schedules");
+    if (tab === "rooms") {
+      state.devices.length ? renderRooms() : setView(skeleton());
+      if (fetch || fresh || !state.devices.length) { await loadDevices({ fresh, signal }); if (live()) renderRooms(); }
+    }
+    if (tab === "scenes") {
+      state.scenes.length ? renderScenes() : setView(skeleton(4));
+      if (fetch || fresh) { const sc = await api("GET", "/api/scenes" + (fresh ? "?fresh=1" : ""), undefined, { signal }); state.scenes = sc; if (live()) renderScenes(); }
+    }
+    if (tab === "schedules") {
+      state.schedules.length ? renderSchedules() : setView(skeleton(4));
+      if (fetch || fresh) {
+        const [data] = await Promise.all([
+          api("GET", "/api/schedules" + (fresh ? "?fresh=1" : ""), undefined, { signal }),
+          state.devices.length ? null : loadDevices({ signal }),
+        ]);
         state.schedules = data.schedules; state.errors = data.errors;
+        if (live()) renderSchedules();
       }
-      renderSchedules();
     }
-    if (state.tab === "insights") await renderInsights(fetch || !state.insights);
-    if (state.tab === "settings") {
-      if (fetch) {
-        state.status = await api("GET", "/api/status");
-        state.hue = state.status.hue;
-        state.passkeys = state.me?.email ? await api("GET", "/api/auth/passkeys") : [];
-        await loadDevices();
+    if (tab === "insights") {
+      if (!state.insights) setView(skeleton(3));
+      await renderInsights(fetch || !state.insights);
+    }
+    if (tab === "settings") {
+      if (!state.status) setView(skeleton(5)); else if (!settingsBusy()) renderSettings();
+      if (fetch || fresh || !state.status) {
+        const [status, passkeys] = await Promise.all([
+          api("GET", "/api/status", undefined, { signal }),
+          state.me?.email ? api("GET", "/api/auth/passkeys", undefined, { signal }) : [],
+          loadDevices({ signal }),
+        ]);
+        state.status = status; state.hue = status.hue; state.passkeys = passkeys;
+        // Don't redraw under someone typing a password or key.
+        if (live() && !settingsBusy()) renderSettings();
       }
-      renderSettings();
     }
+    if (tab === "admin") await renderAdmin({ fetch: true, signal, live });
   } catch (err) {
-    if (state.signedIn) view.innerHTML = `<div class="error">${esc(err.message)}</div>`;
+    if (err.name === "AbortError" || !live()) return;
+    if (!state.signedIn) return;
+    if (view.querySelector(".skeleton") || !view.children.length) { view.innerHTML = `<div class="error">${esc(err.message)}</div>`; shown = { tab: null, html: null }; }
+    else toast(err.message);
   }
+}
+
+function settingsBusy() {
+  if (view.contains(document.activeElement) && document.activeElement.matches("input, select, textarea")) return true;
+  return [...view.querySelectorAll("input[type=password], input[type=email], input[type=text]:not([readonly])")].some((i) => i.value && i.defaultValue !== i.value);
 }
 
 function errorsHtml() {
@@ -171,7 +236,7 @@ function deviceTile(d) {
     ? `<button class="tile-icon" data-toggle="${esc(d.id)}" aria-label="${esc(d.name)}: turn ${active ? "off" : "on"}" aria-pressed="${active}">${deviceIcon(d)}</button>`
     : `<span class="tile-icon">${deviceIcon(d)}</span>`;
   return `
-    <div class="dtile ${active ? "active" : ""} ${d.online ? "" : "offline"} ${unlocked ? "alert" : ""} ${d.color && active ? "tinted" : ""}" ${glow}>
+    <div class="dtile ${active ? "active" : ""} ${d.online ? "" : "offline"} ${unlocked ? "alert" : ""} ${d.color && active ? "tinted" : ""}" data-id="${esc(d.id)}" ${glow}>
       ${iconHtml}
       <button class="tile-body" data-open="${esc(d.id)}">
         <span class="tile-name">${esc(d.name)}</span>
@@ -222,23 +287,42 @@ function renderRooms() {
   for (const { room, devices } of groups) if (devices.length) html += section(room.name, devices, room.id);
   if (unassigned.length) html += section("No room yet", unassigned, null) + `<p class="note">Tap a device to rename it or put it in a room.</p>`;
   if (!state.devices.length) html = `<p class="empty">Looking for devices… Kasa, Sonos and Govee appear on their own; pair the Hue Bridge and LG TV in Settings.</p>`;
-  view.innerHTML = html + errorsHtml();
+  setView(html + errorsHtml());
 }
+
+// Redraw one tile (and the counts) in place, instead of the whole page.
+function patchTile(d) {
+  const tile = view.querySelector(`.dtile[data-id="${CSS.escape(d.id)}"]`);
+  if (!tile) return renderRooms();
+  const tmp = document.createElement("div");
+  tmp.innerHTML = deviceTile(d).trim();
+  tile.replaceWith(tmp.firstElementChild);
+  const summary = view.querySelector(".summary");
+  if (summary) summary.textContent = homeSummary();
+  shown = { tab: null, html: null };  // the page no longer matches the last full draw
+}
+function setDeviceOn(d, on) { if (d.kind === "speaker") d.playing = on; else d.on = on; }
+const pendingToggle = new Map();
 
 view.addEventListener("click", async (e) => {
   const btn = e.target.closest("[data-toggle]");
   if (!btn) return;
   const d = state.devices.find((x) => x.id === btn.dataset.toggle);
   if (!d) return;
+  // Optimistic: flip now, send, and put it back only if the hub says no. Rapid taps are fine:
+  // only the latest tap's answer counts.
   const turnOn = !isActive(d);
-  const tile = btn.closest(".dtile");
-  tile.classList.toggle("active", turnOn);  // feel instant; corrected below if it fails
-  btn.disabled = true;
+  const was = !turnOn;
+  setDeviceOn(d, turnOn);
+  patchTile(d);
+  const tap = (pendingToggle.get(d.id) || 0) + 1;
+  pendingToggle.set(d.id, tap);
   try {
     await api("POST", `/api/devices/${encodeURIComponent(d.id)}/state`, { on: turnOn });
-    if (d.kind === "speaker") d.playing = turnOn; else d.on = turnOn;
-  } catch (err) { toast(err.message); }
-  renderRooms();
+  } catch (err) {
+    if (pendingToggle.get(d.id) === tap) { setDeviceOn(d, was); if (state.tab === "rooms") patchTile(d); }
+    toast(`${d.name}: ${err.message}`);
+  }
 });
 
 view.addEventListener("change", async (e) => {
@@ -272,13 +356,24 @@ view.addEventListener("click", async (e) => {
   if (open) return openDevice(open.dataset.open);
   const roomBtn = e.target.closest("[data-room-power]");
   if (roomBtn) {
-    roomBtn.disabled = true;
+    const on = roomBtn.dataset.on === "true";
+    const roomId = Number(roomBtn.dataset.roomPower);
+    const targets = state.devices.filter((d) => d.room_id === roomId && d.online && d.kind !== "lock" && d.capabilities.includes("onoff"));
+    const before = targets.map((d) => isActive(d));
+    targets.forEach((d) => setDeviceOn(d, on));
+    renderRooms();
     try {
-      const r = await api("POST", `/api/rooms/${roomBtn.dataset.roomPower}/state`, { on: roomBtn.dataset.on === "true" });
-      if (!r.ok) toast(`${r.failed.length} device(s) didn't respond`);
-      await loadDevices(); renderRooms();
-    } catch (err) { toast(err.message); }
-    roomBtn.disabled = false;
+      const r = await api("POST", `/api/rooms/${roomId}/state`, { on });
+      if (!r.ok) {
+        toast(`${r.failed.length} device(s) didn't respond`);
+        targets.forEach((d, i) => { if (r.failed.includes(d.id)) setDeviceOn(d, before[i]); });
+        if (state.tab === "rooms") renderRooms();
+      }
+    } catch (err) {
+      toast(err.message);
+      targets.forEach((d, i) => setDeviceOn(d, before[i]));
+      if (state.tab === "rooms") renderRooms();
+    }
   }
 });
 
@@ -476,7 +571,7 @@ function sceneHue(name) {
 
 function renderScenes() {
   if (!state.scenes.length) {
-    view.innerHTML = `<p class="empty">No scenes yet. Hue scenes appear here after you pair the Hue Bridge in Settings.</p>`;
+    setView(`<p class="empty">No scenes yet. Hue scenes appear here after you pair the Hue Bridge in Settings.</p>`);
     return;
   }
   const groups = {};
@@ -486,7 +581,7 @@ function renderScenes() {
     state.sceneGroup = names.find((g) => groups[g].some((s) => s.active)) || names[0];
   }
   const scenes = groups[state.sceneGroup];
-  view.innerHTML = `
+  setView(`
     <div class="filter-chips" role="tablist" aria-label="Room">${names.map((g) => `
       <button role="tab" class="fchip ${g === state.sceneGroup ? "on" : ""}" aria-selected="${g === state.sceneGroup}" data-scene-group="${esc(g)}">${esc(g)}${groups[g].some((s) => s.active) ? ' <span class="live-dot" aria-label="a scene is on"></span>' : ""}</button>`).join("")}
     </div>
@@ -498,7 +593,7 @@ function renderScenes() {
           ${s.active ? `<span class="stile-state">On</span>` : ""}
         </button>
         ${s.dynamic ? `<button class="stile-dyn" data-scene="${esc(s.id)}" data-dynamic="1" aria-label="${esc(s.name)}, dynamic: colors slowly shift" title="Dynamic: colors slowly shift">${icon("sparkle")}</button>` : ""}
-      </div>`).join("")}</div>`;
+      </div>`).join("")}</div>`);
 }
 
 view.addEventListener("click", (e) => {
@@ -1142,6 +1237,7 @@ function showLogin() {
   $("#title").textContent = "Home";
   setSync("");
   const faceId = canPasskey() && hint.get();
+  shown = { tab: null, html: null };
   view.innerHTML = `
     <div class="login">
       <p class="note">Sign in to control your home.</p>
@@ -1165,11 +1261,25 @@ async function boot() {
 }
 boot();
 
-// Keep the Rooms view in step with changes made in brand apps, wall switches or voice.
-setInterval(() => {
-  if (document.hidden || sheet.open || state.tab !== "rooms" || !state.signedIn) return;
-  loadDevices().then(renderRooms).catch(() => {});
+// Keep Rooms (and Admin) in step with changes made in brand apps, wall switches or voice.
+// Never overlaps a refresh in flight, never while a sheet is open or the app is in the background.
+let backgroundBusy = false;
+setInterval(async () => {
+  if (backgroundBusy || document.hidden || sheet.open || !state.signedIn || !["rooms", "admin"].includes(state.tab)) return;
+  if (typeof touching !== "undefined" && touching) return;  // never redraw under a finger
+  backgroundBusy = true;
+  try { await render(true); } finally { backgroundBusy = false; }
 }, 5000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden && state.signedIn) render(true); });
+
+// Header refresh: go back to the devices themselves, skipping the hub's cache.
+$("#refresh").addEventListener("click", async (e) => {
+  const btn = e.currentTarget;
+  if (btn.classList.contains("spin")) return;
+  btn.classList.add("spin");
+  try { await render(true, { fresh: true }); setSync("Refreshed " + new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })); }
+  finally { btn.classList.remove("spin"); }
+});
 
 
 // ---------- sprinklers: smart programs and zone schedules ----------
@@ -1306,6 +1416,11 @@ async function loadStorage() {
 }
 
 
+// What the user has typed into the backup form, kept in memory (never stored) so a redraw of
+// Settings, e.g. on coming back from the AWS console, doesn't wipe it.
+let backupDraft = {};
+const BACKUP_FIELDS = ["bk-bucket", "bk-region", "bk-prefix", "bk-akid", "bk-secret", "bk-photos"];
+
 async function loadBackup() {
   const box = $("#backup-card");
   if (!box) return;
@@ -1345,11 +1460,17 @@ async function loadBackup() {
         <input type="password" id="bk-secret" placeholder="AWS secret access key" autocomplete="off" spellcheck="false"></div>
       <div class="row"><label class="inline"><span>Include zone photos</span><span class="switch"><input type="checkbox" id="bk-photos" checked><span></span></span></label>
         <button class="pill primary" id="bk-connect" style="flex:none">Connect and back up now</button></div>`;
+    for (const id of BACKUP_FIELDS) {
+      const el = $("#" + id);
+      if (id in backupDraft) el[el.type === "checkbox" ? "checked" : "value"] = backupDraft[id];
+      el.addEventListener("input", () => { backupDraft[id] = el.type === "checkbox" ? el.checked : el.value; });
+    }
     $("#bk-connect").addEventListener("click", async (e) => {
       e.target.disabled = true; e.target.textContent = "Backing up…";
       try {
         const r = await api("PUT", "/api/backup", { bucket: $("#bk-bucket").value.trim(), region: $("#bk-region").value.trim(), prefix: $("#bk-prefix").value.trim(),
           access_key_id: $("#bk-akid").value.trim(), secret_access_key: $("#bk-secret").value.trim(), include_photos: $("#bk-photos").checked });
+        backupDraft = {};
         toast(`First backup uploaded (${mb(r.bytes)})`);
         await loadBackup();
         showRecoveryKey();

@@ -17,7 +17,10 @@
 <body>
   <header class="top">
     <h1 id="title">Home</h1>
-    <span id="sync" class="sync" aria-live="polite"></span>
+    <span class="top-right">
+      <span id="sync" class="sync" aria-live="polite"></span>
+      <button id="refresh" class="icon-btn" aria-label="Refresh from the devices"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg></button>
+    </span>
   </header>
 
   <main id="view" class="view"></main>
@@ -28,6 +31,7 @@
     <button data-tab="schedules"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>Schedules</span></button>
     <button data-tab="insights"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V11M10 20V5M16 20v-6M21 20H3"/></svg><span>Insights</span></button>
     <button data-tab="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg><span>Settings</span></button>
+    <button data-tab="admin"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 13h4l2-6 4 12 2-6h6"/></svg><span>Admin</span></button>
   </nav>
 
   <dialog id="sheet" class="sheet"></dialog>
@@ -35,5 +39,8 @@
 
   <script src="app.js"></script>
   <script src="insights.js"></script>
+  <script src="pool.js"></script>
+  <script src="hvac.js"></script>
+  <script src="admin.js"></script>
 </body>
 </html>

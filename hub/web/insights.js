@@ -129,6 +129,8 @@ function insightControls() {
       <span class="segmented" role="tablist">
         <button class="${insightView === "water" ? "on" : ""}" data-view="water" role="tab">Water</button>
         <button class="${insightView === "energy" ? "on" : ""}" data-view="energy" role="tab">Electricity</button>
+        <button class="${insightView === "pool" ? "on" : ""}" data-view="pool" role="tab">Pool</button>
+        <button class="${insightView === "hvac" ? "on" : ""}" data-view="hvac" role="tab">HVAC</button>
       </span>
       ${[14, 21, 28].map((n) => `<button class="pill ${n === insightDays ? "primary" : ""}" data-days="${n}" aria-label="Last ${n} days">${n / 7} wk</button>`).join("")}
     </div>
@@ -156,7 +158,10 @@ function bindInsightControls() {
 
 async function renderInsights(fetch = true) {
   if (insightView === "energy") return renderEnergy(fetch);
+  if (insightView === "pool") return renderPool(fetch);
+  if (insightView === "hvac") return renderHvac(fetch);
   if (fetch) state.insights = await api("GET", `/api/insights?days=${insightDays}`);
+  if (state.tab !== "insights") return;  // the user moved on while this loaded
   const ins = state.insights;
   const css = getComputedStyle(document.documentElement);
   const color = (n) => css.getPropertyValue(`--viz-${n}`).trim();
@@ -378,6 +383,7 @@ function fmtSlot(start, end) {
 
 async function renderEnergy(fetch = true) {
   if (fetch) state.energy = await api("GET", `/api/energy?days=${insightDays}`);
+  if (state.tab !== "insights") return;
   const en = state.energy;
   const css = getComputedStyle(document.documentElement);
   const C = { devices: css.getPropertyValue("--viz-1").trim(), hvac: css.getPropertyValue("--viz-2").trim(), other: css.getPropertyValue("--viz-3").trim() };
@@ -397,7 +403,11 @@ async function renderEnergy(fetch = true) {
     <div id="en-body"></div>`}`;
   bindInsightControls();
   const body = $("#en-body");
-  if (!body) return;
+  if (!body) {
+    if (en.has_energy === false) planHtml().then((html) => { if (state.tab === "insights" && insightView === "energy") view.insertAdjacentHTML("beforeend", html); }).catch(() => {});
+    return;
+  }
+  planHtml().then((html) => { if (body.isConnected) body.insertAdjacentHTML("afterbegin", html); }).catch((err) => toast(err.message));
   const temp = (d) => { const r = en.series.find((x) => x.day === d); return r && r.tmean_f != null ? ` · ${Math.round(r.tmean_f)}°F` : ""; };
   if (insightTable) {
     body.innerHTML = `<div class="table-wrap"><table class="viz-table"><thead><tr><th>Day</th><th>Total (kWh)</th><th>Tracked devices</th><th>Heating and cooling (est.)</th><th>Everything else</th><th>Mean temp (°F)</th></tr></thead>

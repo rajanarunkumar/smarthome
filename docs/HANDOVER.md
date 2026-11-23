@@ -20,6 +20,38 @@ deliberately **not** in this repo; they live only in `~/.smarthome/` on the MacB
 
 ## Open items, in order
 
+0c. **Done (2026-11-22): bills reconciled with the meter (`hub/reconcile.py`, Electricity → Where each bill went).** A background job (`_meter_backfill_loop`) fills Smart Meter Texas 15-min data back to the oldest bill (SMT keeps ~2 years). Each bill's own kWh and charges are split into night/morning/afternoon/evening in the meter's proportions (night = billed free kWh), so the parts add to the bill to the cent; the raw-meter price (3–6% off: meter shows 3–5% fewer free kWh than TXU bills, and read dates aren't at midnight) is kept as the check. Seasonal extra = kWh/day above the mildest month per part. Savings = last year's same period at this bill's prices minus this bill; goal `tariff.savings_target` (default $50).
+0b. **Done (2026-11-22): HVAC run time and health (`hub/hvac.py`, Insights → HVAC).** Every 2 min the recorder stores each Nest/Lennox thermostat's state in `hvac_samples`. Runs are split into free/paid minutes; kW per thermostat comes from `energy.device_power` against the meter; prices from the bills. Health = minutes of cooling per cooling degree-day (heating per HDD) vs the system's own baseline (best quarter of days, or 3 days after a logged filter/coil/service if lower). ≥1.15 → filter (or coil if the filter was changed in the last 60 days), then service; also flags 2 h+ runs that don't reach the set temperature, short cycling (>30% of runs under 5 min), humid air while cooling, and two thermostats heating and cooling at once. Neither thermostat is connected yet; `lennoxs30api` was missing from `.venv` and is now installed.
+0a. **Done (2026-11-22): pool pump health, time-of-use and bills.**
+   - `hub/pool.py`: the recorder stores the IntelliFlo's flow, W, speed, estimated psi and target every 2 min (`pool_samples`), at the pump's own clock; repeats are skipped.
+     - Health = power at the same target flow vs. a clean baseline (the cleanest day, or the 48 h after a logged backwash/clean if lower). The shape of the rise picks the action: jump → skimmer (a), steady climb → backwash (b), backwash didn't help → clean filter (c), can't hold flow / pinned speed / power swinging → water level (d).
+     - Logged fixes (`pool_maintenance`) get a before/after power comparison.
+     - Also reports programs that run in paid hours, kWh free vs. paid per day, and gallons per kWh at each flow.
+   - `hub/tou.py`: whole-house free (8 PM–4 AM) vs. paid split from the 15-min meter data, the paid hours just before 8 PM, and night delivery cost.
+   - `hub/bills.py`: reads TXU bill PDFs (`python -m hub.bills import ~/Downloads/"TXU Invoices"` or `POST /api/bills/import`) into the `bills` table. The latest bill sets the prices (`tariff_of`); `PUT /api/tariff` overrides. Both bill layouts (plan "12" with the night delivery discount, plan "24" without) add up to the cent.
+   - UI: Insights → Pool (new), and the plan, average day and bills on Insights → Electricity.
+   - **Open:** Pentair's cloud stopped updating at 11:07 on 2026-11-22 (device clock `s1`); the Pool view flags readings older than 10 min. Check whether the pump only reports while the Pentair app is open. Health needs about a day of fresh readings before it shows a baseline.
+
+0. **Done (2026-11-22): UI speed + Admin telemetry** ([plan](PLAN-UI-SPEED-TELEMETRY.md)).
+   - **Device list:** `/api/devices` went from 19 s to about 10 ms (cached).
+     - New `hub/cache.py` is a Caffeine-style L1 loading cache: refresh-after-write, expire with stale fallback, single flight, LRU, failure backoff, stats.
+     - Device reads are cached per brand: refresh after 10 s, expire after 120 s, 4 s wait per request.
+     - Scenes and schedules are cached for 30 s and expire after 10 min.
+     - A warmer runs every 15 s while the app is in use, every 5 min when idle.
+     - After a change, the hub patches that device in the cache and re-reads the brand 1.5 s later.
+     - `?fresh=1` bypasses the cache.
+   - **Admin tab:**
+     - New `hub/telemetry.py` and `hub/web/admin.js`, reading `GET /api/admin/telemetry`.
+     - Shows process, host, event-loop lag, per-route p50/p95, per-brand timings and errors, caches, background jobs, slow requests and a ring of warning logs.
+     - Manual refresh buttons call `POST /api/admin/refresh/raw` and `POST /api/admin/cache/refresh`. They need a signed-in person; the script token can only read.
+   - **Front end:**
+     - Stale renders are discarded, so a tab can no longer show another tab's content.
+     - The previous tab's reads are cancelled on switch; every request has a timeout.
+     - Toggles flip the tile in place.
+     - No sticky `:hover` on touch.
+     - Header refresh button (fresh read); skeletons while loading.
+   - **Known: Smart Meter Texas's first read is slow** (40 s or more, and it holds its lock during the 28-day backfill). The cache shows it as "slow to answer" instead of blocking. A possible fix in `smt_adapter` is to not hold `_lock` for `devices()` while `intervals()` runs.
+
 1. ~~Google sign-in~~ **Done:** works on the iPhone.
    - The fix was saving the OAuth client's *Authorized redirect URIs* (origin + `/`), which had been left empty.
    - If it breaks again: `/api/auth/google/start` shows the exact `redirect_uri` the hub sends.
