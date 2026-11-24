@@ -323,6 +323,57 @@ def always_on_watts(intervals: dict[str, float]) -> float | None:
     return round(statistics.median(lows)) if len(lows) >= 3 else None
 
 
+QUIET_HOURS = (12, 16)      # weekday afternoons: nobody home cooking, washing or watching TV
+QUIET_MIN_SLOTS = 40        # 10 hours of readings
+
+
+MILD_F = (58, 68)           # daily mean temperatures when heating and cooling barely run
+
+
+def quiet_baseline(intervals: dict[str, float], activity: list[dict], known_watts: dict[str, float] | None = None,
+                   tmean: dict[str, float] | None = None) -> dict | None:
+    """The always-on load from weekday 12-4 PM readings, when the house is quiet. Fridges and freezers cycle, so the
+    median reading there is their average draw (the overnight minimum catches them all off and reads low).
+    Readings where the AC/furnace or a big tracked device ran are left out; known small loads (bulbs, devices that
+    report power) are subtracted. Days before any thermostat was recorded can't rule out the AC, so from those only
+    mild days count; failing that, the lower quartile is taken instead of the median."""
+    tmean = tmean or {}
+    known_watts = known_watts or {}
+    by_slot = activity_by_slot(activity)
+    kinds = {a["device_id"]: a["kind"] for a in activity}
+    starts = [a["start"][:10] for a in activity if a["kind"] == "thermostat"]
+    hvac_since = min(starts) if starts else None
+    clean: list[float] = []
+    uncertain: list[float] = []
+    days: set[str] = set()
+    for slot, kwh in intervals.items():
+        t = datetime.fromisoformat(slot)
+        if t.weekday() >= 5 or not QUIET_HOURS[0] <= t.hour < QUIET_HOURS[1]:
+            continue
+        shares = by_slot.get(slot, {})
+        if any(kinds.get(d) == "thermostat" or (kinds.get(d) in MEASURABLE_KINDS and d not in known_watts) for d in shares):
+            continue
+        watts = kwh * 4000 - sum(share * known_watts[d] for d, share in shares.items() if d in known_watts)
+        day = slot[:10]
+        recorded = bool(hvac_since and day >= hvac_since)
+        mild = day in tmean and MILD_F[0] <= tmean[day] <= MILD_F[1]
+        if recorded or mild:
+            clean.append(watts)
+        else:
+            uncertain.append(watts)
+        days.add(day)
+    if len(clean) >= QUIET_MIN_SLOTS:
+        return {"watts": round(statistics.median(clean)), "slots": len(clean),
+                "days": len({d for d in days if (hvac_since and d >= hvac_since) or MILD_F[0] <= tmean.get(d, -99) <= MILD_F[1]}),
+                "method": "median of weekday 12–4 PM readings with the heating and cooling off (recorded idle, or a mild day)"}
+    values = sorted(clean + uncertain)
+    if len(values) < QUIET_MIN_SLOTS:
+        return None
+    return {"watts": round(values[len(values) // 4]), "slots": len(values), "days": len(days),
+            "method": "lower quarter of weekday 12–4 PM readings (the AC wasn't recorded on most of these days, so "
+                      "higher readings may include it)"}
+
+
 def spikes(intervals: dict[str, float], activity: list[dict], names: dict[str, str], limit: int = 8) -> list[dict]:
     """Runs of 15-minute slots far above normal, with what was running."""
     if len(intervals) < 96:
@@ -398,6 +449,8 @@ def build_energy(store: EnergyStore, tmean: dict[str, float], days: int = 28, to
     total = sum(r["total_kwh"] for r in series)
     hvac_total = sum(r["hvac_kwh"] or 0 for r in series)
     standby = always_on_watts(intervals)
+    baseline = quiet_baseline(intervals, activity, known, tmean)
+
     def status(d: str) -> str:
         if d in power:
             return power[d]["source"]
@@ -421,11 +474,28 @@ def build_energy(store: EnergyStore, tmean: dict[str, float], days: int = 28, to
     elif series:
         recs.append({"level": "warning", "title": "HVAC can't be separated yet",
                      "text": "It needs more days with different temperatures, or the Lennox thermostat connected."})
-    if standby:
-        recs.append({"level": "warning" if standby > 400 else "good",
-                     "title": f"Always-on load: about {standby:,} W",
-                     "text": f"That's {standby * 24 * 365 / 1000:,.0f} kWh a year before anything is switched on: "
-                             "fridges, network gear, the pool pump if it runs at night, standby electronics."})
+    always = baseline["watts"] if baseline else standby
+    if always:
+        text = (f"{always * 8.76:,.0f} kWh a year before anything is switched on"
+                + (f", from the {baseline['method']} ({baseline['slots']} readings over {baseline['days']} days)" if baseline else
+                   ", from the overnight minimum (the quiet weekday-afternoon figure needs a few weeks of readings)")
+                + (f". The overnight minimum is {standby:,} W, lower because fridges and freezers are often all off at that moment"
+                   if baseline and standby else "") + ".")
+        fixed_w = sum(f["kwh_year_used"] for f in fixed) * 1000 / 8760
+        if fixed:
+            if fixed_w > always * 1.1:
+                text += (f" Your listed fridges, freezers and coolers add up to {fixed_w:,.0f} W, more than the whole always-on "
+                         "load, so their figures are too high: the real total is at most about "
+                         f"{always:,.0f} W. Use their EnergyGuide label figures.")
+            elif fixed_w >= always * 0.9:
+                text += (f" Your listed fridges, freezers and coolers ({fixed_w:,.0f} W) account for nearly all of it, which "
+                         "leaves almost nothing for network gear and standby electronics: their figures are probably a little high.")
+            else:
+                text += (f" Your listed fridges, freezers and coolers account for about {fixed_w:,.0f} W of it; the other "
+                         f"{always - fixed_w:,.0f} W is network gear, standby electronics, a water heater keeping warm, and the like.")
+        else:
+            text += " Fridges, freezers, network gear and standby electronics make it up; list the fridges and freezers below to split it."
+        recs.append({"level": "warning" if always > 400 else "good", "title": f"Always-on load: about {always:,} W", "text": text})
     top = [x for x in devices if x["kwh"]][:3]
     if top and total:
         recs.append({"level": "good", "title": "Biggest tracked users",
@@ -465,6 +535,7 @@ def build_energy(store: EnergyStore, tmean: dict[str, float], days: int = 28, to
                              "say what's connected, so the hub doesn't estimate them. If one runs a big load, such as an "
                              "incandescent chandelier on a dimmer, enter its watts in the device list."})
     return {"days": days, "series": series, "devices": devices, "spikes": found_spikes, "hvac": model, "fixed_loads": fixed,
+            "baseline": baseline,
             "appliance_types": {k: {"label": v[0], "kwh_year": v[1]} for k, v in APPLIANCE_TYPES.items()},
             "standby_w": standby, "recommendations": recs,
             "summary": {"total_kwh": round(total), "hvac_kwh": round(hvac_total) if model else None,

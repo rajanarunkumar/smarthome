@@ -394,7 +394,7 @@ async function renderEnergy(fetch = true) {
     <div class="tiles">
       <div class="tile"><span class="tile-label">Electricity</span><span class="tile-value">${compact(s.total_kwh)}</span><span class="tile-sub">kWh, ${en.series.length} days</span></div>
       <div class="tile"><span class="tile-label">Heating and cooling</span><span class="tile-value">${s.hvac_kwh == null || !s.total_kwh ? "–" : `${Math.round((s.hvac_kwh / s.total_kwh) * 100)}%`}</span><span class="tile-sub">${s.hvac_kwh == null ? "estimating from weather" : `${compact(s.hvac_kwh)} kWh, estimated`}</span></div>
-      <div class="tile"><span class="tile-label">Always on</span><span class="tile-value">${en.standby_w == null ? "–" : compact(en.standby_w)}</span><span class="tile-sub">watts, overnight minimum</span></div>
+      <div class="tile"><span class="tile-label">Always on</span><span class="tile-value">${en.baseline ? compact(en.baseline.watts) : en.standby_w == null ? "–" : compact(en.standby_w)}</span><span class="tile-sub">${en.baseline ? "watts, weekday 12–4 PM" : "watts, overnight minimum"}</span></div>
       <div class="tile"><span class="tile-label">Highest 15 minutes</span><span class="tile-value">${s.peak_kw == null ? "–" : fmtNum(s.peak_kw, 1)}</span><span class="tile-sub">kW</span></div>
     </div>
     ${en.recommendations.length ? `<div class="section-title"><span>Suggestions</span></div>

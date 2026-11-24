@@ -300,3 +300,70 @@ def test_appliance_routes(tmp_path, monkeypatch):
         assert hub.energy.fixed_loads()[0]["source"] == "label"
         client.delete(f"/api/energy/appliances/{load_id}", headers=token)
         assert hub.energy.fixed_loads() == []
+
+
+def test_quiet_weekday_afternoons_give_the_always_on_load():
+    """300 W of network/standby gear plus two fridges cycling (150 W each, on 40% of the time = 120 W on average):
+    the true always-on load averages 420 W. Weekends add cooking and laundry at midday; the AC runs (and is
+    recorded) on hot weekday afternoons; the pool pump runs 12-2 PM on some days and reports its 1,200 W."""
+    from hub.energy import quiet_baseline
+    import random
+    rng = random.Random(5)
+    s = store()
+    intervals = {}
+    start = date(2026, 10, 26)                                   # four weeks, Monday start
+    for n in range(28):
+        d = start + timedelta(days=n)
+        hot = n % 3 == 0
+        for slot in range(96):
+            t = datetime.combine(d, dtime()) + timedelta(minutes=15 * slot)
+            w = 300 + sum(150 for _ in range(2) if rng.random() < 0.4)
+            if d.weekday() >= 5 and 11 <= t.hour < 15:
+                w += 2000                                        # weekend cooking, laundry
+            if hot and d.weekday() < 5 and 13 <= t.hour < 16:
+                w += 3500                                        # AC
+            if n % 4 == 0 and 12 <= t.hour < 14:
+                w += 1200                                        # pool pump
+            intervals[t.strftime("%Y-%m-%dT%H:%M")] = w / 4000
+        if hot and d.weekday() < 5:
+            s.db.execute("INSERT INTO device_activity (device_id, name, kind, start, end) VALUES (?,?,?,?,?)",
+                         ("lennox:1", "Thermostat", "thermostat", f"{d}T13:00", f"{d}T16:00"))
+        if n % 4 == 0:
+            s.db.execute("INSERT INTO device_activity (device_id, name, kind, start, end) VALUES (?,?,?,?,?)",
+                         ("pentair:p1", "Pool pump", "pool", f"{d}T12:00", f"{d}T14:00"))
+    s.db.execute("INSERT INTO device_activity (device_id, name, kind, start, end) VALUES (?,?,?,?,?)",
+                 ("lennox:1", "Thermostat", "thermostat", f"{start - timedelta(days=1)}T13:00", f"{start - timedelta(days=1)}T13:30"))
+    s.db.commit()
+    s.put_intervals(intervals.items())
+    activity = s.activity(start - timedelta(days=2))
+    base = quiet_baseline(s.intervals(start), activity, {"pentair:p1": 1200})
+    assert abs(base["watts"] - 420) <= 30 and "idle" in base["method"]
+    assert always_on_watts(s.intervals(start)) <= 330             # the overnight minimum catches the fridges off
+
+    # Listed fridges whose typical figures add up to more than the whole always-on load are called out.
+    for name in ("Freezer", "Fridge", "Cooler 1", "Cooler 2", "Cooler 3", "Cooler 4", "Cooler 5", "Cooler 6"):   # 8 x 61 W
+        s.add_fixed_load(name, "freezer", None)
+    out = build_energy(s, {}, days=28, today=start + timedelta(days=28))
+    rec = next(r for r in out["recommendations"] if r["title"].startswith("Always-on load"))
+    assert out["baseline"]["watts"] == base["watts"] or abs(out["baseline"]["watts"] - 420) <= 30
+    assert "nearly all of it" in rec["text"] and "-" not in rec["text"].split("account")[0][-5:]   # 488 W vs ~450 W
+    for name in ("Cooler 7", "Cooler 8"):
+        s.add_fixed_load(name, "freezer", None)                    # now 610 W listed
+    out = build_energy(s, {}, days=28, today=start + timedelta(days=28))
+    rec = next(r for r in out["recommendations"] if r["title"].startswith("Always-on load"))
+    assert "more than the whole always-on load" in rec["text"]
+
+
+def test_without_thermostat_history_only_mild_days_count():
+    from hub.energy import quiet_baseline
+    intervals, tmean = {}, {}
+    start = date(2026, 10, 26)
+    for n in range(28):
+        d = start + timedelta(days=n)
+        tmean[d.isoformat()] = 64 if n % 2 else 88               # every other day hot, AC unrecorded
+        for slot in range(96):
+            t = datetime.combine(d, dtime()) + timedelta(minutes=15 * slot)
+            w = 400 + (3000 if n % 2 == 0 and 12 <= t.hour < 16 else 0)
+            intervals[t.strftime("%Y-%m-%dT%H:%M")] = w / 4000
+    assert quiet_baseline(intervals, [], {}, tmean)["watts"] == 400
+    assert quiet_baseline(intervals, [], {}, {}) is not None    # no weather either: falls back to the lower quarter
