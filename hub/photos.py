@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 MAX_UPLOAD = 15 * 1024 * 1024
 DORMANT_BELOW_F = 60.0
 CLAUDE_MODEL = "claude-opus-5-5"
+PHOTO_MODELS = ("claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5")   # cheapest first; Opus is the default
 
 try:
     from PIL import Image, ImageOps
@@ -104,7 +105,7 @@ ASSESS_SYSTEM = (
 )
 
 
-def assess_with_claude(api_key: str, image_bytes: bytes, context: str) -> dict:
+def assess_with_claude(api_key: str, model: str, image_bytes: bytes, context: str) -> dict:
     """Blocking call to Claude with the photo. Returns the ASSESS_SCHEMA dict plus "model"."""
     import anthropic
 
@@ -112,10 +113,10 @@ def assess_with_claude(api_key: str, image_bytes: bytes, context: str) -> dict:
     data = base64.standard_b64encode(to_jpeg(image_bytes)).decode()
     try:
         response = client.beta.messages.create(
-            model=CLAUDE_MODEL,
+            model=model if model in PHOTO_MODELS else CLAUDE_MODEL,
             max_tokens=16000,
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",  # if a safety classifier declines, Anthropic re-runs it on its recommended model
+            # If a safety classifier declines, Anthropic re-runs it on its recommended model (not offered for Haiku).
+            **({} if "haiku" in model else {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}),
             system=ASSESS_SYSTEM,
             output_config={"effort": "medium", "format": {"type": "json_schema", "schema": ASSESS_SCHEMA}},
             messages=[{"role": "user", "content": [

@@ -39,7 +39,7 @@ from .auth import SESSION_COOKIE, Auth
 from .cache import LoadingCache
 from .telemetry import Telemetry
 from . import backup as backup_mod
-from .chat import GEMINI_MODEL, Chat
+from .chat import GEMINI_MODEL, MODEL_CHOICES, Chat
 from .config import Secrets, data_dir
 from . import weather as weather_api
 from .energy import EnergyStore, build_energy, device_power
@@ -51,7 +51,7 @@ from .history import HistoryStore, align_hourly, build_insights, confirm_with_me
 from .irrigation import SmartPrograms
 from .flowtest import FlowTests
 from .history import minutes_by_hour
-from .photos import PhotoStore, assess_with_claude, zone_advice
+from .photos import PHOTO_MODELS, PhotoStore, assess_with_claude, zone_advice
 from .scheduler import HubScheduler
 from .models import DAYS, Device, DevicePatch, HubError, Schedule, ScheduleIn, StateIn
 
@@ -685,7 +685,8 @@ async def status(request: Request):
         "claude": {"connected": bool(hub.secrets.get("anthropic_api_key"))},
         "chat": {"provider": hub.chat.provider(), "gemini": bool((hub.secrets.get("gemini") or {}).get("api_key")),
                  "model": (hub.secrets.get("gemini") or {}).get("model") or GEMINI_MODEL,
-                 "choice": (hub.secrets.get("chat") or {}).get("provider")},
+                 "choice": (hub.secrets.get("chat") or {}).get("provider"), **hub.chat.choices(),
+                 "photo_model": hub.secrets.get("photo_model") or PHOTO_MODELS[-1]},
         "user": (request.state.user or {}).get("email"),
     }
 
@@ -1197,6 +1198,8 @@ async def lennox_disconnect(request: Request):
 class ChatIn(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
     conversation_id: str | None = Field(None, max_length=40)
+    mode: Literal["auto", "quick", "thorough"] = "auto"
+    model: str | None = Field(None, max_length=60, pattern=r"^(gemini|claude):[a-z0-9.\-]+$")   # this message only
 
 
 class PlanApplyIn(BaseModel):
@@ -1205,7 +1208,7 @@ class PlanApplyIn(BaseModel):
 
 @app.post("/api/chat")
 async def chat_send(request: Request, body: ChatIn):
-    return await hub_of(request).chat.send(body.message, body.conversation_id)
+    return await hub_of(request).chat.send(body.message, body.conversation_id, body.mode, body.model)
 
 
 @app.post("/api/chat/plans/{plan_id}/apply")
@@ -1517,7 +1520,7 @@ async def add_zone_photo(request: Request, zone: int):
     key = hub.secrets.get("anthropic_api_key")
     if key:
         try:
-            ai = await asyncio.to_thread(assess_with_claude, key, body, hub.claude_context(zone))
+            ai = await asyncio.to_thread(assess_with_claude, key, hub.secrets.get("photo_model") or PHOTO_MODELS[-1], body, hub.claude_context(zone))
             hub.photos.set_ai(photo["id"], ai)
             photo = hub.photos.get(photo["id"])
         except HubError as exc:
@@ -1549,7 +1552,7 @@ async def reassess_photo(request: Request, photo_id: int):
     if not key:
         raise HubError(409, "Add an Anthropic API key in Settings → Photo analysis first.")
     photo = hub.photos.get(photo_id)
-    ai = await asyncio.to_thread(assess_with_claude, key, hub.photos.path(photo_id).read_bytes(),
+    ai = await asyncio.to_thread(assess_with_claude, key, hub.secrets.get("photo_model") or PHOTO_MODELS[-1], hub.photos.path(photo_id).read_bytes(),
                                  hub.claude_context(photo["zone"]))
     hub.photos.set_ai(photo_id, ai)
     return hub.photos.get(photo_id)
@@ -1569,6 +1572,9 @@ class ChatSettingsIn(BaseModel):
     provider: Literal["gemini", "claude"] | None = None
     gemini_key: str | None = Field(None, min_length=20, max_length=200, pattern=r"^[A-Za-z0-9_\-]+$")
     model: str | None = Field(None, min_length=3, max_length=60, pattern=r"^[a-z0-9.\-]+$")
+    quick: str | None = Field(None, max_length=60)      # "provider:model" for everyday commands
+    thorough: str | None = Field(None, max_length=60)   # "provider:model" for reviews and questions
+    photo_model: str | None = Field(None, max_length=40)
 
 
 @app.put("/api/settings/chat")
@@ -1582,9 +1588,22 @@ async def set_chat_settings(request: Request, body: ChatSettingsIn):
         gemini["model"] = body.model
     if gemini:
         hub.secrets.set("gemini", gemini)
+    chat = dict(hub.secrets.get("chat") or {})
     if body.provider:
-        hub.secrets.set("chat", {"provider": body.provider})
-    return {"ok": True, "provider": hub.chat.provider()}
+        chat["provider"] = body.provider
+    for mode in ("quick", "thorough"):
+        value = getattr(body, mode)
+        if value:
+            if value not in MODEL_CHOICES:
+                raise HubError(400, f"Unknown model {value}")
+            chat["models"] = {**chat.get("models", {}), mode: value}
+    if chat:
+        hub.secrets.set("chat", chat)
+    if body.photo_model:
+        if body.photo_model not in PHOTO_MODELS:
+            raise HubError(400, f"Unknown model {body.photo_model}")
+        hub.secrets.set("photo_model", body.photo_model)
+    return {"ok": True, "provider": hub.chat.provider(), **hub.chat.choices()}
 
 
 @app.delete("/api/settings/gemini")
@@ -1641,7 +1660,8 @@ STORED_SETTINGS = {
     "rainbird": ("Rain Bird controller address and password, zone names and sizes", "password"),
     "ring": ("Ring sign-in token (not the password)", "key"),
     "gemini": ("Google Gemini API key (Ask Home)", "key"),
-    "chat": ("Ask Home: which model answers", "config"),
+    "chat": ("Ask Home: which models answer", "config"),
+    "photo_model": ("Photo analysis: which Claude model", "config"),
     "lennox": ("Lennox iComfort email and password (or thermostat address)", "password"),
     "nest": ("Nest (Google Device Access) client secret and refresh token", "key"),
     "anthropic_api_key": ("Anthropic API key (photo analysis)", "key"),

@@ -109,7 +109,8 @@ def test_turning_things_off_runs_straight_away():
     assert hub.calls == [("state", "hue:2", {"on": False})]
     assert out["done"] == [{"device_id": "hue:2", "name": "Hue color lamp 2", "state": {"on": False}}]
     req = claude.requests[0]
-    assert req["model"] == "claude-opus-5-5" and req["fallbacks"] == "default" and "thinking" not in req
+    assert req["model"] == "claude-haiku-5-5" and req["output_config"] == {"effort": "low"}   # a plain command: quick model
+    assert "fallbacks" not in req and "thinking" not in req                                    # Haiku has no server-side fallback
     assert req["messages"][0]["content"].startswith("[Now: ")
     listed = claude.requests[1]["messages"][-1]["content"][0]
     assert listed["type"] == "tool_result" and '"Living Room"' in listed["content"] and not listed["is_error"]
@@ -275,7 +276,7 @@ def test_gemini_free_limit_is_explained_and_the_turn_is_dropped():
     assert len(gem.requests[1]["contents"]) == 1 and out["reply"] == "Hi."   # the failed turn wasn't kept
 
 
-def test_switching_provider_starts_a_new_conversation():
+def test_switching_provider_carries_a_recap_over():
     hub = GeminiHub(gemini=True, claude=True)
     gem = ScriptedGemini([[gt.Part(text="Gemini here.")]])
     claude = ScriptedClaude([[text("Claude here.")]])
@@ -283,8 +284,9 @@ def test_switching_provider_starts_a_new_conversation():
     first = asyncio.run(chat.send("hi"))
     hub.secrets = SimpleNamespace(get=lambda k: {"gemini": {"api_key": "AIza-x"}, "chat": {"provider": "claude"}, "anthropic_api_key": "sk"}.get(k))
     second = asyncio.run(chat.send("hi", first["conversation_id"]))
-    assert second["provider"] == "claude" and second["conversation_id"] != first["conversation_id"]
-    assert len(claude.requests[0]["messages"]) == 1
+    assert second["provider"] == "claude" and second["conversation_id"] == first["conversation_id"]
+    [only] = claude.requests[0]["messages"]                      # Gemini's turns aren't sent to Claude...
+    assert "Earlier — you: Gemini here." in only["content"]      # ...but a plain recap is
 
 
 def test_chat_settings_route(tmp_path, monkeypatch):
@@ -299,8 +301,62 @@ def test_chat_settings_route(tmp_path, monkeypatch):
         r = client.put("/api/settings/chat", json={"gemini_key": "AIzaSyTestKey_0123456789abcdef", "provider": "gemini"}, headers=token)
         assert r.json()["provider"] == "gemini"
         chat = client.get("/api/status", headers=token).json()["chat"]
-        assert chat == {"provider": "gemini", "gemini": True, "model": "gemini-flash-lite-latest", "choice": "gemini"}
+        assert {k: chat[k] for k in ("provider", "gemini", "model", "choice")} == {
+            "provider": "gemini", "gemini": True, "model": "gemini-flash-lite-latest", "choice": "gemini"}
+        assert chat["models"] == {"quick": "gemini:gemini-flash-lite-latest", "thorough": "gemini:gemini-flash-latest"}
         client.put("/api/settings/chat", json={"model": "gemini-flash-latest"}, headers=token)
         assert hub.secrets.get("gemini")["model"] == "gemini-flash-latest" and hub.secrets.get("gemini")["api_key"].startswith("AIza")
         client.delete("/api/settings/gemini", headers=token)
         assert client.get("/api/status", headers=token).json()["chat"]["provider"] is None
+
+
+def test_reviews_go_to_the_thorough_model_and_commands_to_the_quick_one():
+    hub = GeminiHub(gemini=True, claude=True)
+    gem = ScriptedGemini([[gt.Part(text="Done.")]])
+    claude = ScriptedClaude([[text("Here's a review.")], [text("Ok.")]])
+    chat = Chat(hub, client_factory=lambda key: claude, gemini_factory=lambda key: gem)
+    quick = asyncio.run(chat.send("turn on the porch light"))
+    review = asyncio.run(chat.send("review my device names", quick["conversation_id"]))
+    assert (quick["mode"], quick["model"]) == ("quick", "gemini:gemini-flash-lite-latest")
+    assert (review["mode"], review["model"], review["model_label"]) == ("thorough", "claude:claude-opus-5-5", "Claude Opus 5.5")
+    assert claude.requests[0]["fallbacks"] == "default" and claude.requests[0]["output_config"] == {"effort": "medium"}
+    forced = asyncio.run(chat.send("turn on the porch light", quick["conversation_id"], mode="thorough"))
+    assert forced["model"] == "claude:claude-opus-5-5"
+
+
+def test_saved_choices_and_one_off_model_override():
+    data = {"gemini": {"api_key": "AIza-x"}, "anthropic_api_key": "sk",
+            "chat": {"models": {"quick": "claude:claude-sonnet-5-5", "thorough": "gemini:gemini-flash-latest"}}}
+    hub = GeminiHub()
+    hub.secrets = SimpleNamespace(get=lambda k: data.get(k))
+    chat = Chat(hub)
+    assert chat.model_for("quick") == "claude:claude-sonnet-5-5" and chat.model_for("thorough") == "gemini:gemini-flash-latest"
+    assert [m["id"] for m in chat.choices()["available"]][:2] == ["gemini:gemini-flash-lite-latest", "gemini:gemini-flash-latest"]
+    data["anthropic_api_key"] = None                                     # the chosen model's key was removed
+    assert chat.model_for("quick") == "gemini:gemini-flash-lite-latest"
+    assert all(m["id"].startswith("gemini:") for m in chat.choices()["available"])
+    with pytest.raises(HubError) as err:
+        asyncio.run(chat.send("hi", model="claude:claude-opus-5-5"))       # one-off pick without a key
+    assert err.value.status == 409
+    with pytest.raises(HubError):
+        asyncio.run(chat.send("hi", model="openai:gpt-9"))
+
+
+def test_model_settings_route(tmp_path, monkeypatch):
+    monkeypatch.setenv("SMARTHOME_HOME", str(tmp_path))
+    from fastapi.testclient import TestClient
+    from hub import app as app_module
+    with TestClient(app_module.app) as client:
+        hub = app_module.app.state.hub
+        token = {"Authorization": f"Bearer {hub.secrets.access_token()}"}
+        client.put("/api/settings/chat", json={"gemini_key": "AIzaSyTestKey_0123456789abcdef"}, headers=token)
+        hub.secrets.set("anthropic_api_key", "sk-ant-test")
+        r = client.put("/api/settings/chat", json={"quick": "claude:claude-haiku-5-5", "thorough": "claude:claude-sonnet-5-5",
+                                                    "photo_model": "claude-sonnet-5-5"}, headers=token).json()
+        assert r["models"] == {"quick": "claude:claude-haiku-5-5", "thorough": "claude:claude-sonnet-5-5"}
+        assert len(r["available"]) == 5
+        st = client.get("/api/status", headers=token).json()["chat"]
+        assert st["photo_model"] == "claude-sonnet-5-5" and st["models"]["quick"] == "claude:claude-haiku-5-5"
+        assert client.put("/api/settings/chat", json={"quick": "openai:gpt"}, headers=token).status_code == 400
+        assert client.put("/api/settings/chat", json={"photo_model": "claude-opus-1"}, headers=token).status_code == 400
+        assert client.post("/api/chat", json={"message": "hi", "model": "bad model"}, headers=token).status_code == 422

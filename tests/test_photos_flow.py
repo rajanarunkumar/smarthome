@@ -68,13 +68,16 @@ def test_claude_request_shape(monkeypatch):
 
     import anthropic
     monkeypatch.setattr(anthropic, "Anthropic", lambda api_key: SimpleNamespace(beta=SimpleNamespace(messages=FakeMessages())))
-    out = assess_with_claude("sk-ant-test", image(GRASS), "Zone: Zone 1 (Front lawn)")
+    out = assess_with_claude("sk-ant-test", "claude-opus-5-5", image(GRASS), "Zone: Zone 1 (Front lawn)")
     assert out["verdict"] == "keep" and out["model"] == "claude-opus-5-5"
     assert sent["model"] == "claude-opus-5-5" and sent["fallbacks"] == "default"
     assert sent["betas"] == ["server-side-fallback-2026-07-01"]
     assert sent["output_config"]["format"]["schema"]["additionalProperties"] is False
     img, text = sent["messages"][0]["content"]
     assert img["type"] == "image" and img["source"]["media_type"] == "image/jpeg" and text["text"].startswith("Zone:")
+    sent.clear()
+    assess_with_claude("sk-ant-test", "claude-haiku-5-5", image(GRASS), "Zone: Zone 1")
+    assert sent["model"] == "claude-haiku-5-5" and "fallbacks" not in sent and "betas" not in sent   # Haiku: no fallback
 
 
 def test_photo_store(tmp_path):

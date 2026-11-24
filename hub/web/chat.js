@@ -1,6 +1,6 @@
 // ---------- chat: ask the home in plain language ----------
 // Device changes happen straight away; renames, rooms and schedules come back as a plan to apply.
-const chatState = { id: null, items: [], busy: false };
+const chatState = { id: null, items: [], busy: false, model: "" };   // model "" = pick automatically
 const CHAT_IDEAS = [
   "What's on right now?",
   "Turn off all the lights downstairs",
@@ -36,7 +36,8 @@ function chatItemHtml(item, index) {
       ${(plan.problems || []).length ? `<div class="row"><span class="sub wrap">Left out: ${esc(plan.problems.join("; "))}</span></div>` : ""}
       ${item.applied ? "" : `<div class="row"><button class="pill primary" data-apply>Apply</button></div>`}
     </div>` : "";
-  return `<div class="chat-msg bot">${esc(item.text).replace(/\n/g, "<br>")}${done ? `<ul class="chat-done">${done}</ul>` : ""}</div>${planHtml}`;
+  const by = item.model_label ? `<div class="chat-by">${esc(item.model_label)}${item.mode === "thorough" ? " · thorough" : ""}</div>` : "";
+  return `<div class="chat-msg bot">${esc(item.text).replace(/\n/g, "<br>")}${done ? `<ul class="chat-done">${done}</ul>` : ""}${by}</div>${planHtml}`;
 }
 
 function renderChat() {
@@ -58,9 +59,9 @@ async function chatSend(text) {
   chatState.busy = true;
   renderChat();
   try {
-    const r = await api("POST", "/api/chat", { message: text, conversation_id: chatState.id });
+    const r = await api("POST", "/api/chat", { message: text, conversation_id: chatState.id, model: chatState.model || null });
     chatState.id = r.conversation_id;
-    chatState.items.push({ role: "bot", text: r.reply, done: r.done, plan: r.plan });
+    chatState.items.push({ role: "bot", text: r.reply, done: r.done, plan: r.plan, model_label: r.model_label, mode: r.mode });
   } catch (err) {
     chatState.items.push({ role: "error", text: err.message });
   }
@@ -84,8 +85,16 @@ async function chatApply(card) {
   renderChat();
 }
 
-function openChat() {
+async function openChat() {
+  if (!state.status?.chat) { try { state.status = await api("GET", "/api/status"); } catch {} }
+  const c = state.status?.chat || {};
+  const label = (id) => ((c.available || []).find((m) => m.id === id)?.label || id || "").split(" · ")[0];
+  const auto = c.models ? `Auto: ${label(c.models.quick)}; ${label(c.models.thorough)} for reviews` : "Auto";
   openSheet("Ask Home", `
+    <label class="chat-model"><span>Model</span><select id="chat-model">
+      <option value="">${esc(auto)}</option>
+      ${(c.available || []).map((m) => `<option value="${esc(m.id)}" ${m.id === chatState.model ? "selected" : ""}>${esc(m.label)}</option>`).join("")}
+    </select></label>
     <div id="chat-log" class="chat-log"></div>
     <form id="chat-form" class="chat-form">
       <input type="text" id="chat-input" placeholder="e.g. Dim the living room to 30%" autocomplete="off" enterkeyhint="send" maxlength="2000">
@@ -93,6 +102,7 @@ function openChat() {
     </form>
     ${chatState.items.length ? `<button class="pill" id="chat-new" style="margin-top:8px">New conversation</button>` : ""}`);
   renderChat();
+  $("#chat-model", sheet)?.addEventListener("change", (e) => { chatState.model = e.target.value; });
   $("#chat-form", sheet).addEventListener("submit", (e) => {
     e.preventDefault();
     const input = $("#chat-input", sheet);

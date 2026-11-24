@@ -28,6 +28,27 @@ log = logging.getLogger(__name__)
 
 MODEL = "claude-opus-5-5"
 GEMINI_MODEL = "gemini-flash-lite-latest"   # Google's alias for the newest Flash-Lite: the largest free daily quota
+
+# Models the person can pick, per kind of request. "provider:model".
+MODEL_CHOICES = {
+    "gemini:gemini-flash-lite-latest": "Gemini Flash-Lite · free, most free use",
+    "gemini:gemini-flash-latest": "Gemini Flash · free, fewer requests a day",
+    "claude:claude-haiku-5-5": "Claude Haiku 5.5 · about 0.2¢ a command",
+    "claude:claude-sonnet-5-5": "Claude Sonnet 5.5 · about 3¢ a command",
+    "claude:claude-opus-5-5": "Claude Opus 5.5 · about 5–10¢ a command",
+}
+MODES = ("quick", "thorough")
+EFFORT = {"quick": "low", "thorough": "medium"}
+# Words that mean "think it through" rather than "do this": reviews and tidying go to the thorough model.
+THOROUGH_WORDS = ("review", "tidy", "clean up", "cleanup", "organize", "organise", "optimize", "optimise", "improve",
+                  "suggest", "recommend", "audit", "reorgan", "rename all", "naming", "best way", "why ", "explain",
+                  "analy", "compare", "plan ")
+HISTORY_RECAP = 6         # exchanges carried over when a conversation moves between Gemini and Claude
+
+
+def pick_mode(text: str) -> str:
+    t = text.lower()
+    return "thorough" if any(w in t for w in THOROUGH_WORDS) else "quick"
 MAX_ROUNDS = 8            # tool rounds per message
 KEEP_SECONDS = 3600
 MAX_CONVERSATIONS = 20
@@ -171,15 +192,37 @@ class Chat:
         self._conversations: dict[str, dict] = {}
         self._plans: dict[str, dict] = {}
 
-    def provider(self) -> str | None:
-        """The chosen provider, or whichever one has a key (Gemini first: it has a free tier)."""
+    def keys(self) -> dict[str, bool]:
+        return {"gemini": bool((self.hub.secrets.get("gemini") or {}).get("api_key")),
+                "claude": bool(self.hub.secrets.get("anthropic_api_key"))}
+
+    def model_for(self, mode: str) -> str | None:
+        """The "provider:model" for quick commands or thorough reviews: the person's choice if its key is saved,
+        otherwise the best default for what's available (free Gemini for quick, Claude Opus for thorough)."""
+        keys = self.keys()
         cfg = self.hub.secrets.get("chat") or {}
-        gemini = bool((self.hub.secrets.get("gemini") or {}).get("api_key"))
-        claude = bool(self.hub.secrets.get("anthropic_api_key"))
-        choice = cfg.get("provider")
-        if choice == "gemini" and gemini or choice == "claude" and claude:
-            return choice
-        return "gemini" if gemini else "claude" if claude else None
+        chosen = (cfg.get("models") or {}).get(mode)
+        if not chosen and cfg.get("provider"):               # "use this provider": its quick or thorough model
+            chosen = {("gemini", "quick"): "gemini:" + self._gemini_model(), ("gemini", "thorough"): "gemini:gemini-flash-latest",
+                      ("claude", "quick"): "claude:claude-haiku-5-5", ("claude", "thorough"): f"claude:{MODEL}"}.get((cfg["provider"], mode))
+        if chosen and keys.get(chosen.split(":", 1)[0]):
+            return chosen
+        order = (["gemini:" + self._gemini_model(), "claude:claude-haiku-5-5"] if mode == "quick"
+                 else [f"claude:{MODEL}", "gemini:gemini-flash-latest"])
+        return next((m for m in order if keys[m.split(":", 1)[0]]), None)
+
+    def _gemini_model(self) -> str:
+        return (self.hub.secrets.get("gemini") or {}).get("model") or GEMINI_MODEL
+
+    def provider(self) -> str | None:
+        """Which provider answers quick commands (shown in Settings)."""
+        model = self.model_for("quick")
+        return model.split(":", 1)[0] if model else None
+
+    def choices(self) -> dict:
+        keys = self.keys()
+        return {"models": {mode: self.model_for(mode) for mode in MODES},
+                "available": [{"id": k, "label": v} for k, v in MODEL_CHOICES.items() if keys[k.split(":", 1)[0]]]}
 
     def _client(self) -> Any:
         key = self.hub.secrets.get("anthropic_api_key")
@@ -338,30 +381,50 @@ class Chat:
         return {"results": results}
 
     # ---- conversation ----
-    async def send(self, text: str, conversation_id: str | None = None) -> dict:
+    async def send(self, text: str, conversation_id: str | None = None, mode: str = "auto",
+                   model: str | None = None) -> dict:
+        """mode: quick | thorough | auto (guessed from the words). model: a "provider:model" for this message only."""
         self._prune()
-        provider = self.provider()
-        if provider is None:
+        mode = mode if mode in MODES else pick_mode(text)
+        if model:
+            if model not in MODEL_CHOICES and not model.startswith("gemini:gemini-"):
+                raise HubError(400, f"Unknown model {model}")
+            if not self.keys().get(model.split(":", 1)[0]):
+                raise HubError(409, f"There's no {model.split(':', 1)[0].title()} key saved in Settings.")
+        spec = model or self.model_for(mode)
+        if spec is None:
             raise HubError(409, "Add a Gemini key in Settings → Ask Home (free), or an Anthropic key in Settings → Photo analysis.")
+        provider, model_id = spec.split(":", 1)
         conv = self._conversations.get(conversation_id or "")
-        if conv is not None and (len(conv["messages"]) > MAX_MESSAGES or conv.get("provider") != provider):
+        if conv is not None and len(conv["messages"]) > MAX_MESSAGES:
             del self._conversations[conversation_id]
             conv = None
         if conv is None:
             conversation_id = "c_" + pysecrets.token_hex(8)
-            conv = {"messages": [], "at": time.time(), "plan_ids": [], "provider": provider}
+            conv = {"messages": [], "at": time.time(), "plan_ids": [], "provider": provider, "transcript": []}
             self._conversations[conversation_id] = conv
+        recap = ""
+        if conv["provider"] != provider:
+            # Gemini and Claude can't read each other's turns: start the model's history afresh, with a plain recap.
+            conv["messages"], conv["provider"] = [], provider
+            recap = "".join(f"\nEarlier — person: {u}\nEarlier — you: {r}" for u, r in conv["transcript"][-HISTORY_RECAP:])
+            recap = f"\n[Recap of this conversation so far, answered by another model:{recap}]" if recap else ""
         conv["at"] = time.time()
         now = datetime.now().astimezone().strftime("%A %-d %B %Y, %-I:%M %p %Z")
         notes = "".join(f"\n[{n}]" for n in conv.pop("notes", []))
-        prompt = f"[Now: {now}]{notes}\n{text.strip()}"
+        prompt = f"[Now: {now}]{recap}{notes}\n{text.strip()}"
         turn: dict = {"done": [], "plan": None}
-        loop = self._gemini_loop if provider == "gemini" else self._claude_loop
-        reply = await loop(conv["messages"], prompt, turn)
+        if provider == "gemini":
+            reply = await self._gemini_loop(conv["messages"], prompt, turn, model_id)
+        else:
+            reply = await self._claude_loop(conv["messages"], prompt, turn, model_id, EFFORT[mode])
+        reply = reply or "Done."
+        conv["transcript"].append((text.strip()[:500], reply[:800]))
         if turn["plan"]:
             conv["plan_ids"].append(turn["plan"]["id"])
         plan = turn["plan"]
-        return {"conversation_id": conversation_id, "reply": reply or "Done.", "done": turn["done"], "provider": provider,
+        return {"conversation_id": conversation_id, "reply": reply, "done": turn["done"], "provider": provider,
+                "model": spec, "model_label": MODEL_CHOICES.get(spec, model_id).split(" · ")[0], "mode": mode,
                 "plan": {k: plan[k] for k in ("id", "summary", "changes", "problems")} if plan else None}
 
     async def _tool_result(self, name: str, args: dict, turn: dict) -> tuple[str, bool]:
@@ -373,18 +436,18 @@ class Chat:
             log.warning("chat tool %s failed: %s", name, exc)
             return f"{type(exc).__name__}: {exc}", True
 
-    async def _claude_loop(self, messages: list, prompt: str, turn: dict) -> str:
+    async def _claude_loop(self, messages: list, prompt: str, turn: dict, model: str = MODEL, effort: str = "medium") -> str:
         client = self._client()
         start = len(messages)
         messages.append({"role": "user", "content": prompt})
         import anthropic
         try:
             for _ in range(MAX_ROUNDS):
+                extra = {} if "haiku" in model else {   # Haiku has no server-side fallback
+                    "betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
                 response = await client.beta.messages.create(
-                    model=MODEL, max_tokens=16000, system=SYSTEM, tools=TOOLS, messages=messages,
-                    output_config={"effort": "medium"},
-                    betas=["server-side-fallback-2026-07-01"], fallbacks="default",
-                    cache_control={"type": "ephemeral"})
+                    model=model, max_tokens=16000, system=SYSTEM, tools=TOOLS, messages=messages,
+                    output_config={"effort": effort}, cache_control={"type": "ephemeral"}, **extra)
                 messages.append({"role": "assistant", "content": response.content})
                 if response.stop_reason == "refusal":
                     reply = "Claude declined to help with that."
@@ -418,19 +481,20 @@ class Chat:
             raise HubError(504, "Couldn't reach Claude. Check the Mac's internet connection.") from exc
         return reply
 
-    def _gemini(self) -> tuple[Any, str]:
-        cfg = self.hub.secrets.get("gemini") or {}
-        model = cfg.get("model") or GEMINI_MODEL
+    def _gemini(self) -> Any:
+        key = (self.hub.secrets.get("gemini") or {}).get("api_key")
+        if not key:
+            raise HubError(409, "Add a Gemini key in Settings → Ask Home first.")
         if self._gemini_factory:
-            return self._gemini_factory(cfg["api_key"]), model
+            return self._gemini_factory(key)
         from google import genai
-        return genai.Client(api_key=cfg["api_key"]), model
+        return genai.Client(api_key=key)
 
-    async def _gemini_loop(self, contents: list, prompt: str, turn: dict) -> str:
+    async def _gemini_loop(self, contents: list, prompt: str, turn: dict, model: str = GEMINI_MODEL) -> str:
         """The same tools through Gemini's function calling. The model's turns are kept exactly as returned
         (they carry thought signatures Gemini needs to see again)."""
         from google.genai import errors, types
-        client, model = self._gemini()
+        client = self._gemini()
         decls = [types.FunctionDeclaration(name=t["name"], description=t["description"], parameters_json_schema=t["input_schema"])
                  for t in TOOLS]
         config = types.GenerateContentConfig(
