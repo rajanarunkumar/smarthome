@@ -37,6 +37,7 @@ from .auth import SESSION_COOKIE, Auth
 from .cache import LoadingCache
 from .telemetry import Telemetry
 from . import backup as backup_mod
+from .chat import Chat
 from .config import Secrets, data_dir
 from . import weather as weather_api
 from .energy import EnergyStore, build_energy, device_power
@@ -93,6 +94,7 @@ class Hub:
         self.scheduler = HubScheduler(self.store.db, self._apply)
         self.adapters.append(self.scheduler)
         self.last_devices: dict[str, Device] = {}
+        self.chat = Chat(self)
         self.history = HistoryStore(self.store.db)
         self.rainbird.on_run = self.history.log_run
         self.irrigation = SmartPrograms(self.store.db, self.history, self.rainbird)
@@ -489,6 +491,44 @@ class Hub:
             room = self.store.room_by_name(room_name) or self.store.add_room(room_name)
             self.store.set_device_room(hub_id, room["id"])
 
+    async def rename_device(self, device_id: str, name: str) -> None:
+        """Names are written back to the brand, so its own app shows the same name. Brands without a
+        rename API keep the name in the hub instead."""
+        adapter = self.adapter_for(device_id)
+        if adapter.can_rename:
+            await adapter.rename(device_id, name.strip())
+        else:
+            self.store.set_device_name(device_id, name.strip())
+        self.invalidate_brand(adapter.brand)
+
+    async def create_schedules(self, spec: ScheduleIn) -> list[Schedule]:
+        """Create the schedule natively in each brand (one rule per device); others run in the hub."""
+        if not self.last_devices:
+            await self.devices()
+        by_adapter: dict[object, list[str]] = {}
+        for device_id in spec.device_ids:
+            device = self.last_devices.get(device_id)
+            if device is None:
+                raise HubError(404, f"Unknown device {device_id}")
+            if device.kind == "lock":
+                raise HubError(400, "Locks can't be scheduled.")
+            native = "schedule" in device.capabilities
+            by_adapter.setdefault(self.adapter_for(device_id) if native else self.scheduler, []).append(device_id)
+        created: list[Schedule] = []
+        for adapter, ids in by_adapter.items():
+            created.extend(await adapter.create_schedule(spec, ids))
+        self.schedule_cache.invalidate_all()
+        return created
+
+    async def named_schedules(self, fresh: bool = False) -> tuple[list[Schedule], list[str]]:
+        schedules, errors = await (self.schedule_cache.refresh() if fresh else self.schedule_cache.get())
+        schedules = list(schedules)
+        names = self.device_names()
+        for s in schedules:
+            s.device_names = [names.get(d, d) for d in s.device_ids]
+        schedules.sort(key=lambda s: (s.trigger.time if s.trigger and s.trigger.time else "99", s.name))
+        return schedules, errors
+
     def device_names(self) -> dict[str, str]:
         names: dict[str, str] = {}
         for adapter in self.adapters:
@@ -666,13 +706,7 @@ async def set_device_state(request: Request, device_id: str, state: StateIn):
 async def patch_device(request: Request, device_id: str, patch: DevicePatch):
     hub = hub_of(request)
     if "name" in patch.model_fields_set and patch.name:
-        # Names are written back to the brand, so its own app shows the same name.
-        # Brands without a rename API keep the name in the hub instead.
-        adapter = hub.adapter_for(device_id)
-        if adapter.can_rename:
-            await adapter.rename(device_id, patch.name.strip())
-        else:
-            hub.store.set_device_name(device_id, patch.name)
+        await hub.rename_device(device_id, patch.name)
     if "room_id" in patch.model_fields_set:
         if patch.room_id is not None and hub.store.room(patch.room_id) is None:
             raise HubError(404, "Unknown room")
@@ -742,37 +776,14 @@ async def activate_scene(request: Request, scene_id: str, dynamic: bool = Body(F
 # Schedules
 @app.get("/api/schedules")
 async def list_schedules(request: Request, fresh: bool = False):
-    hub = hub_of(request)
-    cache = hub.schedule_cache
-    schedules, errors = await (cache.refresh() if fresh else cache.get())
-    schedules = list(schedules)
-    names = hub.device_names()
-    for s in schedules:
-        s.device_names = [names.get(d, d) for d in s.device_ids]
-    schedules.sort(key=lambda s: (s.trigger.time if s.trigger and s.trigger.time else "99", s.name))
+    schedules, errors = await hub_of(request).named_schedules(fresh)
     return {"schedules": schedules, "errors": errors}
 
 
 @app.post("/api/schedules")
 async def create_schedule(request: Request, spec: ScheduleIn):
     """Create the schedule natively in each brand: one rule per device."""
-    hub = hub_of(request)
-    if not hub.last_devices:
-        await hub.devices()
-    by_adapter: dict[object, list[str]] = {}
-    for device_id in spec.device_ids:
-        device = hub.last_devices.get(device_id)
-        if device is None:
-            raise HubError(404, f"Unknown device {device_id}")
-        if device.kind == "lock":
-            raise HubError(400, "Locks can't be scheduled.")
-        # Brands with native schedules keep them on the device; everything else runs in the hub.
-        native = "schedule" in device.capabilities
-        by_adapter.setdefault(hub.adapter_for(device_id) if native else hub.scheduler, []).append(device_id)
-    created: list[Schedule] = []
-    for adapter, ids in by_adapter.items():
-        created.extend(await adapter.create_schedule(spec, ids))
-    return {"created": created}
+    return {"created": await hub_of(request).create_schedules(spec)}
 
 
 class EnabledIn(BaseModel):
@@ -1175,6 +1186,26 @@ async def lennox_connect(request: Request, body: LennoxIn):
 async def lennox_disconnect(request: Request):
     await hub_of(request).lennox.disconnect()
     return {"ok": True}
+
+
+# Chat: plain-language control, and plans for names, rooms and schedules that apply on a tap
+class ChatIn(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+    conversation_id: str | None = Field(None, max_length=40)
+
+
+class PlanApplyIn(BaseModel):
+    only: list[int] | None = None     # indexes of the changes to apply; all when omitted
+
+
+@app.post("/api/chat")
+async def chat_send(request: Request, body: ChatIn):
+    return await hub_of(request).chat.send(body.message, body.conversation_id)
+
+
+@app.post("/api/chat/plans/{plan_id}/apply")
+async def chat_apply(request: Request, plan_id: str, body: PlanApplyIn = Body(PlanApplyIn())):
+    return await hub_of(request).chat.apply_plan(plan_id, body.only)
 
 
 @app.delete("/api/rainbird/account")

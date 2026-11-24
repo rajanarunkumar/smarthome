@@ -126,3 +126,9 @@ See `.claude/NEXT.md`.
 - Rain Bird: `python -m hub.adapters.rainbird_adapter [IP] [--find]` CLI (versions, subnet hint, port probe, one password attempt; --find scans the /24). pyrainbird < 6.1 can't do HTTPS (verified by diffing wheels), so requirements now pin >= 6.10 and the connection test warns on old versions.
 - `loadBackup()` no longer throws when Settings re-renders mid-load.
 - Lennox iComfort added. The user's thermostat is an **E30** (supported by lennoxs30api, cloud or local).
+
+## Session: Ask Home chat (Nov 2026)
+- `hub/chat.py`: Claude (claude-opus-5-5, effort medium, server-side fallback `default`) with tools list_devices, list_schedules, control_device (runs now; `locked: false` refused), propose_changes (validated into a plan; applied only by `POST /api/chat/plans/{id}/apply`, optionally with `only` indexes). Manual tool loop on the Messages API in the hub (tools act on the LAN). Conversations in memory 1 h, append-only history; > 80 messages starts afresh. Uses the `anthropic_api_key` secret.
+- Hub methods `rename_device`, `create_schedules`, `named_schedules` now back both the routes and the chat.
+- UI: `hub/web/chat.js`, header button `#chat-open`; plan card with tick boxes.
+- myQ: not built (Chamberlain blocks third parties). Waiting for the user's opener learn-button colour / model; plan is an ESPHome (ratgdo / Konnected blaQ) adapter with unlock-style protection for opening.

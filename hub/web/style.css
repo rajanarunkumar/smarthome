@@ -444,3 +444,17 @@ button, a, input, select, label, .dtile, .stile { touch-action: manipulation; }
 .part-bar { display: flex; height: 14px; border-radius: 7px; overflow: hidden; margin: 10px 0 4px; }
 .part-bar i { display: block; height: 100%; }
 details.card > summary { cursor: pointer; line-height: 1.5; }
+
+/* Chat (Ask Home) */
+.chat-log { display: flex; flex-direction: column; gap: 8px; max-height: 60vh; overflow-y: auto; padding: 4px 0 8px; }
+.chat-msg { max-width: 85%; padding: 9px 13px; border-radius: 16px; line-height: 1.35; overflow-wrap: anywhere; }
+.chat-msg.me { align-self: flex-end; background: var(--accent); color: var(--accent-ink); border-bottom-right-radius: 5px; }
+.chat-msg.bot { align-self: flex-start; background: var(--card); border-bottom-left-radius: 5px; box-shadow: var(--shadow); }
+.chat-msg.err { align-self: flex-start; color: var(--danger); }
+.chat-msg.typing { color: var(--muted); }
+.chat-done { margin: 6px 0 0; padding-left: 18px; color: var(--muted); font-size: 14px; }
+.chat-plan .row { align-items: flex-start; }
+.chat-plan input[type=checkbox] { margin-top: 3px; flex: none; width: 18px; height: 18px; accent-color: var(--accent); }
+.chat-ideas { display: flex; flex-wrap: wrap; gap: 8px; }
+.chat-form { display: flex; gap: 8px; margin-top: 8px; }
+.chat-form input { flex: 1; min-width: 0; }

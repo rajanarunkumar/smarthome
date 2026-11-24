@@ -185,6 +185,22 @@ The hub only ever needs a **token**, never your LG password, so there is nothing
 1. Open **connect-pat.lgthinq.com** and choose the same sign-in you use in the ThinQ app (for example **Continue with Google**) if it's offered.
 2. Community reports say that page may accept only an LG email-and-password account (LG doesn't confirm this either way). If so: create an ordinary LG account (email + password), **invite it as a member of your home in the ThinQ app** (the menu name varies by app version), and make the token with that account. I haven't verified that appliances shared this way show up in LG's API, so check the Settings card says how many appliances it found.
 
+## Ask Home (chat)
+
+The speech-bubble button at the top opens a chat. Ask in your own words: "turn off everything downstairs", "set the thermostat to 70", "run the front lawn for 10 minutes", "what's on right now?", "review my device names", "review my schedules".
+
+- **Devices change straight away**, through the same path as tapping in the app. Unlocking is never possible from chat (locking is).
+- **Names, rooms and schedules come back as a plan.** Each change shows with its reason and a tick box; nothing changes until you tap **Apply**, and you can untick any you don't want.
+- Uses Claude through the Anthropic API key in **Settings → Photo analysis** (same key). The conversation is kept in the hub's memory for an hour, not on disk, and each message is sent to Anthropic with the device list it needs. Typical cost is a few cents per conversation.
+
+**Naming that works well everywhere** (the chat follows this when you ask it to review names): *Room + what it is* ("Kitchen Island Lights", "Primary Bedroom Fan"), 2–4 words, unique, no brand or model names, a plug named after what's plugged into it, and nothing that sounds like another device or a command. These names carry over to Alexa and Google Home once they're connected.
+
+**Schedules:** prefer sunset/sunrise with an offset for lights, look for duplicates and on/off pairs that clash, and remember that schedules for brands without their own scheduling run in the hub (keep the Mac awake).
+
+## Garage door (myQ)
+
+Chamberlain closed myQ to other apps in 2023, and the workarounds keep breaking, so the hub doesn't use the myQ cloud. The reliable route is a small board wired to the opener that the hub controls on your Wi‑Fi: **ratgdo** (about $40–60) or **Konnected GDO blaQ**. They work with Security+ 2.0 (yellow learn button) and older Chamberlain/LiftMaster openers, not Security+ 3.0. Planned: open/close/light/obstruction, opening protected like unlocking (second tap, signed-in person, never from scripts or chat).
+
 ## Nest thermostat
 
 Google only lets outside apps control a Nest through **Device Access**, which needs a one-time US$5 registration. About 15 minutes, once:
