@@ -941,7 +941,15 @@ function renderSettings() {
   });
   const accountButton = (btnId, run, done) => $(btnId)?.addEventListener("click", async (e) => {
     e.target.disabled = true;
-    try { const r = await run(); toast(done(r)); render(true); }
+    try {
+      const r = await run();
+      toast(done(r));
+      // The typed values have been used: clear them, or Settings won't redraw (it waits while a password box holds
+      // unsaved text) and the next step, such as the box for Ring's or Dyson's code, never appears.
+      e.target.closest(".card")?.querySelectorAll("input").forEach((i) => { i.value = i.defaultValue; });
+      document.activeElement?.blur?.();
+      render(true);
+    }
     catch (err) { toast(err.message); e.target.disabled = false; }
   });
   accountButton("#govee-on", () => api("POST", "/api/govee/account", { api_key: $("#govee-key").value.trim() }),
