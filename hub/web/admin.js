@@ -79,6 +79,7 @@ function drawAdmin() {
       ${busyButton("cache-clear", "Clear caches", 'data-adm="cache" data-reload="0"')}
       <button class="pill" data-update-open>Update…</button>
       <button class="pill" data-log-open>Log</button>
+      <button class="pill" data-profile>What's using CPU?</button>
       <button class="pill danger" data-restart>Restart hub</button>
     </div>
     ${adminResult ? `<div class="adm-result ${adminResult.ok ? "" : "bad"}" role="status">${adminResult.html}</div>` : ""}
@@ -381,3 +382,22 @@ function followLog() {
     followLog();
   }, 2000);
 }
+
+// ---------- what's using CPU: a 15-second sampling profile ----------
+view.addEventListener("click", async (e) => {
+  if (!e.target.closest("[data-profile]")) return;
+  openSheet("What's using CPU", `<p class="note">Watching the hub for 15 seconds…</p>`);
+  try {
+    const r = await api("POST", "/api/admin/profile?seconds=15");
+    $(".sheet-body", sheet).innerHTML = `
+      <p class="note">Over ${r.seconds} s the hub used ${r.cpu_pct}% of one CPU core (a little of that is this measurement).
+        Busy means running rather than waiting for the network or a timer.</p>
+      ${r.threads.length ? r.threads.map((t) => `
+        <div class="section-title"><span>${esc(t.name)} · busy ${t.busy_pct}% of the time</span></div>
+        <div class="card">${t.top.map((x) => `<div class="row"><span class="main"><span class="name small mono">${esc(x.where)}</span></span>
+          <span class="sub-value">${x.pct}%</span></div>`).join("")}</div>`).join("")
+        : `<p class="note">Nothing was busy while watching: the CPU figure comes from short bursts. Try again, or while the app is open on another device.</p>`}
+      <button class="pill" id="profile-again">Measure again</button>`;
+    $("#profile-again", sheet).addEventListener("click", () => view.querySelector("[data-profile]")?.click());
+  } catch (err) { $(".sheet-body", sheet).innerHTML = `<p class="note">${esc(err.message)}</p>`; }
+});

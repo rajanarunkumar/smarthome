@@ -189,7 +189,7 @@ The hub only ever needs a **token**, never your LG password, so there is nothing
 
 **Admin → Update or restart…** shows the branch and commit the hub runs, what's new on GitHub, and every branch. **Pull and restart** fetches, switches branch if you picked another, fast-forwards, installs packages if `requirements.txt` changed, and restarts; the page reloads when the hub is back (about 10 seconds). **Pull only** skips the restart; **Restart** just restarts. It never merges or throws anything away: if the Mac's copy has edits or commits of its own, it stops and says so. Needs a person signed in (scripts with the API token can't update or restart). Restarts rely on the background service from `scripts/install-service.sh`; without it the hub replaces its own process. The Mac needs to be able to `git fetch` without a password prompt (the macOS keychain usually handles this after one manual `git pull`).
 
-**Admin → Restart hub** restarts on its own (about 10 seconds; the page reloads when it's back). **Admin → Log** shows the last 1000 lines of `~/.smarthome/logs/hub.log` and follows new lines every 2 seconds, with a filter box; anything that looks like a password or token is masked.
+**Admin → Restart hub** restarts on its own (about 10 seconds; the page reloads when it's back). **Admin → What's using CPU?** watches the hub for 15 seconds (sampling every thread's stack, no extra packages) and lists which code was busy, by hub module and library. **Admin → Log** shows the last 1000 lines of `~/.smarthome/logs/hub.log` and follows new lines every 2 seconds, with a filter box; anything that looks like a password or token is masked.
 
 ## Electricity: lights and entered watts
 

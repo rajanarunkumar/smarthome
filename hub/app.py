@@ -1878,6 +1878,20 @@ async def admin_logfile(request: Request, lines: int = 1000, after: int | None =
     return {"text": LOG_SECRETS.sub(lambda m: m.group(1) + "•••", text), "end": end, "reset": whole, "path": str(path)}
 
 
+_profiling = asyncio.Lock()
+
+
+@app.post("/api/admin/profile")
+async def admin_profile(request: Request, seconds: float = 15):
+    """Sample every thread for a few seconds and say which code is busy (Admin → What's using CPU?)."""
+    _email(request)
+    from . import profiler
+    if _profiling.locked():
+        raise HubError(409, "A measurement is already running.")
+    async with _profiling:
+        return await asyncio.to_thread(profiler.sample, max(3.0, min(seconds, 30.0)))
+
+
 @app.post("/api/admin/restart")
 async def admin_restart(request: Request):
     who = _email(request)

@@ -193,3 +193,29 @@ def test_energy_watts_route(tmp_path, monkeypatch):
         assert client.put("/api/energy/watts/leviton:chand", json={"watts": 50000}, headers=token).status_code == 422
         client.put("/api/energy/watts/leviton:chand", json={"watts": None}, headers=token)
         assert client.get("/api/energy/watts", headers=token).json()["watts"] == {}
+
+
+def test_profiler_finds_the_busy_thread():
+    import threading
+    import time as _time
+
+    from hub import profiler
+    stop = threading.Event()
+
+    def spin():
+        while not stop.is_set():
+            sum(i * i for i in range(2000))
+
+    def nap():
+        stop.wait()
+
+    busy = threading.Thread(target=spin, name="spinner", daemon=True)
+    idle = threading.Thread(target=nap, name="sleeper", daemon=True)
+    busy.start(); idle.start()
+    try:
+        out = profiler.sample(seconds=1.5, interval=0.01)
+    finally:
+        stop.set(); busy.join(); idle.join()
+    names = {t["name"]: t for t in out["threads"]}
+    assert names["spinner"]["busy_pct"] > 80 and "spin" in names["spinner"]["top"][0]["where"]
+    assert "sleeper" not in names and out["cpu_pct"] > 50
