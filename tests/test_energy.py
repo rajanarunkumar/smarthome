@@ -263,3 +263,40 @@ def test_kasa_plugs_with_energy_monitoring_report_watts():
     with_energy, without = a._to_device("kasa:1", plug), a._to_device("kasa:2", plain)
     assert with_energy.watts == 61.2 and {"label": "Today", "value": "0.83 kWh"} in with_energy.details
     assert without.watts is None and without.details == []
+
+
+def test_always_on_appliances_come_out_of_everything_else():
+    s = store()
+    tmean = build(s)
+    before = build_energy(s, tmean, days=DAYS, today=TODAY)
+    s.add_fixed_load("Garage freezer", "freezer", None)                 # typical 534 kWh/yr
+    s.add_fixed_load("Sub-Zero", "fridge", 637)                          # from the label
+    beer = s.add_fixed_load("Beer cooler", "beverage", None)
+    s.add_fixed_load("Bar cooler", "beverage", None)
+    out = build_energy(s, tmean, days=DAYS, today=TODAY)
+    per_day = (534 + 637 + 300 + 300) / 365
+    assert all(abs(r["appliances_kwh"] - round(per_day, 1)) < 0.05 for r in out["series"])
+    assert [f["source"] for f in out["fixed_loads"]] == ["typical", "label", "typical", "typical"]
+    b, a = before["series"][0], out["series"][0]
+    assert a["total_kwh"] == b["total_kwh"] and a["other_kwh"] + (a["hvac_kwh"] or 0) < b["other_kwh"] + (b["hvac_kwh"] or 0)
+    rec = next(r for r in out["recommendations"] if r["title"].startswith("Fridges and freezers"))
+    assert "1,771 kWh a year" in rec["title"] and "202 W" in rec["text"] and "Garage freezer" in rec["text"] and "Sub-Zero" not in rec["text"]
+    s.update_fixed_load(beer, "Beer cooler", "beverage", 410)
+    s.delete_fixed_load(beer)
+    assert len(s.fixed_loads()) == 3
+
+
+def test_appliance_routes(tmp_path, monkeypatch):
+    monkeypatch.setenv("SMARTHOME_HOME", str(tmp_path))
+    from fastapi.testclient import TestClient
+    from hub import app as app_module
+    with TestClient(app_module.app) as client:
+        hub = app_module.app.state.hub
+        token = {"Authorization": f"Bearer {hub.secrets.access_token()}"}
+        r = client.post("/api/energy/appliances", json={"name": "GE upright freezer", "type": "freezer"}, headers=token)
+        load_id = r.json()["id"]
+        assert client.post("/api/energy/appliances", json={"name": "x", "type": "jacuzzi"}, headers=token).status_code == 422
+        client.put(f"/api/energy/appliances/{load_id}", json={"name": "GE upright freezer", "type": "freezer", "kwh_year": 534}, headers=token)
+        assert hub.energy.fixed_loads()[0]["source"] == "label"
+        client.delete(f"/api/energy/appliances/{load_id}", headers=token)
+        assert hub.energy.fixed_loads() == []

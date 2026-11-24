@@ -33,6 +33,13 @@ TRACKED_KINDS = {"appliance", "pool", "purifier", "plug", "dimmer", "tv", "vacuu
 MEASURABLE_KINDS = {"appliance", "pool", "plug", "thermostat"}
 MAX_KW = {"plug": 2.0, "appliance": 7.0, "pool": 4.0, "thermostat": 15.0}   # more than this is something else
 MIN_KW = 0.15
+# Appliances with no connection that run around the clock: typical yearly use when the label figure isn't entered.
+# Freezer: a GE 20 cu ft upright is rated 534 kWh/yr. Sub-Zero built-ins: ~300 (freezerless column) to ~640 (with
+# freezer) in the ENERGY STAR database. Beverage coolers have no ENERGY STAR category; ~300 is a typical figure.
+APPLIANCE_TYPES = {
+    "freezer": ("Upright freezer", 534), "fridge": ("Refrigerator", 600), "beverage": ("Beverage cooler", 300),
+    "wine": ("Wine cooler", 250), "other": ("Other always-on appliance", 200),
+}
 LAUNDRY_IDLE = {"POWER_OFF", "INITIAL", "END", "PAUSE", "SLEEP", "ERROR", "STANDBY"}
 
 
@@ -47,6 +54,8 @@ class EnergyStore:
                 start TEXT NOT NULL, end TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS device_activity_start ON device_activity(start);
             CREATE TABLE IF NOT EXISTS device_watts (device_id TEXT PRIMARY KEY, watts REAL NOT NULL); -- entered by the owner
+            CREATE TABLE IF NOT EXISTS fixed_loads (  -- unconnected appliances that run all the time (fridges, freezers)
+                id INTEGER PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, kwh_year REAL, note TEXT);
             CREATE TABLE IF NOT EXISTS device_estimated (  -- bulbs: average power from their model and brightness while on
                 device_id TEXT PRIMARY KEY, watts REAL NOT NULL, samples INTEGER NOT NULL, updated TEXT NOT NULL,
                 standby REAL NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT 'measured', profile TEXT);
@@ -75,6 +84,28 @@ class EnergyStore:
         rows = self.db.execute("SELECT device_id, name, kind, start, end FROM device_activity WHERE end >= ? ORDER BY start",
                                (since.isoformat(),))
         return [dict(r) for r in rows]
+
+    def fixed_loads(self) -> list[dict]:
+        out = []
+        for r in self.db.execute("SELECT id, name, type, kwh_year, note FROM fixed_loads ORDER BY id"):
+            label, typical = APPLIANCE_TYPES.get(r["type"], APPLIANCE_TYPES["other"])
+            out.append({**dict(r), "type_label": label, "kwh_year_used": r["kwh_year"] or typical,
+                        "source": "label" if r["kwh_year"] else "typical"})
+        return out
+
+    def add_fixed_load(self, name: str, type_: str, kwh_year: float | None, note: str | None = None) -> int:
+        cur = self.db.execute("INSERT INTO fixed_loads (name, type, kwh_year, note) VALUES (?, ?, ?, ?)",
+                              (name, type_, kwh_year, note))
+        self.db.commit()
+        return cur.lastrowid
+
+    def update_fixed_load(self, load_id: int, name: str, type_: str, kwh_year: float | None) -> None:
+        self.db.execute("UPDATE fixed_loads SET name = ?, type = ?, kwh_year = ? WHERE id = ?", (name, type_, kwh_year, load_id))
+        self.db.commit()
+
+    def delete_fixed_load(self, load_id: int) -> None:
+        self.db.execute("DELETE FROM fixed_loads WHERE id = ?", (load_id,))
+        self.db.commit()
 
     def watts(self) -> dict[str, float]:
         """Power the owner entered for devices (e.g. an incandescent chandelier), in watts."""
@@ -352,13 +383,16 @@ def build_energy(store: EnergyStore, tmean: dict[str, float], days: int = 28, to
                 kwh = share * 0.25 * power[d]["kw"]
                 daily_devices[s[:10]] += kwh
                 device_kwh[d] += kwh
-    rest = {d: max(daily_total[d] - daily_devices.get(d, 0), 0) for d in daily_total}
+    fixed = store.fixed_loads()
+    fixed_daily = sum(f["kwh_year_used"] for f in fixed) / 365
+    rest = {d: max(daily_total[d] - daily_devices.get(d, 0) - fixed_daily, 0) for d in daily_total}
     model = hvac_model(rest, tmean)
     series = []
     for d in sorted(daily_total):
         cdd, hdd = degree_days(tmean.get(d))
         hvac = min(rest[d], model["per_cdd"] * cdd + model["per_hdd"] * hdd) if model else None
         series.append({"day": d, "total_kwh": round(daily_total[d], 1), "devices_kwh": round(daily_devices.get(d, 0), 1),
+                       "appliances_kwh": round(min(fixed_daily, daily_total[d]), 1),
                        "hvac_kwh": round(hvac, 1) if hvac is not None else None,
                        "other_kwh": round(rest[d] - (hvac or 0), 1), "tmean_f": tmean.get(d)})
     total = sum(r["total_kwh"] for r in series)
@@ -414,15 +448,27 @@ def build_energy(store: EnergyStore, tmean: dict[str, float], days: int = 28, to
                      "text": f"Estimated from each bulb's model and the brightness it was used at ({len(bulbs)} bulbs). "
                              f"Switched off they still draw about {standby_w:.0f} W together, {standby_w * 8.76:,.0f} kWh a year, "
                              "because they stay connected to the network."})
+    if fixed:
+        fixed_w = fixed_daily * 1000 / 24
+        share = f", about {fixed_w / standby:.0%} of the {standby:,} W always-on load" if standby else ""
+        typical = [f["name"] for f in fixed if f["source"] == "typical"]
+        recs.append({"level": "good", "title": f"Fridges and freezers: about {fixed_daily * 365:,.0f} kWh a year",
+                     "text": f"{len(fixed)} appliance(s) running around the clock average {fixed_w:,.0f} W{share}. "
+                             + (f"{', '.join(typical)} use{'s' if len(typical) == 1 else ''} a typical figure; the yellow "
+                                "EnergyGuide label (or the model's spec sheet) gives the real kWh per year. " if typical else "")
+                             + "Older units, warm garages and worn door seals can use twice the label figure; a plug-in "
+                               "energy meter for a week tells you exactly."})
     small = [x for x in devices if x["status"] == "small"]
     if small:
         recs.append({"level": "good", "title": "Lights and small devices aren't guessed",
                      "text": "Dimmers, TVs, purifiers and robot vacuums use too little for the meter to measure and don't "
                              "say what's connected, so the hub doesn't estimate them. If one runs a big load, such as an "
                              "incandescent chandelier on a dimmer, enter its watts in the device list."})
-    return {"days": days, "series": series, "devices": devices, "spikes": found_spikes, "hvac": model,
+    return {"days": days, "series": series, "devices": devices, "spikes": found_spikes, "hvac": model, "fixed_loads": fixed,
+            "appliance_types": {k: {"label": v[0], "kwh_year": v[1]} for k, v in APPLIANCE_TYPES.items()},
             "standby_w": standby, "recommendations": recs,
             "summary": {"total_kwh": round(total), "hvac_kwh": round(hvac_total) if model else None,
                         "devices_kwh": round(sum(r["devices_kwh"] for r in series)),
+                        "appliances_kwh": round(sum(r["appliances_kwh"] for r in series)),
                         "peak_kw": max((v * 4 for v in intervals.values()), default=None)},
             "has_energy": bool(intervals), "has_activity": bool(activity)}

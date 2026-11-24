@@ -1341,6 +1341,29 @@ class WattsIn(BaseModel):
     watts: float | None = Field(None, ge=1, le=20000)   # power when on; empty clears it
 
 
+class FixedLoadIn(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+    type: Literal["freezer", "fridge", "beverage", "wine", "other"]
+    kwh_year: float | None = Field(None, ge=10, le=5000)   # from the EnergyGuide label; empty uses a typical figure
+
+
+@app.post("/api/energy/appliances")
+async def add_fixed_load(request: Request, body: FixedLoadIn):
+    return {"id": hub_of(request).energy.add_fixed_load(body.name.strip(), body.type, body.kwh_year)}
+
+
+@app.put("/api/energy/appliances/{load_id}")
+async def update_fixed_load(request: Request, load_id: int, body: FixedLoadIn):
+    hub_of(request).energy.update_fixed_load(load_id, body.name.strip(), body.type, body.kwh_year)
+    return {"ok": True}
+
+
+@app.delete("/api/energy/appliances/{load_id}")
+async def delete_fixed_load(request: Request, load_id: int):
+    hub_of(request).energy.delete_fixed_load(load_id)
+    return {"ok": True}
+
+
 @app.get("/api/energy/watts")
 async def energy_watts(request: Request):
     return {"watts": hub_of(request).energy.watts()}

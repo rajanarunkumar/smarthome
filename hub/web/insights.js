@@ -386,7 +386,8 @@ async function renderEnergy(fetch = true) {
   if (state.tab !== "insights") return;
   const en = state.energy;
   const css = getComputedStyle(document.documentElement);
-  const C = { devices: css.getPropertyValue("--viz-1").trim(), hvac: css.getPropertyValue("--viz-2").trim(), other: css.getPropertyValue("--viz-3").trim() };
+  const C = { devices: css.getPropertyValue("--viz-1").trim(), hvac: css.getPropertyValue("--viz-2").trim(), other: css.getPropertyValue("--viz-3").trim(),
+              fridges: (css.getPropertyValue("--viz-4") || css.getPropertyValue("--viz-5")).trim() || "#8a6fd1" };
   const s = en.summary;
   view.innerHTML = `${insightControls()}
     ${!en.has_energy ? `<p class="empty">No electricity data yet. Connect Smart Meter Texas in Settings, then tap <b>Fetch last 4 weeks</b>. Smart Meter Texas posts each day's 15-minute data the next day.</p>` : `
@@ -410,18 +411,30 @@ async function renderEnergy(fetch = true) {
   planHtml().then((html) => { if (body.isConnected) body.insertAdjacentHTML("afterbegin", html); }).catch((err) => toast(err.message));
   const temp = (d) => { const r = en.series.find((x) => x.day === d); return r && r.tmean_f != null ? ` · ${Math.round(r.tmean_f)}°F` : ""; };
   if (insightTable) {
-    body.innerHTML = `<div class="table-wrap"><table class="viz-table"><thead><tr><th>Day</th><th>Total (kWh)</th><th>Tracked devices</th><th>Heating and cooling (est.)</th><th>Everything else</th><th>Mean temp (°F)</th></tr></thead>
-      <tbody>${en.series.map((r) => `<tr><td>${esc(shortDay(r.day))}</td><td>${fmtNum(r.total_kwh, 1)}</td><td>${fmtNum(r.devices_kwh, 1)}</td><td>${fmtNum(r.hvac_kwh, 1)}</td><td>${fmtNum(r.other_kwh, 1)}</td><td>${fmtNum(r.tmean_f)}</td></tr>`).join("")}</tbody></table></div>`;
+    body.innerHTML = `<div class="table-wrap"><table class="viz-table"><thead><tr><th>Day</th><th>Total (kWh)</th><th>Tracked devices</th><th>Fridges and freezers</th><th>Heating and cooling (est.)</th><th>Everything else</th><th>Mean temp (°F)</th></tr></thead>
+      <tbody>${en.series.map((r) => `<tr><td>${esc(shortDay(r.day))}</td><td>${fmtNum(r.total_kwh, 1)}</td><td>${fmtNum(r.devices_kwh, 1)}</td><td>${fmtNum(r.appliances_kwh, 1)}</td><td>${fmtNum(r.hvac_kwh, 1)}</td><td>${fmtNum(r.other_kwh, 1)}</td><td>${fmtNum(r.tmean_f)}</td></tr>`).join("")}</tbody></table></div>`;
   } else {
     body.innerHTML = `<div class="section-title"><span>Daily electricity</span></div>
-      <div class="card pad chart" id="chart-energy">${legend([["Tracked devices", C.devices], ["Heating and cooling (estimated)", C.hvac], ["Everything else", C.other]])}</div>
+      <div class="card pad chart" id="chart-energy">${legend([["Tracked devices", C.devices], ...(en.fixed_loads.length ? [["Fridges and freezers", C.fridges]] : []), ["Heating and cooling (estimated)", C.hvac], ["Everything else", C.other]])}</div>
       <p class="note">Heating and cooling is estimated from how daily use rises with outside temperature${en.hvac ? ` (fit R² ${en.hvac.r2})` : ""}. Hover a day for its temperature.</p>`;
     columnChart($("#chart-energy"), { days: en.series.map((r) => r.day), unit: "kWh", digits: 1, label: "Daily electricity in kWh", note: temp,
       stacks: [{ name: "Tracked devices", color: C.devices, values: en.series.map((r) => r.devices_kwh) },
+               ...(en.fixed_loads.length ? [{ name: "Fridges and freezers", color: C.fridges, values: en.series.map((r) => r.appliances_kwh || 0) }] : []),
                { name: "Heating and cooling (estimated)", color: C.hvac, values: en.series.map((r) => r.hvac_kwh || 0) },
                { name: "Everything else", color: C.other, values: en.series.map((r) => r.other_kwh) }] });
   }
   body.insertAdjacentHTML("beforeend", `
+    <div class="section-title"><span>Always-on appliances</span></div>
+    <div class="card" id="fixed-loads">${en.fixed_loads.map((f) => `
+      <div class="row"><div class="main"><span class="name small">${esc(f.name)}</span>
+        <span class="sub wrap">${esc(f.type_label)} · ${fmtNum(f.kwh_year_used)} kWh a year ${f.source === "typical" ? "(typical)" : "(label)"} · ${fmtNum(f.kwh_year_used * 1000 / 8760)} W average</span></div>
+        <button class="pill small" data-fixed-edit="${f.id}">Edit</button><button class="pill small danger" data-fixed-del="${f.id}">Remove</button></div>`).join("")}
+      <div class="row"><span class="sub wrap">Fridges, freezers and coolers aren't connected but run all the time. Add each one; the kWh per year on its yellow EnergyGuide label is best, otherwise a typical figure is used.</span></div>
+      <div class="row key-row"><input type="text" id="fixed-name" placeholder="Name, e.g. Garage freezer" maxlength="40">
+        <select id="fixed-type">${Object.entries(en.appliance_types).map(([k, t]) => `<option value="${k}">${esc(t.label)} (~${t.kwh_year} kWh/yr)</option>`).join("")}</select>
+        <input type="number" id="fixed-kwh" placeholder="kWh/yr from label (optional)" min="10" max="5000">
+        <button class="pill primary" id="fixed-add">Add</button></div>
+    </div>
     <div class="section-title"><span>Biggest spikes</span></div>
     ${en.spikes.length ? `<div class="card">${en.spikes.map((e) => `
       <div class="row"><div class="main"><span class="name small">${esc(fmtSlot(e.start, e.end))}</span>
@@ -440,6 +453,28 @@ async function renderEnergy(fetch = true) {
       <p class="note">Power is worked out by matching when each device ran against the meter's 15-minute readings. The hub records device activity from now on; electricity arrives a day late from Smart Meter Texas.</p>`
       : `<p class="note">No device activity recorded yet. The hub notes every 2 minutes which devices are running (washer, dryer, pool pump, AC, plugs, TV) from now on.</p>`}`);
 }
+
+// Always-on appliances (fridges, freezers, coolers): yearly kWh from the label or a typical figure.
+document.addEventListener("click", async (e) => {
+  const add = e.target.closest("#fixed-add"), del = e.target.closest("[data-fixed-del]"), edit = e.target.closest("[data-fixed-edit]");
+  if (!add && !del && !edit) return;
+  try {
+    if (add) {
+      const name = $("#fixed-name").value.trim(), type = $("#fixed-type").value, kwh = $("#fixed-kwh").value.trim();
+      if (!name) { toast("Give it a name, e.g. Garage freezer"); return; }
+      await api("POST", "/api/energy/appliances", { name, type, kwh_year: kwh ? Number(kwh) : null });
+      toast(`${name} added`);
+    } else if (del) {
+      await api("DELETE", `/api/energy/appliances/${del.dataset.fixedDel}`);
+    } else {
+      const f = state.energy.fixed_loads.find((x) => String(x.id) === edit.dataset.fixedEdit);
+      const kwh = prompt(`kWh per year for ${f.name} (from its yellow EnergyGuide label; empty for the typical figure)`, f.kwh_year ?? "");
+      if (kwh === null) return;
+      await api("PUT", `/api/energy/appliances/${f.id}`, { name: f.name, type: f.type, kwh_year: kwh.trim() ? Number(kwh) : null });
+    }
+    renderEnergy(true);
+  } catch (err) { toast(err.message); }
+});
 
 // Power when on, entered by the owner (e.g. an incandescent chandelier): counted exactly instead of guessed.
 async function editWatts(id, name, now) {
