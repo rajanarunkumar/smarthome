@@ -464,3 +464,5 @@ details.card > summary { cursor: pointer; line-height: 1.5; }
 .chat-model select { flex: 1; min-width: 0; }
 .row.stack { flex-direction: column; align-items: stretch; gap: 6px; }
 .row.stack .model-select { max-width: none; width: 100%; }
+.update-list { margin: 0; padding-left: 18px; font-size: 13px; color: var(--muted); }
+.update-log pre { margin: 0; padding: 10px 16px 14px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); }

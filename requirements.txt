@@ -17,6 +17,7 @@ ring-doorbell>=0.9  # Ring doorbells and cameras
 lennoxs30api>=0.2.26  # Lennox iComfort S30/E30/M30/S40
 anthropic>=2.0  # optional Claude photo analysis and Ask Home
 google-genai>=1.30  # optional Gemini for Ask Home (free tier)
+openai>=2.0  # optional OpenAI models for Ask Home
 pillow>=10  # zone photo analysis
 boto3>=1.27  # S3 backups
 cryptography>=42  # backup encryption

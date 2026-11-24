@@ -360,3 +360,87 @@ def test_model_settings_route(tmp_path, monkeypatch):
         assert client.put("/api/settings/chat", json={"quick": "openai:gpt"}, headers=token).status_code == 400
         assert client.put("/api/settings/chat", json={"photo_model": "claude-opus-1"}, headers=token).status_code == 400
         assert client.post("/api/chat", json={"message": "hi", "model": "bad model"}, headers=token).status_code == 422
+
+
+# ---------------- OpenAI ----------------
+import json as _json  # noqa: E402
+
+import openai  # noqa: E402
+
+
+class OpenAIHub(FakeHub):
+    def __init__(self, models=("gpt-9", "gpt-9-mini")):
+        super().__init__(key=None)
+        self.data = {"openai": {"api_key": "sk-proj-test", "models": list(models)}}
+        self.secrets = SimpleNamespace(get=lambda k: self.data.get(k), set=lambda k, v: self.data.__setitem__(k, v))
+
+
+def oa_call(name, args, id="call_1"):
+    return SimpleNamespace(id=id, function=SimpleNamespace(name=name, arguments=_json.dumps(args)))
+
+
+class ScriptedOpenAI:
+    def __init__(self, replies, models=(), reject_effort=False):
+        self.replies, self.requests, self._models, self.reject_effort = list(replies), [], list(models), reject_effort
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
+        self.models = SimpleNamespace(list=self.list_models)
+
+    async def create(self, **kw):
+        if self.reject_effort and "reasoning_effort" in kw:
+            self.reject_effort = False
+            raise openai.BadRequestError("Unsupported parameter: 'reasoning_effort'",
+                                         response=__import__("httpx").Response(400, request=__import__("httpx").Request("POST", "https://x")), body=None)
+        self.requests.append({**kw, "messages": [dict(m) for m in kw["messages"]]})
+        calls, content = self.replies.pop(0)
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content, refusal=None, tool_calls=calls))])
+
+    def list_models(self):
+        async def gen():
+            for m in self._models:
+                yield m
+        return gen()
+
+
+def test_openai_lists_usable_models_newest_first():
+    M = lambda id, t: SimpleNamespace(id=id, created=t)  # noqa: E731
+    models = [M("gpt-9", 300), M("gpt-9-mini", 290), M("gpt-9-2026-01-01", 280), M("gpt-image-2", 310), M("o7", 200),
+              M("text-embedding-4", 100), M("gpt-9-realtime", 305), M("dall-e-5", 50), M("gpt-8", 150)]
+    hub = OpenAIHub(models=())
+    hub.data = {}
+    chat = Chat(hub, openai_factory=lambda key: ScriptedOpenAI([], models=models))
+    ids = asyncio.run(chat.connect_openai("sk-proj-test-key-000000"))
+    assert ids == ["gpt-9", "gpt-9-mini", "o7", "gpt-8"] and hub.data["openai"]["api_key"] == "sk-proj-test-key-000000"
+    assert chat.model_for("quick") == "openai:gpt-9-mini" and chat.model_for("thorough") == "openai:gpt-9"
+    assert [m["label"] for m in chat.choices()["available"]][0] == "OpenAI gpt-9 · paid"
+
+
+def test_openai_controls_devices_with_the_same_tools():
+    hub = OpenAIHub()
+    oa = ScriptedOpenAI([([oa_call("list_devices", {})], None),
+                         ([oa_call("control_device", {"device_id": "hue:2", "state": {"on": False}}, id="call_2")], None),
+                         (None, "Turned off the lamp.")], reject_effort=True)
+    chat = Chat(hub, openai_factory=lambda key: oa)
+    out = asyncio.run(chat.send("turn off the lamp"))
+    assert out["reply"] == "Turned off the lamp." and out["model"] == "openai:gpt-9-mini" and out["model_label"] == "OpenAI gpt-9-mini"
+    assert hub.calls == [("state", "hue:2", {"on": False})]
+    first = oa.requests[0]
+    assert "reasoning_effort" not in first                        # the model rejected it once; retried without
+    assert first["messages"][0]["role"] == "system" and first["tools"][0]["function"]["name"] == "list_devices"
+    last = oa.requests[-1]["messages"]
+    assert last[-2]["tool_calls"][0]["id"] == "call_2" and last[-1] == {"role": "tool", "tool_call_id": "call_2", "content": "Done."}
+
+
+def test_openai_never_unlocks_and_bad_json_is_reported():
+    hub = OpenAIHub()
+    bad = SimpleNamespace(id="call_9", function=SimpleNamespace(name="control_device", arguments="{not json"))
+    oa = ScriptedOpenAI([([oa_call("control_device", {"device_id": "schlage:3", "state": {"locked": False}}), bad], None),
+                         (None, "Can't do that from chat.")])
+    asyncio.run(Chat(hub, openai_factory=lambda key: oa).send("unlock the door"))
+    msgs = oa.requests[1]["messages"]
+    assert "Unlocking isn't possible" in msgs[-2]["content"] and "valid JSON" in msgs[-1]["content"] and hub.calls == []
+
+
+def test_a_removed_openai_model_falls_back():
+    hub = OpenAIHub(models=("gpt-9",))
+    hub.data["chat"] = {"models": {"quick": "openai:gpt-8-mini"}}
+    assert Chat(hub).model_for("quick") == "openai:gpt-9"

@@ -185,6 +185,10 @@ The hub only ever needs a **token**, never your LG password, so there is nothing
 1. Open **connect-pat.lgthinq.com** and choose the same sign-in you use in the ThinQ app (for example **Continue with Google**) if it's offered.
 2. Community reports say that page may accept only an LG email-and-password account (LG doesn't confirm this either way). If so: create an ordinary LG account (email + password), **invite it as a member of your home in the ThinQ app** (the menu name varies by app version), and make the token with that account. I haven't verified that appliances shared this way show up in LG's API, so check the Settings card says how many appliances it found.
 
+## Updating and restarting (Admin)
+
+**Admin → Update or restart…** shows the branch and commit the hub runs, what's new on GitHub, and every branch. **Pull and restart** fetches, switches branch if you picked another, fast-forwards, installs packages if `requirements.txt` changed, and restarts; the page reloads when the hub is back (about 10 seconds). **Pull only** skips the restart; **Restart** just restarts. It never merges or throws anything away: if the Mac's copy has edits or commits of its own, it stops and says so. Needs a person signed in (scripts with the API token can't update or restart). Restarts rely on the background service from `scripts/install-service.sh`; without it the hub replaces its own process. The Mac needs to be able to `git fetch` without a password prompt (the macOS keychain usually handles this after one manual `git pull`).
+
 ## Ask Home (chat)
 
 The speech-bubble button at the top opens a chat. Ask in your own words: "turn off everything downstairs", "set the thermostat to 70", "run the front lawn for 10 minutes", "what's on right now?", "review my device names", "review my schedules".
@@ -196,6 +200,7 @@ The speech-bubble button at the top opens a chat. Ask in your own words: "turn o
   - **Claude**, using the Anthropic key in **Settings → Photo analysis**. Pay as you go: roughly 5–10¢ per command and 15–30¢ for a full review of names or schedules on Claude Opus 5.5.
   - **Pick a model per kind of request** in Settings → Ask Home: one for *everyday commands* and one for *reviews and questions*. The chat decides which kind each message is from its wording ("review", "tidy", "suggest", "why"…), and the **Model** menu at the top of the chat overrides it for the next messages. Each reply shows which model answered. With only one provider's key, sensible defaults are used (Gemini: Flash-Lite for commands, Flash for reviews; Claude: Haiku for commands, Opus for reviews).
   - **Photo analysis** has its own choice of Claude model (Haiku is cheapest, Opus the most careful).
+  - **OpenAI** too: add a key from platform.openai.com → API keys (paid, needs credit on the account). The hub asks OpenAI which chat models the key can use and offers those.
   - The conversation is kept in the hub's memory for an hour, not on disk. Moving between Gemini and Claude mid-conversation carries a short recap of the last few exchanges over.
 
 **Naming that works well everywhere** (the chat follows this when you ask it to review names): *Room + what it is* ("Kitchen Island Lights", "Primary Bedroom Fan"), 2–4 words, unique, no brand or model names, a plug named after what's plugged into it, and nothing that sounds like another device or a command. These names carry over to Alexa and Google Home once they're connected.

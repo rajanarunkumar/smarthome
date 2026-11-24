@@ -1005,6 +1005,9 @@ function renderSettings() {
   accountButton("#gemini-on", () => api("PUT", "/api/settings/chat", { gemini_key: val("#gemini-key") }),
     () => "Gemini added");
   accountButton("#gemini-off", () => api("DELETE", "/api/settings/gemini"), () => "Gemini key removed");
+  accountButton("#openai-on", () => api("PUT", "/api/settings/chat", { openai_key: val("#openai-key") }),
+    (r) => `OpenAI added: ${r.available.filter((m) => m.id.startsWith("openai:")).length} chat models`);
+  accountButton("#openai-off", () => api("DELETE", "/api/settings/openai"), () => "OpenAI key removed");
   for (const [sel, field] of [["#model-quick", "quick"], ["#model-thorough", "thorough"], ["#photo-model", "photo_model"]]) {
     $(sel)?.addEventListener("change", async (e) => {
       try { await api("PUT", "/api/settings/chat", { [field]: e.target.value }); toast("Model saved"); }
@@ -1584,10 +1587,13 @@ function chatSettingsCard() {
         ${modelSelect("model-thorough", c.models?.thorough, available)}</label>
       <div class="row"><span class="sub wrap">The chat picks by what you ask; you can also choose a model for one message in the chat.${usesGemini ? " On Gemini's free tier Google may use what's sent (your device names and rooms) to improve its products." : ""}</span></div>` : `
       <div class="row"><div class="main"><span class="name">Not set up</span>
-        <span class="sub wrap">Get a free Gemini key at <b>aistudio.google.com → Get API key</b>, or add an Anthropic key under Photo analysis below.</span></div></div>`}
+        <span class="sub wrap">Get a free Gemini key at <b>aistudio.google.com → Get API key</b>, an OpenAI key at <b>platform.openai.com → API keys</b>, or add an Anthropic key under Photo analysis below.</span></div></div>`}
       ${c.gemini ? `<div class="row"><span class="sub">Gemini key saved.</span><button class="pill danger" id="gemini-off">Remove</button></div>` : `
       <div class="row key-row"><input type="password" id="gemini-key" placeholder="Gemini API key (AIza…), free" autocomplete="off" spellcheck="false">
         <button class="pill primary" id="gemini-on">Add Gemini</button></div>`}
+      ${c.openai ? `<div class="row"><span class="sub">OpenAI key saved (${(c.available || []).filter((m) => m.id.startsWith("openai:")).length} chat models).</span><button class="pill danger" id="openai-off">Remove</button></div>` : `
+      <div class="row key-row"><input type="password" id="openai-key" placeholder="OpenAI API key (sk-…), paid" autocomplete="off" spellcheck="false">
+        <button class="pill" id="openai-on">Add OpenAI</button></div>`}
     </div>`;
 }
 function photoModelRow() {

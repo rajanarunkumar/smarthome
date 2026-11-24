@@ -39,7 +39,8 @@ from .auth import SESSION_COOKIE, Auth
 from .cache import LoadingCache
 from .telemetry import Telemetry
 from . import backup as backup_mod
-from .chat import GEMINI_MODEL, MODEL_CHOICES, Chat
+from .chat import GEMINI_MODEL, Chat
+from .updater import Updater
 from .config import Secrets, data_dir
 from . import weather as weather_api
 from .energy import EnergyStore, build_energy, device_power
@@ -97,6 +98,7 @@ class Hub:
         self.adapters.append(self.scheduler)
         self.last_devices: dict[str, Device] = {}
         self.chat = Chat(self)
+        self.updater = Updater()
         self.history = HistoryStore(self.store.db)
         self.rainbird.on_run = self.history.log_run
         self.irrigation = SmartPrograms(self.store.db, self.history, self.rainbird)
@@ -684,6 +686,7 @@ async def status(request: Request):
         **{a.brand: s for a, s in zip(hub.adapters, brands)},
         "claude": {"connected": bool(hub.secrets.get("anthropic_api_key"))},
         "chat": {"provider": hub.chat.provider(), "gemini": bool((hub.secrets.get("gemini") or {}).get("api_key")),
+                 "openai": bool((hub.secrets.get("openai") or {}).get("api_key")),
                  "model": (hub.secrets.get("gemini") or {}).get("model") or GEMINI_MODEL,
                  "choice": (hub.secrets.get("chat") or {}).get("provider"), **hub.chat.choices(),
                  "photo_model": hub.secrets.get("photo_model") or PHOTO_MODELS[-1]},
@@ -1199,7 +1202,7 @@ class ChatIn(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
     conversation_id: str | None = Field(None, max_length=40)
     mode: Literal["auto", "quick", "thorough"] = "auto"
-    model: str | None = Field(None, max_length=60, pattern=r"^(gemini|claude):[a-z0-9.\-]+$")   # this message only
+    model: str | None = Field(None, max_length=60, pattern=r"^(gemini|claude|openai):[a-z0-9.\-]+$")   # this message only
 
 
 class PlanApplyIn(BaseModel):
@@ -1572,6 +1575,7 @@ class ChatSettingsIn(BaseModel):
     provider: Literal["gemini", "claude"] | None = None
     gemini_key: str | None = Field(None, min_length=20, max_length=200, pattern=r"^[A-Za-z0-9_\-]+$")
     model: str | None = Field(None, min_length=3, max_length=60, pattern=r"^[a-z0-9.\-]+$")
+    openai_key: str | None = Field(None, min_length=20, max_length=300, pattern=r"^[A-Za-z0-9_\-]+$")
     quick: str | None = Field(None, max_length=60)      # "provider:model" for everyday commands
     thorough: str | None = Field(None, max_length=60)   # "provider:model" for reviews and questions
     photo_model: str | None = Field(None, max_length=40)
@@ -1588,13 +1592,15 @@ async def set_chat_settings(request: Request, body: ChatSettingsIn):
         gemini["model"] = body.model
     if gemini:
         hub.secrets.set("gemini", gemini)
+    if body.openai_key:
+        await hub.chat.connect_openai(body.openai_key)
     chat = dict(hub.secrets.get("chat") or {})
     if body.provider:
         chat["provider"] = body.provider
     for mode in ("quick", "thorough"):
         value = getattr(body, mode)
         if value:
-            if value not in MODEL_CHOICES:
+            if value not in hub.chat.catalog():
                 raise HubError(400, f"Unknown model {value}")
             chat["models"] = {**chat.get("models", {}), mode: value}
     if chat:
@@ -1604,6 +1610,12 @@ async def set_chat_settings(request: Request, body: ChatSettingsIn):
             raise HubError(400, f"Unknown model {body.photo_model}")
         hub.secrets.set("photo_model", body.photo_model)
     return {"ok": True, "provider": hub.chat.provider(), **hub.chat.choices()}
+
+
+@app.delete("/api/settings/openai")
+async def clear_openai_key(request: Request):
+    hub_of(request).secrets.set("openai", None)
+    return {"ok": True}
 
 
 @app.delete("/api/settings/gemini")
@@ -1660,6 +1672,7 @@ STORED_SETTINGS = {
     "rainbird": ("Rain Bird controller address and password, zone names and sizes", "password"),
     "ring": ("Ring sign-in token (not the password)", "key"),
     "gemini": ("Google Gemini API key (Ask Home)", "key"),
+    "openai": ("OpenAI API key and its chat models (Ask Home)", "key"),
     "chat": ("Ask Home: which models answer", "config"),
     "photo_model": ("Photo analysis: which Claude model", "config"),
     "lennox": ("Lennox iComfort email and password (or thermostat address)", "password"),
@@ -1777,6 +1790,34 @@ async def pentair_disconnect(request: Request):
 
 
 # Admin: telemetry and manual refresh
+# Updating the hub: branch, pull, restart. A signed-in person only (not the scripts' API token).
+class UpdateIn(BaseModel):
+    branch: str = Field(min_length=1, max_length=120)
+    restart: bool = True
+
+
+@app.get("/api/admin/update")
+async def admin_update_status(request: Request, fetch: bool = True):
+    _email(request)
+    return await hub_of(request).updater.status(fetch=fetch)
+
+
+@app.post("/api/admin/update")
+async def admin_update(request: Request, body: UpdateIn):
+    who = _email(request)
+    log.warning("%s started an update to %s", who, body.branch)
+    return hub_of(request).updater.start(body.branch, body.restart)
+
+
+@app.post("/api/admin/restart")
+async def admin_restart(request: Request):
+    who = _email(request)
+    hub = hub_of(request)
+    log.warning("%s restarted the hub", who)
+    asyncio.get_running_loop().call_later(1.0, hub.updater.restart_now)
+    return {"ok": True, "service": hub.updater.under_launchd()}
+
+
 @app.get("/api/admin/telemetry")
 async def admin_telemetry(request: Request):
     hub = hub_of(request)

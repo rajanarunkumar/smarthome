@@ -46,6 +46,18 @@ THOROUGH_WORDS = ("review", "tidy", "clean up", "cleanup", "organize", "organise
 HISTORY_RECAP = 6         # exchanges carried over when a conversation moves between Gemini and Claude
 
 
+OPENAI_SKIP = ("audio", "realtime", "tts", "transcribe", "image", "search", "embedding", "instruct", "moderation",
+               "dall", "codex", "computer", "deep-research", "chat-latest")
+
+
+def openai_chat_models(models: list) -> list[str]:
+    """OpenAI model ids that can chat and call tools, newest first, without dated snapshots or special-purpose ones."""
+    import re
+    keep = [m for m in models if (m.id.startswith("gpt-") or re.match(r"^o\d", m.id))
+            and not any(w in m.id for w in OPENAI_SKIP) and not re.search(r"-\d{4}-\d{2}-\d{2}$", m.id)]
+    return [m.id for m in sorted(keep, key=lambda m: getattr(m, "created", 0) or 0, reverse=True)][:12]
+
+
 def pick_mode(text: str) -> str:
     t = text.lower()
     return "thorough" if any(w in t for w in THOROUGH_WORDS) else "quick"
@@ -185,16 +197,46 @@ def schedule_row(s: Any) -> dict:
 
 
 class Chat:
-    def __init__(self, hub: Any, client_factory=None, gemini_factory=None) -> None:
+    def __init__(self, hub: Any, client_factory=None, gemini_factory=None, openai_factory=None) -> None:
         self.hub = hub
         self._client_factory = client_factory
         self._gemini_factory = gemini_factory
+        self._openai_factory = openai_factory
         self._conversations: dict[str, dict] = {}
         self._plans: dict[str, dict] = {}
 
     def keys(self) -> dict[str, bool]:
         return {"gemini": bool((self.hub.secrets.get("gemini") or {}).get("api_key")),
-                "claude": bool(self.hub.secrets.get("anthropic_api_key"))}
+                "claude": bool(self.hub.secrets.get("anthropic_api_key")),
+                "openai": bool((self.hub.secrets.get("openai") or {}).get("api_key"))}
+
+    def _openai_models(self) -> list[str]:
+        return list((self.hub.secrets.get("openai") or {}).get("models") or [])
+
+    def catalog(self) -> dict[str, str]:
+        """Every model that can be chosen now: the fixed Gemini and Claude list plus the OpenAI models the key can use."""
+        out = dict(MODEL_CHOICES)
+        for m in self._openai_models():
+            out[f"openai:{m}"] = f"OpenAI {m} · paid"
+        return out
+
+    async def connect_openai(self, key: str) -> list[str]:
+        """Check the key by asking which models it can use, and remember the ones that can chat."""
+        import openai
+        client = self._openai_factory(key) if self._openai_factory else openai.AsyncOpenAI(api_key=key)
+        try:
+            models = [m async for m in client.models.list()]
+        except openai.AuthenticationError as exc:
+            raise HubError(400, "OpenAI rejected the API key.") from exc
+        except openai.APIConnectionError as exc:
+            raise HubError(504, "Couldn't reach OpenAI. Check the Mac's internet connection.") from exc
+        except openai.APIStatusError as exc:
+            raise HubError(502, f"OpenAI said {exc.status_code} when listing models.") from exc
+        ids = openai_chat_models(models)
+        if not ids:
+            raise HubError(400, "This OpenAI key can't use any chat models.")
+        self.hub.secrets.set("openai", {"api_key": key, "models": ids})
+        return ids
 
     def model_for(self, mode: str) -> str | None:
         """The "provider:model" for quick commands or thorough reviews: the person's choice if its key is saved,
@@ -205,11 +247,16 @@ class Chat:
         if not chosen and cfg.get("provider"):               # "use this provider": its quick or thorough model
             chosen = {("gemini", "quick"): "gemini:" + self._gemini_model(), ("gemini", "thorough"): "gemini:gemini-flash-latest",
                       ("claude", "quick"): "claude:claude-haiku-5-5", ("claude", "thorough"): f"claude:{MODEL}"}.get((cfg["provider"], mode))
-        if chosen and keys.get(chosen.split(":", 1)[0]):
+        if chosen and keys.get(chosen.split(":", 1)[0]) and not (chosen.startswith("openai:") and chosen[7:] not in self._openai_models()):
             return chosen
-        order = (["gemini:" + self._gemini_model(), "claude:claude-haiku-5-5"] if mode == "quick"
-                 else [f"claude:{MODEL}", "gemini:gemini-flash-latest"])
-        return next((m for m in order if keys[m.split(":", 1)[0]]), None)
+        if chosen and chosen.startswith("openai:") and chosen[7:] not in self._openai_models():
+            chosen = None
+        oa = self._openai_models()
+        oa_quick = next((m for m in oa if "mini" in m), oa[0] if oa else None)
+        oa_thorough = next((m for m in oa if "mini" not in m and "nano" not in m), oa[0] if oa else None)
+        order = (["gemini:" + self._gemini_model(), "claude:claude-haiku-5-5", f"openai:{oa_quick}"] if mode == "quick"
+                 else [f"claude:{MODEL}", f"openai:{oa_thorough}", "gemini:gemini-flash-latest"])
+        return next((m for m in order if keys[m.split(":", 1)[0]] and not m.endswith(":None")), None)
 
     def _gemini_model(self) -> str:
         return (self.hub.secrets.get("gemini") or {}).get("model") or GEMINI_MODEL
@@ -222,7 +269,7 @@ class Chat:
     def choices(self) -> dict:
         keys = self.keys()
         return {"models": {mode: self.model_for(mode) for mode in MODES},
-                "available": [{"id": k, "label": v} for k, v in MODEL_CHOICES.items() if keys[k.split(":", 1)[0]]]}
+                "available": [{"id": k, "label": v} for k, v in self.catalog().items() if keys[k.split(":", 1)[0]]]}
 
     def _client(self) -> Any:
         key = self.hub.secrets.get("anthropic_api_key")
@@ -387,7 +434,7 @@ class Chat:
         self._prune()
         mode = mode if mode in MODES else pick_mode(text)
         if model:
-            if model not in MODEL_CHOICES and not model.startswith("gemini:gemini-"):
+            if model not in self.catalog() and not model.startswith("gemini:gemini-"):
                 raise HubError(400, f"Unknown model {model}")
             if not self.keys().get(model.split(":", 1)[0]):
                 raise HubError(409, f"There's no {model.split(':', 1)[0].title()} key saved in Settings.")
@@ -416,6 +463,8 @@ class Chat:
         turn: dict = {"done": [], "plan": None}
         if provider == "gemini":
             reply = await self._gemini_loop(conv["messages"], prompt, turn, model_id)
+        elif provider == "openai":
+            reply = await self._openai_loop(conv["messages"], prompt, turn, model_id, EFFORT[mode])
         else:
             reply = await self._claude_loop(conv["messages"], prompt, turn, model_id, EFFORT[mode])
         reply = reply or "Done."
@@ -424,7 +473,7 @@ class Chat:
             conv["plan_ids"].append(turn["plan"]["id"])
         plan = turn["plan"]
         return {"conversation_id": conversation_id, "reply": reply, "done": turn["done"], "provider": provider,
-                "model": spec, "model_label": MODEL_CHOICES.get(spec, model_id).split(" · ")[0], "mode": mode,
+                "model": spec, "model_label": self.catalog().get(spec, model_id).split(" · ")[0], "mode": mode,
                 "plan": {k: plan[k] for k in ("id", "summary", "changes", "problems")} if plan else None}
 
     async def _tool_result(self, name: str, args: dict, turn: dict) -> tuple[str, bool]:
@@ -524,6 +573,73 @@ class Chat:
         except errors.APIError as exc:
             del contents[start:]
             raise HubError(*gemini_error(exc, model)) from exc
+
+    async def _openai_loop(self, messages: list, prompt: str, turn: dict, model: str, effort: str = "medium") -> str:
+        """The same tools through OpenAI's Chat Completions function calling."""
+        import openai
+        key = (self.hub.secrets.get("openai") or {}).get("api_key")
+        if not key:
+            raise HubError(409, "Add an OpenAI key in Settings → Ask Home first.")
+        client = self._openai_factory(key) if self._openai_factory else openai.AsyncOpenAI(api_key=key)
+        start = len(messages)
+        if not messages:
+            messages.append({"role": "system", "content": SYSTEM})
+        messages.append({"role": "user", "content": prompt})
+        try:
+            for _ in range(MAX_ROUNDS):
+                response = await _openai_create(client, model=model, messages=messages, tools=OPENAI_TOOLS,
+                                                reasoning_effort=effort, max_completion_tokens=16000)
+                msg = response.choices[0].message
+                calls = list(msg.tool_calls or [])
+                entry: dict = {"role": "assistant", "content": msg.content}
+                if calls:
+                    entry["tool_calls"] = [{"id": c.id, "type": "function",
+                                            "function": {"name": c.function.name, "arguments": c.function.arguments}} for c in calls]
+                messages.append(entry)
+                if not calls:
+                    return (msg.content or msg.refusal or "").strip()
+                for c in calls:
+                    try:
+                        args = json.loads(c.function.arguments or "{}")
+                    except ValueError:
+                        out, is_error = "The arguments weren't valid JSON.", True
+                    else:
+                        out, is_error = await self._tool_result(c.function.name, args if isinstance(args, dict) else {}, turn)
+                    messages.append({"role": "tool", "tool_call_id": c.id, "content": f"Error: {out}" if is_error else out})
+            return "That took too many steps. Try asking for one thing at a time."
+        except openai.AuthenticationError as exc:
+            del messages[start:]
+            raise HubError(400, "OpenAI rejected the API key. Check it in Settings → Ask Home.") from exc
+        except openai.RateLimitError as exc:
+            del messages[start:]
+            if "insufficient_quota" in str(exc):
+                raise HubError(402, "The OpenAI account has no credit left. Add credit at platform.openai.com → Billing.") from exc
+            raise HubError(429, "OpenAI is limiting requests right now. Try again in a minute.") from exc
+        except openai.NotFoundError as exc:
+            del messages[start:]
+            raise HubError(400, f"OpenAI model {model} isn't available to this key. Choose another in Settings → Ask Home.") from exc
+        except openai.APIStatusError as exc:
+            del messages[start:]
+            raise HubError(502, f"OpenAI couldn't answer ({exc.status_code}).") from exc
+        except openai.APIConnectionError as exc:
+            del messages[start:]
+            raise HubError(504, "Couldn't reach OpenAI. Check the Mac's internet connection.") from exc
+
+
+OPENAI_TOOLS = [{"type": "function", "function": {"name": t["name"], "description": t["description"],
+                                                  "parameters": t["input_schema"]}} for t in TOOLS]
+
+
+async def _openai_create(client: Any, **kw: Any) -> Any:
+    """Reasoning models take reasoning_effort; older chat models reject it, so retry once without."""
+    import openai
+    try:
+        return await client.chat.completions.create(**kw)
+    except openai.BadRequestError as exc:
+        if "reasoning_effort" not in str(exc) or "reasoning_effort" not in kw:
+            raise
+        kw.pop("reasoning_effort")
+        return await client.chat.completions.create(**kw)
 
 
 def gemini_error(exc: Any, model: str) -> tuple[int, str]:

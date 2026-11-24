@@ -77,6 +77,7 @@ function drawAdmin() {
       ${busyButton("backfill", "Fetch last 4 weeks", 'data-adm="backfill"')}
       ${busyButton("cache-reload", "Reload caches", 'data-adm="cache" data-reload="1"')}
       ${busyButton("cache-clear", "Clear caches", 'data-adm="cache" data-reload="0"')}
+      <button class="pill" data-update-open>Update or restart…</button>
     </div>
     ${adminResult ? `<div class="adm-result ${adminResult.ok ? "" : "bad"}" role="status">${adminResult.html}</div>` : ""}
 
@@ -231,3 +232,84 @@ view.addEventListener("click", (e) => {
     });
   }
 });
+
+// ---------- update the hub: branch, pull, restart ----------
+let updatePoll = null;
+view.addEventListener("click", (e) => { if (e.target.closest("[data-update-open]")) openUpdate(); });
+
+async function openUpdate() {
+  openSheet("Update the hub", `<p class="note">Checking GitHub…</p>`);
+  let st;
+  try { st = await api("GET", "/api/admin/update"); } catch (err) { $(".sheet-body", sheet).innerHTML = `<p class="note">${esc(err.message)}</p>`; return; }
+  drawUpdate(st);
+}
+
+function drawUpdate(st) {
+  const body = $(".sheet-body", sheet);
+  if (!body) return;
+  const job = st.job;
+  const running = job && (job.state === "running" || job.state === "restarting");
+  const opts = st.branches.map((b) => `<option value="${esc(b.name)}" ${b.name === st.branch ? "selected" : ""}>${esc(b.name)} · ${esc(b.updated)}</option>`).join("");
+  body.innerHTML = `
+    <div class="card">
+      <div class="row"><div class="main"><span class="name small">Running ${esc(st.branch)} · ${esc(st.commit)}</span>
+        <span class="sub wrap">${esc(st.subject)} (${esc(st.when)})</span></div></div>
+      <div class="row"><span class="sub wrap">${st.fetch_error ? `Couldn't check GitHub: ${esc(st.fetch_error)}`
+        : st.behind ? `${st.behind} new change(s) on GitHub:` : "Up to date with GitHub."}${st.ahead ? ` This Mac has ${st.ahead} commit(s) GitHub doesn't.` : ""}</span></div>
+      ${st.incoming.length ? `<div class="row"><ul class="update-list">${st.incoming.map((l) => `<li>${esc(l)}</li>`).join("")}</ul></div>` : ""}
+      ${st.dirty.length ? `<div class="row"><span class="sub wrap">Edited on this Mac (updating will stop until these are committed or discarded): ${esc(st.dirty.join(", "))}</span></div>` : ""}
+    </div>
+    <label class="field"><span>Branch</span><select id="upd-branch">${opts}</select></label>
+    <div class="inline">
+      <button class="pill primary" id="upd-go" ${running ? "disabled" : ""}>Pull and restart</button>
+      <button class="pill" id="upd-pull" ${running ? "disabled" : ""}>Pull only</button>
+      <button class="pill danger" id="upd-restart" ${running ? "disabled" : ""}>Restart</button>
+    </div>
+    ${st.service ? "" : `<p class="note">The hub isn't running as the background service, so a restart replaces its process. Run scripts/install-service.sh once to make restarts and start-at-login automatic.</p>`}
+    ${job ? `<div class="card update-log"><div class="row"><span class="name small">${{ running: "Updating…", restarting: "Restarting…", done: "Done", failed: "Didn't update" }[job.state] || job.state} · ${esc(job.branch)}</span></div>
+      <pre>${esc(job.log.join("\n"))}</pre></div>` : ""}`;
+  const start = async (restart) => {
+    const branch = $("#upd-branch", sheet).value;
+    if (branch !== st.branch && !confirm(`Switch the hub from ${st.branch} to ${branch}?`)) return;
+    try { await api("POST", "/api/admin/update", { branch, restart }); pollUpdate(); }
+    catch (err) { toast(err.message); }
+  };
+  $("#upd-go", sheet).addEventListener("click", () => start(true));
+  $("#upd-pull", sheet).addEventListener("click", () => start(false));
+  $("#upd-restart", sheet).addEventListener("click", async (e) => {
+    if (!confirm("Restart the hub now? It's back in about 10 seconds.")) return;
+    e.target.disabled = true;
+    try { await api("POST", "/api/admin/restart"); toast("Restarting…"); waitForHub(); }
+    catch (err) { toast(err.message); e.target.disabled = false; }
+  });
+  if (running && !updatePoll) pollUpdate();
+}
+
+function pollUpdate() {
+  clearTimeout(updatePoll);
+  updatePoll = setTimeout(async () => {
+    updatePoll = null;
+    if (!sheet.open) return;
+    try {
+      const st = await api("GET", "/api/admin/update?fetch=false");
+      drawUpdate(st);
+      if (st.job?.state === "running") pollUpdate();
+      else if (st.job?.state === "restarting") waitForHub();
+    } catch { waitForHub(); }      // the hub went away mid-restart
+  }, 1500);
+}
+
+// After a restart: wait until the hub answers again, then reload so the new code and pages are used.
+async function waitForHub() {
+  const body = $(".sheet-body", sheet);
+  if (body) body.insertAdjacentHTML("beforeend", `<p class="note" id="upd-wait">Waiting for the hub to come back…</p>`);
+  await new Promise((r) => setTimeout(r, 4000));
+  for (let i = 0; i < 40; i++) {
+    try {
+      const res = await fetch("/api/health", { cache: "no-store" });
+      if (res.ok) { location.reload(); return; }
+    } catch {}
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  toast("The hub hasn't come back yet. Check the Mac.");
+}
