@@ -24,6 +24,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 
 from .history import _solve
+from .units import energy as fmt_energy, power as fmt_power
 
 BALANCE_F = 65.0
 SLOT = timedelta(minutes=15)
@@ -501,7 +502,7 @@ def build_energy(store: EnergyStore, tmean: dict[str, float], days: int = 28, to
     top = [x for x in devices if x["kwh"]][:3]
     if top and total:
         recs.append({"level": "good", "title": "Biggest tracked users",
-                     "text": "; ".join(f"{x['name']}: {x['kwh']:,.0f} kWh at about {x['kw']} kW" for x in top) + "."})
+                     "text": "; ".join(f"{x['name']}: {fmt_energy(x['kwh'])} at about {fmt_power(x['kw'] * 1000)}" for x in top) + "."})
     unexplained = [e for e in found_spikes if not e["running"]]
     if unexplained:
         recs.append({"level": "warning", "title": f"{len(unexplained)} spike(s) with nothing tracked running",

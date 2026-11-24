@@ -22,6 +22,29 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 
 // Every request has a time limit, so a slow brand can never leave a button or tab stuck.
 // `signal` lets a tab switch cancel the previous tab's reads.
+// Numbers in the unit a person would use (same rules as hub/units.py).
+function fmtDuration(minutes) {         // 45 min · 1 h 20 min · 2 d 3 h
+  if (minutes == null || Number.isNaN(minutes)) return "–";
+  const m = Math.round(minutes);
+  if (minutes > 0 && m === 0) return "under 1 min";
+  if (m < 60) return `${m} min`;
+  if (m < 1440) { const h = Math.floor(m / 60), r = m % 60; return r ? `${h} h ${r} min` : `${h} h`; }
+  const hours = Math.round(minutes / 60), d = Math.floor(hours / 24), r = hours % 24;
+  return r ? `${d} d ${r} h` : `${d} d`;
+}
+function fmtPower(watts) {              // 6.8 W · 680 W · 1.5 kW
+  if (watts == null || Number.isNaN(watts)) return "–";
+  if (Math.abs(watts) < 10) return `${watts.toFixed(1)} W`;
+  if (Math.abs(watts) < 1000) return `${Math.round(watts).toLocaleString()} W`;
+  return `${(watts / 1000).toLocaleString(undefined, { maximumFractionDigits: 1, minimumFractionDigits: 1 })} kW`;
+}
+function fmtEnergy(kwh) {               // 350 Wh · 4.2 kWh · 1,771 kWh
+  if (kwh == null || Number.isNaN(kwh)) return "–";
+  if (Math.abs(kwh) < 1) return `${Math.round(kwh * 1000)} Wh`;
+  if (Math.abs(kwh) < 10) return `${kwh.toFixed(1)} kWh`;
+  return `${Math.round(kwh).toLocaleString()} kWh`;
+}
+
 let freshInsights = false;   // set by the refresh button: insight results are recomputed instead of reused
 async function api(method, path, body, { timeout = method === "GET" ? 12000 : 20000, signal } = {}) {
   if (freshInsights && method === "GET" && /^\/api\/(insights|energy|tou|reconcile|hvac|pool)\b/.test(path)) {
@@ -1344,7 +1367,7 @@ async function loadPrograms(device) {
     const zoneName = (id) => device.zones.find((z) => z.id === String(id))?.label || `Zone ${id}`;
     box.innerHTML = `${programs.length ? `<div class="card">${programs.map((p) => `
       <div class="row prog"><div class="main"><span class="name">${esc(p.name)}</span>
-        <span class="sub wrap" title="${esc(p.zones.filter((z) => z.minutes).map((z) => `${zoneName(z.zone)} ${z.minutes} min`).join(", "))}">${esc(p.starts.map(fmtTime).join(", "))} · ${esc(fmtDays(p.days))} · ${p.zones.filter((z) => z.minutes).length} zones, ${p.zones.reduce((a, z) => a + z.minutes, 0)} min${p.smart ? " · adjusts for weather" : ""}</span></div>
+        <span class="sub wrap" title="${esc(p.zones.filter((z) => z.minutes).map((z) => `${zoneName(z.zone)} ${z.minutes} min`).join(", "))}">${esc(p.starts.map(fmtTime).join(", "))} · ${esc(fmtDays(p.days))} · ${p.zones.filter((z) => z.minutes).length} zones, ${fmtDuration(p.zones.reduce((a, z) => a + z.minutes, 0))}${p.smart ? " · adjusts for weather" : ""}</span></div>
         <button class="pill" data-prog-run="${p.id}">Run now</button>
         <button class="pill" data-prog-edit="${p.id}">Edit</button>
         <label class="switch" aria-label="Program on or off"><input type="checkbox" data-prog-toggle="${p.id}" ${p.enabled ? "checked" : ""}><span></span></label>

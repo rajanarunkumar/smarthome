@@ -21,6 +21,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 
 from .pool import in_free
+from .units import dur
 
 SAMPLE_MIN = 2              # the recorder's interval
 GAP_MIN = 6                 # samples further apart than this are a gap in the data
@@ -400,7 +401,7 @@ def _tou_recs(name: str, mode: str, rows: list[dict], lead: float, trail: float,
     free_span, paid_span = f"{_h(window[0])}–{_h(window[1])}", f"{_h(window[1])}–{_h(window[0])}"
     if not (k and prices):
         return [{"level": "good" if paid <= free else "warning",
-                 "title": f"{name}: {paid / 60:.1f} h a day in paid hours, {free / 60:.1f} h free",
+                 "title": f"{name}: {dur(paid)} a day in paid hours, {dur(free)} free",
                  "text": "Dollar amounts appear once the hub learns from the meter how much this system draws "
                          "(it needs a few runs that line up with the meter's 15-minute readings)."}]
 

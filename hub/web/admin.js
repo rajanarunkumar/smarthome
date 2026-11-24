@@ -15,7 +15,7 @@ const fmtBytes = (b) => b == null ? "–" : b >= 1e9 ? `${(b / 1e9).toFixed(1)} 
 function fmtDur(s) {
   if (s == null) return "–";
   const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
-  return d ? `${d} d ${h} h` : h ? `${h} h ${m} m` : m ? `${m} m` : `${Math.round(s)} s`;
+  return d ? `${d} d ${h} h` : h ? (m ? `${h} h ${m} min` : `${h} h`) : m ? `${m} min` : `${Math.round(s)} s`;
 }
 function ago(t) {
   if (!t) return "never";

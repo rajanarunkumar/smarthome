@@ -34,7 +34,7 @@ async function renderPool(fetch = true) {
     ${live?.stale ? `<p class="note">Last reading from the pump was at ${esc(asOf)}; Pentair's cloud hasn't had a newer one.</p>` : ""}
     <div class="tiles">
       <div class="tile"><span class="tile-label">Flow</span><span class="tile-value">${live?.running ? fmtNum(live.gpm) : "Off"}</span><span class="tile-sub">${live?.running ? `GPM, target ${fmtNum(live.target)}` : "pump not running"}</span></div>
-      <div class="tile"><span class="tile-label">Power</span><span class="tile-value">${live?.running ? compact(live.watts) : "0"}</span><span class="tile-sub">watts · ${freeNow ? "free hours" : "<b>paid hours</b>"}</span></div>
+      <div class="tile"><span class="tile-label">Power</span><span class="tile-value">${live?.running ? fmtPower(live.watts) : "Off"}</span><span class="tile-sub">${freeNow ? "free hours" : "<b>paid hours</b>"}</span></div>
       <div class="tile"><span class="tile-label">Motor</span><span class="tile-value">${live?.running ? `${fmtNum(live.speed_pct)}%` : "–"}</span><span class="tile-sub">${live?.pressure_psi != null && live?.running ? `${fmtNum(live.pressure_psi, 1)} psi (pump's estimate)` : "speed"}</span></div>
       <div class="tile"><span class="tile-label">Power vs. clean</span><span class="tile-value">${h.ratio == null ? "–" : `${h.ratio >= 1 ? "+" : ""}${Math.round((h.ratio - 1) * 100)}%`}</span><span class="tile-sub">same flow, last 24 h</span></div>
     </div>
@@ -61,17 +61,17 @@ async function renderPool(fetch = true) {
     ${p.findings.length ? `<div class="section-title"><span>Running cost</span></div>${recsHtml(p.findings)}` : ""}
 
     <div class="section-title"><span>Pump programs</span><span class="muted small">free ${clock(p.window.start * 60)}–${clock(p.window.end * 60)}</span></div>
-    <div class="table-wrap"><table class="viz-table"><thead><tr><th>Program</th><th>When</th><th>Flow</th><th>On</th><th>Paid hours</th></tr></thead>
+    <div class="table-wrap"><table class="viz-table"><thead><tr><th>Program</th><th>When</th><th>Flow</th><th>On</th><th>In paid hours</th></tr></thead>
       <tbody>${p.programs.map((g) => `<tr><td>${esc(g.name)}</td><td>${g.type === "schedule" ? `${clock(g.start_min)}–${clock(g.end_min)}` : esc(g.type)}</td>
         <td>${fmtNum(g.target)} ${g.target_kind === "gpm" ? "GPM" : "%"}</td><td>${g.enabled ? "Yes" : "No"}</td>
-        <td>${g.paid_minutes == null ? "–" : g.paid_minutes ? `<b>${fmtNum(g.paid_minutes / 60, 1)} h</b>` : "none"}</td></tr>`).join("")}</tbody></table></div>
+        <td>${g.paid_minutes == null ? "–" : g.paid_minutes ? `<b>${fmtDuration(g.paid_minutes)}</b>` : "none"}</td></tr>`).join("")}</tbody></table></div>
     <p class="note">Programs are read from the pump. Change them in the Pentair Home app.</p>
 
     <div class="section-title"><span>Pump electricity</span>${p.cost ? `<span class="muted small">about ${money(p.cost.per_month)} a month</span>` : ""}</div>
-    ${days.length ? `<div class="table-wrap"><table class="viz-table"><thead><tr><th>Day</th><th>Free kWh</th><th>Paid kWh</th><th>Hours</th><th>Gallons</th></tr></thead>
+    ${days.length ? `<div class="table-wrap"><table class="viz-table"><thead><tr><th>Day</th><th>Free kWh</th><th>Paid kWh</th><th>Ran</th><th>Gallons</th></tr></thead>
       <tbody>${days.slice().reverse().map((d) => `<tr><td>${esc(shortDay(d.day))}</td><td>${fmtNum(d.free_kwh, 2)}</td><td>${d.paid_kwh ? `<b>${fmtNum(d.paid_kwh, 2)}</b>` : "0"}</td>
-        <td>${fmtNum(d.free_h + d.paid_h, 1)}</td><td>${compact(d.gallons)}</td></tr>`).join("")}
-        <tr><td><b>Total</b></td><td>${fmtNum(sum("free_kwh"), 1)}</td><td>${fmtNum(sum("paid_kwh"), 1)}</td><td>${fmtNum(sum("free_h") + sum("paid_h"), 1)}</td><td>${compact(sum("gallons"))}</td></tr></tbody></table></div>`
+        <td>${fmtDuration((d.free_h + d.paid_h) * 60)}</td><td>${compact(d.gallons)}</td></tr>`).join("")}
+        <tr><td><b>Total</b></td><td>${fmtNum(sum("free_kwh"), 1)}</td><td>${fmtNum(sum("paid_kwh"), 1)}</td><td>${fmtDuration((sum("free_h") + sum("paid_h")) * 60)}</td><td>${compact(sum("gallons"))}</td></tr></tbody></table></div>`
       : `<p class="note">Recorded from now on, every 2 minutes.</p>`}
     ${p.efficiency.length ? `<div class="table-wrap"><table class="viz-table"><thead><tr><th>Flow</th><th>Power</th><th>Gallons per kWh</th></tr></thead>
       <tbody>${p.efficiency.map((e) => `<tr><td>${fmtNum(e.gpm)} GPM</td><td>${e.watts} W</td><td>${e.gal_per_kwh.toLocaleString()}</td></tr>`).join("")}</tbody></table></div>` : ""}`;

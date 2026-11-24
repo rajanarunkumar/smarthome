@@ -179,7 +179,7 @@ async function renderInsights(fetch = true) {
     ${nothing ? `<p class="empty">Nothing to show yet. Connect McKinney water and Rain Bird in Settings, set your location, then tap <b>Fetch last 4 weeks</b>.</p>` : `
     <div class="tiles">
       <div class="tile"><span class="tile-label">Water used</span><span class="tile-value">${compact(s.total_gal)}</span><span class="tile-sub">gallons, ${ins.days} days</span></div>
-      <div class="tile"><span class="tile-label">Sprinklers</span><span class="tile-value">${s.sprinkler_share == null ? "–" : `${Math.round(s.sprinkler_share * 100)}%`}</span><span class="tile-sub">${compact(s.sprinkler_gal)} gal, ${fmtNum(s.minutes)} min</span></div>
+      <div class="tile"><span class="tile-label">Sprinklers</span><span class="tile-value">${s.sprinkler_share == null ? "–" : `${Math.round(s.sprinkler_share * 100)}%`}</span><span class="tile-sub">${compact(s.sprinkler_gal)} gal, ${fmtDuration(s.minutes)}</span></div>
       <div class="tile"><span class="tile-label">Rain</span><span class="tile-value">${fmtNum(s.rain_in, 2)}</span><span class="tile-sub">inches</span></div>
       <div class="tile"><span class="tile-label">Evaporation</span><span class="tile-value">${fmtNum(s.et0_in, 2)}</span><span class="tile-sub">inches (lawn loses about 70%)</span></div>
     </div>
@@ -200,8 +200,8 @@ async function renderInsights(fetch = true) {
 
   if (insightTable) {
     body.innerHTML = `<div class="table-wrap"><table class="viz-table"><thead><tr>
-      <th>Day</th><th>Water (gal)</th><th>Sprinklers (gal)</th><th>Everything else (gal)</th><th>Sprinkler min</th><th>Rain (in)</th><th>Evaporation (in)</th><th>High (°F)</th></tr></thead>
-      <tbody>${ins.series.map((r) => `<tr><td>${esc(shortDay(r.day))}${r.forecast ? " (forecast)" : ""}</td><td>${fmtNum(r.total_gal)}</td><td>${fmtNum(r.sprinkler_gal)}</td><td>${fmtNum(r.other_gal)}</td><td>${fmtNum(r.minutes)}</td><td>${fmtNum(r.rain_in, 2)}</td><td>${fmtNum(r.et0_in, 2)}</td><td>${fmtNum(r.tmax_f)}</td></tr>`).join("")}</tbody></table></div>`;
+      <th>Day</th><th>Water (gal)</th><th>Sprinklers (gal)</th><th>Everything else (gal)</th><th>Sprinklers ran</th><th>Rain (in)</th><th>Evaporation (in)</th><th>High (°F)</th></tr></thead>
+      <tbody>${ins.series.map((r) => `<tr><td>${esc(shortDay(r.day))}${r.forecast ? " (forecast)" : ""}</td><td>${fmtNum(r.total_gal)}</td><td>${fmtNum(r.sprinkler_gal)}</td><td>${fmtNum(r.other_gal)}</td><td>${fmtDuration(r.minutes)}</td><td>${fmtNum(r.rain_in, 2)}</td><td>${fmtNum(r.et0_in, 2)}</td><td>${fmtNum(r.tmax_f)}</td></tr>`).join("")}</tbody></table></div>`;
   } else {
     body.innerHTML = `
       <div class="section-title"><span>Daily water use</span></div>
@@ -266,7 +266,7 @@ function zonesHtml(ins) {
         <div class="main">
           <span class="name">${esc(z.label)} <span class="chip-status status-${level}">${label}${pct}</span></span>
           <span class="sub wrap">${esc(a.reason)}</span>
-          <span class="sub wrap">${flowText(z)} · last week ${z.week_in != null ? `${fmtNum(z.week_in, 2)} in` : `${fmtNum(z.minutes)} min in ${ins.days} days`}${photo && photo.green_share != null ? ` · ${Math.round(photo.green_share * 100)}% green` : ""}</span>
+          <span class="sub wrap">${flowText(z)} · last week ${z.week_in != null ? `${fmtNum(z.week_in, 2)} in` : `${fmtDuration(z.minutes)} in ${ins.days} days`}${photo && photo.green_share != null ? ` · ${Math.round(photo.green_share * 100)}% green` : ""}</span>
         </div>
         <label class="pill photo-btn" aria-label="Take a photo of ${esc(z.label)}">Photo
           <input type="file" accept="image/*" capture="environment" data-zone-upload="${z.zone}" hidden></label>
@@ -394,8 +394,8 @@ async function renderEnergy(fetch = true) {
     <div class="tiles">
       <div class="tile"><span class="tile-label">Electricity</span><span class="tile-value">${compact(s.total_kwh)}</span><span class="tile-sub">kWh, ${en.series.length} days</span></div>
       <div class="tile"><span class="tile-label">Heating and cooling</span><span class="tile-value">${s.hvac_kwh == null || !s.total_kwh ? "–" : `${Math.round((s.hvac_kwh / s.total_kwh) * 100)}%`}</span><span class="tile-sub">${s.hvac_kwh == null ? "estimating from weather" : `${compact(s.hvac_kwh)} kWh, estimated`}</span></div>
-      <div class="tile"><span class="tile-label">Always on</span><span class="tile-value">${en.baseline ? compact(en.baseline.watts) : en.standby_w == null ? "–" : compact(en.standby_w)}</span><span class="tile-sub">${en.baseline ? "watts, weekday 12–4 PM" : "watts, overnight minimum"}</span></div>
-      <div class="tile"><span class="tile-label">Highest 15 minutes</span><span class="tile-value">${s.peak_kw == null ? "–" : fmtNum(s.peak_kw, 1)}</span><span class="tile-sub">kW</span></div>
+      <div class="tile"><span class="tile-label">Always on</span><span class="tile-value">${en.baseline ? fmtPower(en.baseline.watts) : fmtPower(en.standby_w)}</span><span class="tile-sub">${en.baseline ? "weekday 12–4 PM" : "overnight minimum"}</span></div>
+      <div class="tile"><span class="tile-label">Highest 15 minutes</span><span class="tile-value">${s.peak_kw == null ? "–" : fmtPower(s.peak_kw * 1000)}</span><span class="tile-sub">average over 15 minutes</span></div>
     </div>
     ${en.recommendations.length ? `<div class="section-title"><span>Suggestions</span></div>
     <div class="card">${en.recommendations.map((r) => `
@@ -427,7 +427,7 @@ async function renderEnergy(fetch = true) {
     <div class="section-title"><span>Always-on appliances</span></div>
     <div class="card" id="fixed-loads">${en.fixed_loads.map((f) => `
       <div class="row"><div class="main"><span class="name small">${esc(f.name)}</span>
-        <span class="sub wrap">${esc(f.type_label)} · ${fmtNum(f.kwh_year_used)} kWh a year ${f.source === "typical" ? "(typical)" : "(label)"} · ${fmtNum(f.kwh_year_used * 1000 / 8760)} W average</span></div>
+        <span class="sub wrap">${esc(f.type_label)} · ${fmtEnergy(f.kwh_year_used)} a year ${f.source === "typical" ? "(typical)" : "(label)"} · ${fmtPower(f.kwh_year_used * 1000 / 8760)} average</span></div>
         <button class="pill small" data-fixed-edit="${f.id}">Edit</button><button class="pill small danger" data-fixed-del="${f.id}">Remove</button></div>`).join("")}
       <div class="row"><span class="sub wrap">Fridges, freezers and coolers aren't connected but run all the time. Add each one; the kWh per year on its yellow EnergyGuide label is best, otherwise a typical figure is used.</span></div>
       <div class="row key-row"><input type="text" id="fixed-name" placeholder="Name, e.g. Garage freezer" maxlength="40">
@@ -439,16 +439,16 @@ async function renderEnergy(fetch = true) {
     ${en.spikes.length ? `<div class="card">${en.spikes.map((e) => `
       <div class="row"><div class="main"><span class="name small">${esc(fmtSlot(e.start, e.end))}</span>
         <span class="sub wrap">${e.running.length ? `Running: ${esc(e.running.join(", "))}` : "Nothing tracked was running: likely the AC or furnace, an oven or the water heater"}</span></div>
-        <span class="sub-value">${fmtNum(e.peak_kw, 1)} kW · ${fmtNum(e.kwh, 1)} kWh</span></div>`).join("")}</div>`
+        <span class="sub-value">${fmtPower(e.peak_kw * 1000)} · ${fmtEnergy(e.kwh)}</span></div>`).join("")}</div>`
       : `<p class="note">No spikes stand out yet.</p>`}
     <div class="section-title"><span>Devices</span></div>
-    ${en.devices.length ? `<div class="table-wrap"><table class="viz-table"><thead><tr><th>Device</th><th>Hours on</th><th>Power (kW)</th><th>kWh</th><th></th></tr></thead>
-      <tbody>${en.devices.map((d) => `<tr><td>${esc(d.name)}</td><td>${fmtNum(d.hours, 1)}</td><td>${
-        d.status === "entered" ? `${fmtNum(d.kw, 2)} <span class="muted">entered</span>`
-        : d.status === "reported" ? `${fmtNum(d.kw, 2)} <span class="muted">from the device</span>`
-        : d.status === "rated" ? `${fmtNum(d.kw * 1000, 1)} W <span class="muted" title="${esc(d.profile || "")}">${d.profile_source === "typical" ? "typical bulb" : "bulb model"}</span>`
-        : d.status === "measured" ? fmtNum(d.kw, 2)
-        : d.status === "small" ? `<span class="muted">too small to measure</span>` : `<span class="muted">learning</span>`}</td><td>${fmtNum(d.kwh, 1)}</td>
+    ${en.devices.length ? `<div class="table-wrap"><table class="viz-table"><thead><tr><th>Device</th><th>Time on</th><th>Power</th><th>Energy</th><th></th></tr></thead>
+      <tbody>${en.devices.map((d) => `<tr><td>${esc(d.name)}</td><td>${fmtDuration(d.hours * 60)}</td><td>${
+        d.status === "entered" ? `${fmtPower(d.kw * 1000)} <span class="muted">entered</span>`
+        : d.status === "reported" ? `${fmtPower(d.kw * 1000)} <span class="muted">from the device</span>`
+        : d.status === "rated" ? `${fmtPower(d.kw * 1000)} <span class="muted" title="${esc(d.profile || "")}">${d.profile_source === "typical" ? "typical bulb" : "bulb model"}</span>`
+        : d.status === "measured" ? fmtPower(d.kw * 1000)
+        : d.status === "small" ? `<span class="muted">too small to measure</span>` : `<span class="muted">learning</span>`}</td><td>${fmtEnergy(d.kwh)}</td>
         <td><button class="pill small" data-watts="${esc(d.id)}" data-watts-name="${esc(d.name)}" data-watts-now="${d.watts ?? ""}">${d.watts ? "Edit W" : "Set W"}</button></td></tr>`).join("")}</tbody></table></div>
       <p class="note">Power is worked out by matching when each device ran against the meter's 15-minute readings. The hub records device activity from now on; electricity arrives a day late from Smart Meter Texas.</p>`
       : `<p class="note">No device activity recorded yet. The hub notes every 2 minutes which devices are running (washer, dryer, pool pump, AC, plugs, TV) from now on.</p>`}`);

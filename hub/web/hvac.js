@@ -7,7 +7,7 @@ const HVAC_LEVEL = {
   warning: ["warning", "Check soon", "The system is running longer than it should for the weather."],
   serious: ["serious", "Act now", "The system is struggling: it costs money and wears the compressor."],
 };
-const hrs = (m) => (m == null ? "–" : `${fmtNum(m / 60, 1)} h`);
+const hrs = (m) => fmtDuration(m);
 
 function hvacSetupHtml(connected) {
   return `

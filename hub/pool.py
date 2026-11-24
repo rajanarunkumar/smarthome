@@ -29,6 +29,7 @@ import statistics
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from typing import Iterable
+from .units import dur
 
 STEADY_GPM = 1.5          # within this of the target counts as holding it
 MAX_GAP_S = 300           # a longer gap between readings isn't counted as running time
@@ -419,7 +420,7 @@ def build_pool(store: PoolStore, programs: list[dict], live: dict | None, tariff
     findings: list[dict] = []
     for p in sched:
         if p["enabled"] and p["paid_minutes"]:
-            findings.append({"level": "warning", "title": f"“{p['name']}” runs {p['paid_minutes'] / 60:.1f} h a day in paid hours",
+            findings.append({"level": "warning", "title": f"“{p['name']}” runs {dur(p['paid_minutes'])} a day in paid hours",
                              "text": f"{_clock(p['start_min'])}–{_clock(p['end_min'])} at {p['target']:.0f} "
                                      f"{'GPM' if p['target_kind'] == 'gpm' else '%'}. Moving it inside "
                                      f"{_clock(window[0] * 60)}–{_clock(window[1] * 60)} makes its energy free (delivery is still charged)."})
@@ -428,7 +429,7 @@ def build_pool(store: PoolStore, programs: list[dict], live: dict | None, tariff
         live = {**live, "as_of": reading_time(live.get("device_time")).isoformat(timespec="minutes") if reading_time(live.get("device_time")) else None,
                 "age_min": age, "stale": age is not None and age > STALE_MIN}
     if live and live["stale"]:
-        findings.append({"level": "warning", "title": f"No new reading from the pump for {age / 60:.1f} h" if age >= 90 else f"No new reading from the pump for {age:.0f} min",
+        findings.append({"level": "warning", "title": f"No new reading from the pump for {dur(age)}",
                          "text": "Pentair's cloud still shows the last report. Check the pump's Wi-Fi, or open the Pentair Home app once, "
                                  "which usually makes it report again. Health and cost only use fresh readings."})
     if live and live.get("running") and not live["stale"] and not in_free(now, window):
