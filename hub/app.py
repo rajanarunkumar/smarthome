@@ -60,6 +60,18 @@ from .models import DAYS, Device, DevicePatch, HubError, Schedule, ScheduleIn, S
 log = logging.getLogger("hub")
 WEB_DIR = Path(__file__).parent / "web"
 DEVICE_TIMEOUT = 4.0       # a request waits this long for one brand, then shows its last known state
+# Work follows use: while someone has used the app in the last IN_USE_SECONDS, screens are kept current;
+# otherwise the hub only records what insights need and collects data every COLLECT_SECONDS.
+IN_USE_SECONDS = 600
+COLLECT_SECONDS = 4 * 3600
+RECORD_SECONDS = 120          # thermostats (in memory, no network) and, while in use, everything cached
+IDLE_RECORD_SECONDS = 600     # other brands that feed insights, while nobody uses the app
+CLOUD_BRANDS = {"thinq", "ecovacs", "pentair", "schlage", "smt", "water", "ring", "nest", "govee"}
+CLOUD_WARM_SECONDS = 60
+INSIGHT_BRANDS = {"kasa", "hue", "govee", "thinq", "pentair", "dyson", "ecovacs", "lgtv", "lennox", "nest"}
+FREE_BRANDS = {"lennox"}      # state already in memory (Lennox keeps its own connection): reading it costs nothing
+INSIGHT_TTL = {"/api/insights": COLLECT_SECONDS, "/api/energy": COLLECT_SECONDS, "/api/tou": COLLECT_SECONDS,
+               "/api/reconcile": COLLECT_SECONDS, "/api/hvac": 120, "/api/pool": 120}
 LOAD_CAP = 60.0            # a brand's load is abandoned after this long
 RAW_TIMEOUT = 15.0         # manual "refresh raw data" waits longer
 RAW_MIN_GAP = 10.0         # per-brand rate limit for manual raw refreshes
@@ -99,6 +111,8 @@ class Hub:
         self.adapters.append(self.scheduler)
         self.last_devices: dict[str, Device] = {}
         self.chat = Chat(self)
+        self.lennox.idle = lambda: not self.in_use()
+        self.rainbird.idle = lambda: not self.in_use()
         self.updater = Updater()
         self.history = HistoryStore(self.store.db)
         self.rainbird.on_run = self.history.log_run
@@ -126,6 +140,9 @@ class Hub:
                                            refresh_after=30, expire_after=600, timeout=8)
         self.caches = {c.name: c for c in (self.device_cache, self.scene_cache, self.schedule_cache)}
         self._devices_wanted = float("-inf")
+        self.last_use = float("-inf")     # last request from a person using the app
+        self.data_version = 0             # bumped by new data or any change; insight results older than it are recomputed
+        self.insight_cache: dict[str, tuple[int, float, bytes, str]] = {}
         self._raw_last: dict[str, float] = {}
         self._raw_task: asyncio.Task | None = None
         self._refresh_soon: dict[str, asyncio.Task] = {}
@@ -199,12 +216,13 @@ class Hub:
                 for p in report["problems"]:
                     log.warning("History: %s", p)
                 self.telemetry.job("history collector", started, (time.monotonic() - t0) * 1000,
-                                   not report["problems"], "; ".join(report["problems"]) or f"{days} days", 3 * 3600)
+                                   not report["problems"], "; ".join(report["problems"]) or f"{days} days", COLLECT_SECONDS)
                 days = 3
+                self.data_version += 1
             except Exception as exc:  # noqa: BLE001
                 log.warning("History collector: %s", exc)
-                self.telemetry.job("history collector", started, (time.monotonic() - t0) * 1000, False, str(exc), 3 * 3600)
-            await asyncio.sleep(3 * 3600)
+                self.telemetry.job("history collector", started, (time.monotonic() - t0) * 1000, False, str(exc), COLLECT_SECONDS)
+            await asyncio.sleep(COLLECT_SECONDS)
 
     async def _meter_backfill_loop(self) -> None:
         """Fill the meter history back to the oldest imported bill, so every bill can be checked against it.
@@ -237,35 +255,61 @@ class Hub:
             self.telemetry.job("meter backfill for bills", started, (time.monotonic() - t0) * 1000, ok, msg, 6 * 3600)
             await asyncio.sleep(6 * 3600)
 
+    def in_use(self) -> bool:
+        return time.monotonic() - self.last_use < IN_USE_SECONDS
+
+    def note_use(self) -> None:
+        self.last_use = time.monotonic()
+
     async def _record_loop(self) -> None:
-        """Every 2 minutes, note which devices are running, for the energy analytics."""
+        """Note which devices are running, for the energy, HVAC and pool insights. While the app is in use it reads
+        what the screens already loaded (no extra calls). Otherwise thermostats every 2 minutes (in memory, free)
+        and the other brands that feed insights every 10 minutes; brands that don't feed insights aren't touched."""
         from datetime import datetime
+        last_full = float("-inf")
         while True:
-            await asyncio.sleep(120)
+            await asyncio.sleep(RECORD_SECONDS)
             started, t0 = time.time(), time.monotonic()
             try:
-                devices, _ = await self.devices(interactive=False)
-                self.energy.observe(devices, datetime.now())
+                active = {a.brand for a in self.active_adapters()}
+                if self.in_use():
+                    brands = active
+                    devices = [d for b in brands for d in (self.device_cache.get_if_present(b) or [])]
+                else:
+                    brands = active & (FREE_BRANDS | {"nest"})
+                    if t0 - last_full >= IDLE_RECORD_SECONDS:
+                        brands |= active & INSIGHT_BRANDS
+                        last_full = t0
+                    results = await asyncio.gather(*(self.device_cache.get(b) for b in brands), return_exceptions=True)
+                    devices = [d for r in results if isinstance(r, list) for d in r]
+                    brands = {b for b, r in zip(brands, results) if isinstance(r, list)}
+                scope = tuple(f"{p}:" for a in self.adapters if a.brand in brands for p in a.prefixes)
+                self.energy.observe(devices, datetime.now(), scope=scope)
                 self.hvac.record_devices(devices, datetime.now())
-                for pump in self.pentair.readings():
-                    self.pool.record(pump["reading"], datetime.now())
+                if "pentair" in brands:
+                    for pump in self.pentair.readings():
+                        self.pool.record(pump["reading"], datetime.now())
                 self.telemetry.job("activity recorder", started, (time.monotonic() - t0) * 1000, True,
-                                   f"{len(devices)} devices", 120)
+                                   f"{len(devices)} devices from {len(brands)} brand(s)" + ("" if self.in_use() else " (idle)"),
+                                   RECORD_SECONDS)
             except Exception as exc:  # noqa: BLE001
                 log.debug("Activity recorder: %s", exc)
                 self.telemetry.job("activity recorder", started, (time.monotonic() - t0) * 1000, False, str(exc), 120)
 
     async def _warm_loop(self) -> None:
-        """Keep the device cache warm: every 15 s while someone uses the app, every 5 min otherwise."""
+        """Keep the screens current only while someone uses the app: local devices every 15 s, cloud brands every
+        60 s. Nothing when nobody does: the next visit shows the last known state at once and refreshes it."""
         while True:
             started, t0 = time.time(), time.monotonic()
             try:
-                idle = time.monotonic() - self._devices_wanted > 600
+                if not self.in_use():
+                    await asyncio.sleep(15)
+                    continue
                 keys = [a.brand for a in self.active_adapters()
-                        if not idle or (self.device_cache.age(a.brand) or float("inf")) > 300]
+                        if a.brand not in CLOUD_BRANDS or (self.device_cache.age(a.brand) or float("inf")) >= CLOUD_WARM_SECONDS]
                 n = self.device_cache.warm(keys)
                 self.telemetry.job("cache warmer", started, (time.monotonic() - t0) * 1000, True,
-                                   f"{n} refresh(es) started" + (" (idle)" if idle else ""), 15)
+                                   f"{n} refresh(es) started", 15)
             except Exception as exc:  # noqa: BLE001
                 self.telemetry.job("cache warmer", started, (time.monotonic() - t0) * 1000, False, str(exc), 15)
             await asyncio.sleep(15)
@@ -619,7 +663,32 @@ async def authenticate(request: Request, call_next):
 
     if path not in PUBLIC_PATHS and request.state.user is None:
         return _deny(401, "Sign in required")
+    if request.state.user is not None:
+        hub.note_use()
+    if request.method == "GET" and path in INSIGHT_TTL:
+        return await _cached_insight(hub, request, call_next)
     return await call_next(request)
+
+
+async def _cached_insight(hub: "Hub", request: Request, call_next):
+    """Insight results are computed on demand and reused until new data arrives (the 4-hourly collection or any
+    change made in the app), for at most their TTL. ?fresh=1 recomputes."""
+    from fastapi.responses import Response as RawResponse
+    query = sorted((k, v) for k, v in request.query_params.multi_items() if k != "fresh")
+    key = request.url.path + "?" + "&".join(f"{k}={v}" for k, v in query)
+    hit = hub.insight_cache.get(key)
+    fresh = request.query_params.get("fresh") in ("1", "true")
+    if hit and not fresh and hit[0] == hub.data_version and time.monotonic() - hit[1] < INSIGHT_TTL[request.url.path]:
+        return RawResponse(hit[2], media_type=hit[3], headers={"X-Insight-Cache": "hit"})
+    response = await call_next(request)
+    if response.status_code != 200:
+        return response
+    body = b"".join([chunk async for chunk in response.body_iterator])
+    media = response.headers.get("content-type", "application/json")
+    hub.insight_cache[key] = (hub.data_version, time.monotonic(), body, media)
+    if len(hub.insight_cache) > 64:
+        hub.insight_cache.pop(next(iter(hub.insight_cache)))
+    return RawResponse(body, media_type=media, headers={"X-Insight-Cache": "miss"})
 
 
 @app.middleware("http")
@@ -642,6 +711,7 @@ async def observe(request: Request, call_next):
             hub.telemetry.record_request(template, status, (time.monotonic() - t0) * 1000, request.method)
             if request.method not in SAFE_METHODS and path.startswith("/api/") and status < 400:
                 _after_change(hub, path)
+                hub.data_version += 1
     if not path.startswith("/api/"):
         response.headers.setdefault("Cache-Control", "no-cache")
     return response

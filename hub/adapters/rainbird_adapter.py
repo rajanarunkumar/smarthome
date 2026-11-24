@@ -45,6 +45,7 @@ except ImportError:  # pragma: no cover
         pass
 
 WATCH_SECONDS = 30
+IDLE_WATCH_SECONDS = 60     # while nobody uses the app: runs last minutes, so a minute's resolution is plenty
 MIN_LIBRARY = (6, 1)   # older pyrainbird speaks only HTTP; newer LNK2 firmware answers only HTTPS
 
 
@@ -264,7 +265,7 @@ class RainBirdAdapter(Adapter):
         """One poll. Returns how long to wait before the next one: a rejected password or a lockout stops
         the polling (it would only extend a lockout), and an unreachable controller is retried with a growing delay."""
         if not self.active or self._halted():
-            return WATCH_SECONDS if not self._halted() else min(delay, 60)
+            return self._watch_seconds() if not self._halted() else min(delay, 60)
         try:
             async with self._lock:
                 ctl = await self._controller()
@@ -272,7 +273,7 @@ class RainBirdAdapter(Adapter):
                 self._state_at = time.monotonic()
             self.observe(self._state, datetime.now())
             self.watch_error = None
-            return WATCH_SECONDS
+            return self._watch_seconds()
         except Exception as exc:  # noqa: BLE001 - keep watching
             message = explain(exc, self.config.get("host", ""))
             if message != self.watch_error:  # say it once, at warning level, so it isn't silent
@@ -287,6 +288,11 @@ class RainBirdAdapter(Adapter):
                 self._halt_until = float("inf")  # until connect() is given a password
                 return 15 * 60
             return min(max(delay, WATCH_SECONDS) * 2, BACKOFF_MAX_SECONDS)
+
+    idle = staticmethod(lambda: False)   # set by the hub: True while nobody uses the app
+
+    def _watch_seconds(self) -> int:
+        return IDLE_WATCH_SECONDS if self.idle() else WATCH_SECONDS
 
     async def _watch(self) -> None:
         """Poll the controller so every run is logged, even ones started by its own programs."""

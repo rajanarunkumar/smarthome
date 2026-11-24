@@ -185,6 +185,21 @@ The hub only ever needs a **token**, never your LG password, so there is nothing
 1. Open **connect-pat.lgthinq.com** and choose the same sign-in you use in the ThinQ app (for example **Continue with Google**) if it's offered.
 2. Community reports say that page may accept only an LG email-and-password account (LG doesn't confirm this either way). If so: create an ordinary LG account (email + password), **invite it as a member of your home in the ThinQ app** (the menu name varies by app version), and make the token with that account. I haven't verified that appliances shared this way show up in LG's API, so check the Settings card says how many appliances it found.
 
+## What the hub does in the background
+
+Work follows use. *In use* means someone made a request in the last 10 minutes (the app open on any device, or a Shortcut).
+
+| | While the app is in use | When it isn't |
+|---|---|---|
+| Keeping screens current | local devices every 15 s, cloud brands every 60 s | nothing; the next visit shows the last state at once and refreshes |
+| Recording for insights | every 2 min from what the screens already loaded | thermostats every 2 min (in memory, free); the brands that feed insights every 10 min; others not at all |
+| Lennox (iComfort cloud) | every 10 s | every 60 s |
+| Rain Bird (sprinkler runs) | every 30 s | every 60 s |
+| Water, electricity, weather collection | every 4 hours, or *Fetch last 4 weeks* | every 4 hours |
+| Insights | computed when opened, then reused until new data arrives or something is changed (up to 4 h; HVAC and pool 2 min, they show live readings). The refresh button recomputes. | nothing |
+
+Schedules (hub, irrigation, flow tests) and the nightly backup keep running on time regardless.
+
 ## Updating and restarting (Admin)
 
 **Admin → Update or restart…** shows the branch and commit the hub runs, what's new on GitHub, and every branch. **Pull and restart** fetches, switches branch if you picked another, fast-forwards, installs packages if `requirements.txt` changed, and restarts; the page reloads when the hub is back (about 10 seconds). **Pull only** skips the restart; **Restart** just restarts. It never merges or throws anything away: if the Mac's copy has edits or commits of its own, it stops and says so. Needs a person signed in (scripts with the API token can't update or restart). Restarts rely on the background service from `scripts/install-service.sh`; without it the hub replaces its own process. The Mac needs to be able to `git fetch` without a password prompt (the macOS keychain usually handles this after one manual `git pull`).

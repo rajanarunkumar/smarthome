@@ -148,7 +148,7 @@ class EnergyStore:
             self.db.execute("DELETE FROM device_watts WHERE device_id = ?", (device_id,))
         self.db.commit()
 
-    def observe(self, devices, now: datetime) -> None:
+    def observe(self, devices, now: datetime, scope: tuple[str, ...] | None = None) -> None:
         """Record running periods from a device snapshot (called every couple of minutes). Lights are recorded
         only when their wattage was entered."""
         from .lights import profile, watts_at
@@ -170,6 +170,8 @@ class EnergyStore:
             if d.id not in self._open:
                 self._open[d.id] = (d.name, d.kind, now)
         for device_id in list(self._open):
+            if scope is not None and not device_id.startswith(scope):
+                continue   # that brand wasn't read this time: unknown, not off
             if device_id not in seen:
                 name, kind, since = self._open.pop(device_id)
                 if now - since >= timedelta(minutes=2):

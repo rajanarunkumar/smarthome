@@ -22,7 +22,11 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 
 // Every request has a time limit, so a slow brand can never leave a button or tab stuck.
 // `signal` lets a tab switch cancel the previous tab's reads.
+let freshInsights = false;   // set by the refresh button: insight results are recomputed instead of reused
 async function api(method, path, body, { timeout = method === "GET" ? 12000 : 20000, signal } = {}) {
+  if (freshInsights && method === "GET" && /^\/api\/(insights|energy|tou|reconcile|hvac|pool)\b/.test(path)) {
+    path += (path.includes("?") ? "&" : "?") + "fresh=1";
+  }
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeout);
   const onAbort = () => ctl.abort();
@@ -119,6 +123,7 @@ const skeleton = (n = 6) => `<div class="skeleton">${'<div class="sk"></div>'.re
 async function render(fetch = false, { fresh = false } = {}) {
   const seq = ++renderSeq, tab = state.tab, signal = tabAbort.signal;
   const live = () => seq === renderSeq && tab === state.tab;
+  freshInsights = fresh;
   try {
     if (tab === "rooms") {
       state.devices.length ? renderRooms() : setView(skeleton());

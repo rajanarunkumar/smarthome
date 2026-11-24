@@ -43,6 +43,7 @@ TO_LENNOX = {"HEAT": "heat", "COOL": "cool", "HEATCOOL": "heat and cool", "OFF":
 FROM_LENNOX = {"heat": "HEAT", "cool": "COOL", "heat and cool": "HEATCOOL", "off": "OFF", "emergency heat": "HEAT"}
 FAN_MODES = ("auto", "on", "circulate")
 CLOUD_POLL_SECONDS = 10      # cloud has no long polling; LAN long-polls inside messagePump
+IDLE_POLL_SECONDS = 60       # while nobody uses the app
 CONNECT_TIMEOUT = 45
 BACKOFF_MAX = 600
 AUTH_ERRORS = {1, 2, 401}    # EC_LOGIN, EC_AUTHENTICATE, EC_UNAUTHORIZED
@@ -124,6 +125,7 @@ class LennoxAdapter(Adapter):
         self._api: Any = None
         self._task: asyncio.Task | None = None
         self._last_mode: dict[str, str] = {}
+        self.idle = lambda: False         # set by the hub: True while nobody uses the app
         self.error: str | None = None
         self.connected_at: float | None = None
 
@@ -186,7 +188,7 @@ class LennoxAdapter(Adapter):
                 await self._api.messagePump()
                 # Cloud has no long polling, so wait between reads. Locally the thermostat holds each read open
                 # for up to 15 s; if it ever answers instantly, still pause so the hub never spins on it.
-                pause = CLOUD_POLL_SECONDS if not cfg.get("ip") else 1 - (time.monotonic() - began)
+                pause = (IDLE_POLL_SECONDS if self.idle() else CLOUD_POLL_SECONDS) if not cfg.get("ip") else 1 - (time.monotonic() - began)
                 await asyncio.sleep(max(pause, 0))
             except asyncio.CancelledError:
                 raise
