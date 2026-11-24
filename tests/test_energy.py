@@ -203,15 +203,33 @@ def test_a_plug_with_no_real_load_gets_no_estimate():
     assert abs(power["thinq:d1"]["kw"] - 5.0) < 0.2
 
 
-def test_observe_records_lights_only_when_watts_were_entered():
+def test_bulbs_get_power_from_their_model_and_brightness():
     s = store()
     lamp = Device(id="hue:1", brand="hue", name="Chandelier", kind="light", on=True)
-    bulb = Device(id="hue:2", brand="hue", name="LED", kind="light", on=True)
-    s.set_watts("hue:1", 300)
+    color = Device(id="hue:2", brand="hue", name="Desk", kind="light", model="Hue color lamp", model_id="LCA001", on=True, brightness=100)
+    dim = Device(id="hue:3", brand="hue", name="Hall", kind="light", model_id="LCA001", on=True, brightness=50)
+    govee = Device(id="govee:4", brand="govee", name="Porch", kind="light", model="H6008", on=True)
+    strip = Device(id="govee:5", brand="govee", name="TV strip", kind="light", model="H9999", on=True)
+    s.set_watts("hue:1", 300)                                   # entered: not estimated
     t0 = datetime(2026, 11, 20, 20, 0)
-    s.observe([lamp, bulb], t0)
+    for i in range(3):
+        s.observe([lamp, color, dim, govee, strip], t0 + timedelta(minutes=2 * i))
     s.observe([], t0 + timedelta(minutes=30))
-    assert [a["device_id"] for a in s.activity(date(2026, 11, 19))] == ["hue:1"]
+    assert {a["device_id"] for a in s.activity(date(2026, 11, 19))} == {"hue:1", "hue:2", "hue:3", "govee:4", "govee:5"}
+    est = s.estimated()
+    assert "hue:1" not in est
+    assert est["hue:2"]["watts"] == 6.8 and est["hue:2"]["source"] == "measured" and "A19" in est["hue:2"]["profile"]
+    assert 2.0 < est["hue:3"]["watts"] < 2.4                     # half brightness draws about a third
+    assert est["govee:4"]["watts"] == 9.0 and est["govee:4"]["source"] == "rated"
+    assert est["govee:5"]["source"] == "typical"
+    assert s.known_watts()["hue:1"] == 300 and s.known_watts()["hue:2"] == 6.8
+
+
+def test_light_profiles():
+    from hub.lights import profile, watts_at
+    p = profile(None, "KL135(US)")
+    assert p["source"] == "measured" and watts_at(p, None) == p["curve"][10] and watts_at(p, 5) == round((p["curve"][0] + p["curve"][1]) / 2, 2)
+    assert profile(None, "Hue lightstrip plus")["name"] == "typical LED strip"
 
 
 def test_watts_reported_by_a_device_are_used_instead_of_guessing():

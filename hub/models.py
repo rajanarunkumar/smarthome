@@ -23,6 +23,7 @@ class Device(BaseModel):
     brand: str
     name: str
     model: str | None = None
+    model_id: str | None = None        # the maker's model code (Hue "LCA001"), when it differs from the display model
     kind: Literal["plug", "dimmer", "light", "speaker", "tv", "appliance", "vacuum", "purifier", "pool", "lock", "meter", "sprinkler", "thermostat", "doorbell", "camera"]
     room_id: int | None = None
     online: bool = True

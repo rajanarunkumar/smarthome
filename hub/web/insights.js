@@ -433,6 +433,7 @@ async function renderEnergy(fetch = true) {
       <tbody>${en.devices.map((d) => `<tr><td>${esc(d.name)}</td><td>${fmtNum(d.hours, 1)}</td><td>${
         d.status === "entered" ? `${fmtNum(d.kw, 2)} <span class="muted">entered</span>`
         : d.status === "reported" ? `${fmtNum(d.kw, 2)} <span class="muted">from the device</span>`
+        : d.status === "rated" ? `${fmtNum(d.kw * 1000, 1)} W <span class="muted" title="${esc(d.profile || "")}">${d.profile_source === "typical" ? "typical bulb" : "bulb model"}</span>`
         : d.status === "measured" ? fmtNum(d.kw, 2)
         : d.status === "small" ? `<span class="muted">too small to measure</span>` : `<span class="muted">learning</span>`}</td><td>${fmtNum(d.kwh, 1)}</td>
         <td><button class="pill small" data-watts="${esc(d.id)}" data-watts-name="${esc(d.name)}" data-watts-now="${d.watts ?? ""}">${d.watts ? "Edit W" : "Set W"}</button></td></tr>`).join("")}</tbody></table></div>

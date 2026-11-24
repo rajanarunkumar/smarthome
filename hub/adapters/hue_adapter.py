@@ -190,6 +190,7 @@ class HueAdapter(Adapter):
                 brand=self.brand,
                 name=name,
                 model=owner.get("product_data", {}).get("product_name"),
+                model_id=owner.get("product_data", {}).get("model_id"),
                 kind="light",
                 online=owner_id not in offline,
                 on=light["on"]["on"],

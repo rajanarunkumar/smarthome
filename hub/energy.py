@@ -47,6 +47,9 @@ class EnergyStore:
                 start TEXT NOT NULL, end TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS device_activity_start ON device_activity(start);
             CREATE TABLE IF NOT EXISTS device_watts (device_id TEXT PRIMARY KEY, watts REAL NOT NULL); -- entered by the owner
+            CREATE TABLE IF NOT EXISTS device_estimated (  -- bulbs: average power from their model and brightness while on
+                device_id TEXT PRIMARY KEY, watts REAL NOT NULL, samples INTEGER NOT NULL, updated TEXT NOT NULL,
+                standby REAL NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT 'measured', profile TEXT);
             CREATE TABLE IF NOT EXISTS device_reported (  -- average power the device itself reported while on
                 device_id TEXT PRIMARY KEY, watts REAL NOT NULL, samples INTEGER NOT NULL, updated TEXT NOT NULL);
             """
@@ -82,19 +85,29 @@ class EnergyStore:
         return {r["device_id"]: r["watts"] for r in self.db.execute(
             "SELECT device_id, watts FROM device_reported WHERE samples >= ?", (min_samples,))}
 
-    def known_watts(self) -> dict[str, float]:
-        """What's known without guessing: what devices report, overridden by anything the owner entered."""
-        return {**self.reported(), **self.watts()}
+    def estimated(self) -> dict[str, dict]:
+        """Smart bulbs: average watts while on from their model's measured profile at the brightness used."""
+        return {r["device_id"]: dict(r) for r in self.db.execute(
+            "SELECT device_id, watts, standby, source, profile FROM device_estimated WHERE samples >= 2")}
 
-    def _sample(self, device_id: str, watts: float, now: datetime) -> None:
-        row = self.db.execute("SELECT watts, samples FROM device_reported WHERE device_id = ?", (device_id,)).fetchone()
+    def known_watts(self) -> dict[str, float]:
+        """What's known without guessing the meter: bulb profiles, then what devices report, then what the owner
+        entered (each overrides the one before)."""
+        return {**{d: e["watts"] for d, e in self.estimated().items()}, **self.reported(), **self.watts()}
+
+    def _sample(self, device_id: str, watts: float, now: datetime, table: str = "device_reported", extra: dict | None = None) -> None:
+        row = self.db.execute(f"SELECT watts, samples FROM {table} WHERE device_id = ?", (device_id,)).fetchone()
+        extra = extra or {}
         if row is None:
-            self.db.execute("INSERT INTO device_reported (device_id, watts, samples, updated) VALUES (?, ?, 1, ?)",
-                            (device_id, watts, now.isoformat(timespec="minutes")))
+            cols = ", ".join(["device_id", "watts", "samples", "updated", *extra])
+            self.db.execute(f"INSERT INTO {table} ({cols}) VALUES ({', '.join('?' * (4 + len(extra)))})",
+                            (device_id, watts, 1, now.isoformat(timespec="minutes"), *extra.values()))
             return
-        n = min(row["samples"], 500)     # running average that keeps following slow changes (pump speed programs)
-        self.db.execute("UPDATE device_reported SET watts = ?, samples = ?, updated = ? WHERE device_id = ?",
-                        ((row["watts"] * n + watts) / (n + 1), row["samples"] + 1, now.isoformat(timespec="minutes"), device_id))
+        n = min(row["samples"], 500)     # running average that keeps following slow changes (pump speed, dimming)
+        sets = "".join(f", {k} = ?" for k in extra)
+        self.db.execute(f"UPDATE {table} SET watts = ?, samples = ?, updated = ?{sets} WHERE device_id = ?",
+                        ((row["watts"] * n + watts) / (n + 1), row["samples"] + 1, now.isoformat(timespec="minutes"),
+                         *extra.values(), device_id))
 
     def set_watts(self, device_id: str, watts: float | None) -> None:
         if watts:
@@ -107,15 +120,21 @@ class EnergyStore:
     def observe(self, devices, now: datetime) -> None:
         """Record running periods from a device snapshot (called every couple of minutes). Lights are recorded
         only when their wattage was entered."""
+        from .lights import profile, watts_at
         seen = set()
         entered = self.watts()
         for d in devices:
-            if (d.kind not in TRACKED_KINDS and d.id not in entered) or not d.online:
+            bulb = d.kind == "light" and d.id not in entered
+            if (d.kind not in TRACKED_KINDS and d.id not in entered and not bulb) or not d.online:
                 continue
             if d.on is not True:
                 continue
             if d.watts is not None and d.watts >= 2:      # below that it's the plug's own standby, not the load
                 self._sample(d.id, float(d.watts), now)
+            elif bulb:
+                prof = profile(d.model_id, d.model, d.name)
+                self._sample(d.id, watts_at(prof, d.brightness), now, "device_estimated",
+                             {"standby": prof["standby"], "source": prof["source"], "profile": prof["name"]})
             seen.add(d.id)
             if d.id not in self._open:
                 self._open[d.id] = (d.name, d.kind, now)
@@ -209,7 +228,7 @@ def device_power(intervals: dict[str, float], activity: list[dict], min_slots: i
                 ata[index[di]][index[dj]] += si * 0.25 * sj * 0.25
     for i in range(n):
         ata[i][i] += 1e-6  # keeps nearly-identical schedules solvable without changing real answers
-    out = {d: {"kw": round(w / 1000, 3), "slots": 0, "source": "entered"} for d, w in known_watts.items()}
+    out = {d: {"kw": round(w / 1000, 4), "slots": 0, "source": "entered"} for d, w in known_watts.items()}
     for d in reported or {}:
         if d in out:
             out[d]["source"] = "reported"
@@ -312,7 +331,12 @@ def build_energy(store: EnergyStore, tmean: dict[str, float], days: int = 28, to
     kinds = {a["device_id"]: a["kind"] for a in activity}
     entered = store.watts()
     reported = store.reported()
-    power = device_power(intervals, activity, known_watts={**reported, **entered}, reported=set(reported) - set(entered))
+    estimated = store.estimated()
+    known = {**{d: e["watts"] for d, e in estimated.items()}, **reported, **entered}
+    power = device_power(intervals, activity, known_watts=known, reported=set(reported) - set(entered))
+    for d in set(estimated) - set(reported) - set(entered):
+        if d in power:
+            power[d]["source"] = "rated"
     by_slot = activity_by_slot(activity)
 
     daily_total: dict[str, float] = defaultdict(float)
@@ -343,12 +367,16 @@ def build_energy(store: EnergyStore, tmean: dict[str, float], days: int = 28, to
     def status(d: str) -> str:
         if d in power:
             return power[d]["source"]
+        if d in estimated:
+            return "rated"
         if kinds.get(d) not in MEASURABLE_KINDS:
             return "small"        # too small for the meter to see; enter watts if it's a big one
         return "learning"
     devices = sorted(({"id": d, "name": names.get(d, d), "kind": kinds.get(d), "kw": power.get(d, {}).get("kw"),
                        "hours": round(device_hours[d], 1), "kwh": round(device_kwh[d], 1) if d in power else None,
-                       "status": status(d), "watts": entered.get(d), "reported_w": round(reported[d]) if d in reported else None}
+                       "status": status(d), "watts": entered.get(d), "reported_w": round(reported[d]) if d in reported else None,
+                       "profile": estimated[d]["profile"] if d in estimated and status(d) == "rated" else None,
+                       "profile_source": estimated[d]["source"] if d in estimated and status(d) == "rated" else None}
                       for d in device_hours), key=lambda x: -(x["kwh"] or 0))
     found_spikes = spikes(intervals, activity, names)
     recs = []
@@ -378,12 +406,20 @@ def build_energy(store: EnergyStore, tmean: dict[str, float], days: int = 28, to
                      "text": "Power isn't known yet for " + ", ".join(x["name"] for x in missing[:4]) +
                              ". It needs about 6 runs that line up with the meter's 15-minute data (a day late), and stays "
                              "unknown if the device uses too little to stand out. You can enter its watts instead."})
+    bulbs = list(estimated.values())
+    if bulbs:
+        standby_w = sum(b["standby"] for b in bulbs)
+        light_kwh = sum(x["kwh"] or 0 for x in devices if x["status"] == "rated")
+        recs.append({"level": "good", "title": f"Smart lights: about {light_kwh:,.0f} kWh in {days} days",
+                     "text": f"Estimated from each bulb's model and the brightness it was used at ({len(bulbs)} bulbs). "
+                             f"Switched off they still draw about {standby_w:.0f} W together, {standby_w * 8.76:,.0f} kWh a year, "
+                             "because they stay connected to the network."})
     small = [x for x in devices if x["status"] == "small"]
     if small:
         recs.append({"level": "good", "title": "Lights and small devices aren't guessed",
-                     "text": "LED lights, TVs, purifiers and robot vacuums use too little for the meter to measure, so the "
-                             "hub doesn't estimate them. If one is a big load, such as an incandescent chandelier, enter its "
-                             "watts in the device list and it's counted from then on."})
+                     "text": "Dimmers, TVs, purifiers and robot vacuums use too little for the meter to measure and don't "
+                             "say what's connected, so the hub doesn't estimate them. If one runs a big load, such as an "
+                             "incandescent chandelier on a dimmer, enter its watts in the device list."})
     return {"days": days, "series": series, "devices": devices, "spikes": found_spikes, "hvac": model,
             "standby_w": standby, "recommendations": recs,
             "summary": {"total_kwh": round(total), "hvac_kwh": round(hvac_total) if model else None,
