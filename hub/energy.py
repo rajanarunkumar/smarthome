@@ -28,6 +28,11 @@ from .history import _solve
 BALANCE_F = 65.0
 SLOT = timedelta(minutes=15)
 TRACKED_KINDS = {"appliance", "pool", "purifier", "plug", "dimmer", "tv", "vacuum", "thermostat"}
+# Big enough to see in the meter's 15-minute readings. LED lights (5–60 W), TVs, purifiers and robot vacuums are far
+# smaller than the meter's normal swings, so their "measured" power would only be whatever else ran at the same time.
+MEASURABLE_KINDS = {"appliance", "pool", "plug", "thermostat"}
+MAX_KW = {"plug": 2.0, "appliance": 7.0, "pool": 4.0, "thermostat": 15.0}   # more than this is something else
+MIN_KW = 0.15
 LAUNDRY_IDLE = {"POWER_OFF", "INITIAL", "END", "PAUSE", "SLEEP", "ERROR", "STANDBY"}
 
 
@@ -41,6 +46,7 @@ class EnergyStore:
                 id INTEGER PRIMARY KEY, device_id TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL,
                 start TEXT NOT NULL, end TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS device_activity_start ON device_activity(start);
+            CREATE TABLE IF NOT EXISTS device_watts (device_id TEXT PRIMARY KEY, watts REAL NOT NULL); -- entered by the owner
             """
         )
         db.commit()
@@ -65,11 +71,25 @@ class EnergyStore:
                                (since.isoformat(),))
         return [dict(r) for r in rows]
 
+    def watts(self) -> dict[str, float]:
+        """Power the owner entered for devices (e.g. an incandescent chandelier), in watts."""
+        return {r["device_id"]: r["watts"] for r in self.db.execute("SELECT device_id, watts FROM device_watts")}
+
+    def set_watts(self, device_id: str, watts: float | None) -> None:
+        if watts:
+            self.db.execute("INSERT INTO device_watts (device_id, watts) VALUES (?, ?) "
+                            "ON CONFLICT(device_id) DO UPDATE SET watts = excluded.watts", (device_id, watts))
+        else:
+            self.db.execute("DELETE FROM device_watts WHERE device_id = ?", (device_id,))
+        self.db.commit()
+
     def observe(self, devices, now: datetime) -> None:
-        """Record running periods from a device snapshot (called every couple of minutes)."""
+        """Record running periods from a device snapshot (called every couple of minutes). Lights are recorded
+        only when their wattage was entered."""
         seen = set()
+        entered = self.watts()
         for d in devices:
-            if d.kind not in TRACKED_KINDS or not d.online:
+            if (d.kind not in TRACKED_KINDS and d.id not in entered) or not d.online:
                 continue
             if d.on is not True:
                 continue
@@ -119,9 +139,23 @@ def local_idle(intervals: dict[str, float], busy: set[str], slot: str, hours: in
     return statistics.median(values) if len(values) >= 4 else None
 
 
-def device_power(intervals: dict[str, float], activity: list[dict], min_slots: int = 6) -> dict[str, dict]:
-    """kW per tracked device, by least squares over slots where devices ran."""
-    by_slot = activity_by_slot(activity)
+def device_power(intervals: dict[str, float], activity: list[dict], min_slots: int = 6,
+                 known_watts: dict[str, float] | None = None) -> dict[str, dict]:
+    """kW per device. Entered wattages are used as given and taken out of the meter readings first; the big loads
+    (washer, dryer, pool pump, AC, plugs) are then solved by least squares over the slots where they ran. An
+    estimate is kept only if it's clearly above zero (more than twice its standard error), at least MIN_KW, and
+    no more than the kind could draw."""
+    known_watts = known_watts or {}
+    by_slot_all = activity_by_slot(activity)
+    kinds = {a["device_id"]: a["kind"] for a in activity}
+    if known_watts:
+        intervals = dict(intervals)
+        for slot, shares in by_slot_all.items():
+            if slot in intervals:
+                intervals[slot] -= sum(share * 0.25 * known_watts[d] / 1000 for d, share in shares.items() if d in known_watts)
+    by_slot = {slot: {d: v for d, v in shares.items() if d not in known_watts and kinds.get(d) in MEASURABLE_KINDS}
+               for slot, shares in by_slot_all.items()}
+    by_slot = {slot: shares for slot, shares in by_slot.items() if shares}
     busy = set(by_slot)
     rows = []
     for slot, shares in by_slot.items():
@@ -152,10 +186,25 @@ def device_power(intervals: dict[str, float], activity: list[dict], min_slots: i
                 ata[index[di]][index[dj]] += si * 0.25 * sj * 0.25
     for i in range(n):
         ata[i][i] += 1e-6  # keeps nearly-identical schedules solvable without changing real answers
+    out = {d: {"kw": round(w / 1000, 3), "slots": 0, "source": "entered"} for d, w in known_watts.items()}
     solution = _solve(ata, atb)
     if solution is None:
-        return {}
-    return {d: {"kw": round(kw, 2), "slots": counts[d]} for d, kw in zip(devices, solution) if kw > 0.05}
+        return out
+    used = [(shares, excess) for shares, excess in rows if all(d in index for d in shares)]
+    dof = len(used) - n
+    sse = sum((excess - sum(s * 0.25 * solution[index[d]] for d, s in shares.items())) ** 2 for shares, excess in used)
+    variance = sse / dof if dof > 0 else None
+    for d, kw in zip(devices, solution):
+        se = None
+        if variance is not None:
+            unit = [0.0] * n
+            unit[index[d]] = 1.0
+            inv_col = _solve([row[:] for row in ata], unit)
+            se = (variance * inv_col[index[d]]) ** 0.5 if inv_col and inv_col[index[d]] > 0 else None
+        if kw < MIN_KW or kw > MAX_KW.get(kinds.get(d), 15.0) or (se is not None and kw <= 2 * se):
+            continue
+        out[d] = {"kw": round(kw, 2), "slots": counts[d], "source": "measured", "se": round(se, 2) if se is not None else None}
+    return out
 
 
 def degree_days(tmean: float | None) -> tuple[float, float]:
@@ -235,7 +284,8 @@ def build_energy(store: EnergyStore, tmean: dict[str, float], days: int = 28, to
     activity = store.activity(since)
     names = {a["device_id"]: a["name"] for a in activity}
     kinds = {a["device_id"]: a["kind"] for a in activity}
-    power = device_power(intervals, activity)
+    entered = store.watts()
+    power = device_power(intervals, activity, known_watts=entered)
     by_slot = activity_by_slot(activity)
 
     daily_total: dict[str, float] = defaultdict(float)
@@ -263,8 +313,15 @@ def build_energy(store: EnergyStore, tmean: dict[str, float], days: int = 28, to
     total = sum(r["total_kwh"] for r in series)
     hvac_total = sum(r["hvac_kwh"] or 0 for r in series)
     standby = always_on_watts(intervals)
+    def status(d: str) -> str:
+        if d in power:
+            return power[d]["source"]
+        if kinds.get(d) not in MEASURABLE_KINDS:
+            return "small"        # too small for the meter to see; enter watts if it's a big one
+        return "learning"
     devices = sorted(({"id": d, "name": names.get(d, d), "kind": kinds.get(d), "kw": power.get(d, {}).get("kw"),
-                       "hours": round(device_hours[d], 1), "kwh": round(device_kwh[d], 1) if d in power else None}
+                       "hours": round(device_hours[d], 1), "kwh": round(device_kwh[d], 1) if d in power else None,
+                       "status": status(d), "watts": entered.get(d)}
                       for d in device_hours), key=lambda x: -(x["kwh"] or 0))
     found_spikes = spikes(intervals, activity, names)
     recs = []
@@ -288,11 +345,18 @@ def build_energy(store: EnergyStore, tmean: dict[str, float], days: int = 28, to
     if unexplained:
         recs.append({"level": "warning", "title": f"{len(unexplained)} spike(s) with nothing tracked running",
                      "text": "Likely the AC or furnace starting, an oven, or a water heater. Connecting the Lennox thermostat would explain them."})
-    missing = [x for x in devices if x["kwh"] is None and x["hours"] >= 1]
+    missing = [x for x in devices if x["status"] == "learning" and x["hours"] >= 1]
     if missing:
         recs.append({"level": "warning", "title": "Still learning some devices",
                      "text": "Power isn't known yet for " + ", ".join(x["name"] for x in missing[:4]) +
-                             ". It needs about 6 runs that line up with the meter's 15-minute data, which arrives a day late."})
+                             ". It needs about 6 runs that line up with the meter's 15-minute data (a day late), and stays "
+                             "unknown if the device uses too little to stand out. You can enter its watts instead."})
+    small = [x for x in devices if x["status"] == "small"]
+    if small:
+        recs.append({"level": "good", "title": "Lights and small devices aren't guessed",
+                     "text": "LED lights, TVs, purifiers and robot vacuums use too little for the meter to measure, so the "
+                             "hub doesn't estimate them. If one is a big load, such as an incandescent chandelier, enter its "
+                             "watts in the device list and it's counted from then on."})
     return {"days": days, "series": series, "devices": devices, "spikes": found_spikes, "hvac": model,
             "standby_w": standby, "recommendations": recs,
             "summary": {"total_kwh": round(total), "hvac_kwh": round(hvac_total) if model else None,

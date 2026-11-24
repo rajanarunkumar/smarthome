@@ -455,7 +455,15 @@ function openDevice(id) {
     ${caps.has("color") ? `<label class="field"><span>Color</span><input type="color" id="f-color" value="${esc(d.color || "#ffffff")}"></label>` : ""}
     ${caps.has("color_temp") ? `<label class="field"><span>White: cool to warm</span>
       <input class="temp-range" type="range" id="f-ct" min="${d.mirek_min ?? 153}" max="${d.mirek_max ?? 500}" value="${d.mirek ?? 366}"></label>` : ""}
+    ${["light", "dimmer", "plug", "appliance", "pool", "tv", "purifier"].includes(d.kind) ? `<div class="field"><span>Power when on</span>
+      <div class="inline"><span class="sub" id="f-watts">Not entered</span><button class="pill small" data-watts="${esc(d.id)}" data-watts-name="${esc(d.name)}" id="f-watts-btn">Set watts</button></div>
+      <p class="note">Only needed for big loads the meter can't single out, such as incandescent fixtures. LED lights can be left alone.</p></div>` : ""}
     <p class="note">${esc(d.model || "")}</p>`);
+  api("GET", "/api/energy/watts").then((r) => {
+    const w = r.watts[d.id];
+    const label = $("#f-watts", sheet), btn = $("#f-watts-btn", sheet);
+    if (label && w) { label.textContent = `${w} W`; btn.textContent = "Edit"; btn.dataset.wattsNow = w; }
+  }).catch(() => {});
 
   const send = debounce(async (body) => {
     try { await api("POST", `/api/devices/${encodeURIComponent(id)}/state`, body); }

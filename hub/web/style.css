@@ -466,3 +466,10 @@ details.card > summary { cursor: pointer; line-height: 1.5; }
 .row.stack .model-select { max-width: none; width: 100%; }
 .update-list { margin: 0; padding-left: 18px; font-size: 13px; color: var(--muted); }
 .update-log pre { margin: 0; padding: 10px 16px 14px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); }
+.pill.small { padding: 4px 10px; font-size: 13px; }
+.log-bar { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
+.log-bar input { flex: 1; min-width: 0; }
+.log-view { margin: 0; height: 62vh; overflow: auto; padding: 10px 12px; border-radius: 12px; background: var(--card);
+  font: 11.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.log-err { color: var(--danger); }
+.log-warn { color: var(--accent); }

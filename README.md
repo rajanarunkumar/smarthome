@@ -189,6 +189,12 @@ The hub only ever needs a **token**, never your LG password, so there is nothing
 
 **Admin → Update or restart…** shows the branch and commit the hub runs, what's new on GitHub, and every branch. **Pull and restart** fetches, switches branch if you picked another, fast-forwards, installs packages if `requirements.txt` changed, and restarts; the page reloads when the hub is back (about 10 seconds). **Pull only** skips the restart; **Restart** just restarts. It never merges or throws anything away: if the Mac's copy has edits or commits of its own, it stops and says so. Needs a person signed in (scripts with the API token can't update or restart). Restarts rely on the background service from `scripts/install-service.sh`; without it the hub replaces its own process. The Mac needs to be able to `git fetch` without a password prompt (the macOS keychain usually handles this after one manual `git pull`).
 
+**Admin → Restart hub** restarts on its own (about 10 seconds; the page reloads when it's back). **Admin → Log** shows the last 1000 lines of `~/.smarthome/logs/hub.log` and follows new lines every 2 seconds, with a filter box; anything that looks like a password or token is masked.
+
+## Electricity: lights and entered watts
+
+The meter reports every 15 minutes, and normal swings (the AC, fridge, water heater) are a few hundred watts, so devices smaller than that can't be measured from it. The hub therefore only estimates the big loads (washer, dryer, pool pump, AC, smart plugs) and keeps an estimate only when the data clearly supports it. LED lights, TVs, purifiers and robot vacuums show as *too small to measure* instead of a made-up number. For a big load the meter can't single out, such as an incandescent chandelier, enter its watts: in Insights → Electricity → *Set W*, or in the device's panel → *Power when on*. Entered devices are counted exactly (watts × time on) and taken out before the others are estimated. Example: two chandeliers with eight 60 W bulbs each = 960 W.
+
 ## Ask Home (chat)
 
 The speech-bubble button at the top opens a chat. Ask in your own words: "turn off everything downstairs", "set the thermostat to 70", "run the front lawn for 10 minutes", "what's on right now?", "review my device names", "review my schedules".

@@ -77,7 +77,9 @@ function drawAdmin() {
       ${busyButton("backfill", "Fetch last 4 weeks", 'data-adm="backfill"')}
       ${busyButton("cache-reload", "Reload caches", 'data-adm="cache" data-reload="1"')}
       ${busyButton("cache-clear", "Clear caches", 'data-adm="cache" data-reload="0"')}
-      <button class="pill" data-update-open>Update or restart…</button>
+      <button class="pill" data-update-open>Update…</button>
+      <button class="pill" data-log-open>Log</button>
+      <button class="pill danger" data-restart>Restart hub</button>
     </div>
     ${adminResult ? `<div class="adm-result ${adminResult.ok ? "" : "bad"}" role="status">${adminResult.html}</div>` : ""}
 
@@ -312,4 +314,70 @@ async function waitForHub() {
     await new Promise((r) => setTimeout(r, 1500));
   }
   toast("The hub hasn't come back yet. Check the Mac.");
+}
+
+// ---------- restart straight from the Admin screen ----------
+view.addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-restart]");
+  if (!b) return;
+  if (!confirm("Restart the hub now? It's back in about 10 seconds.")) return;
+  b.disabled = true;
+  try {
+    await api("POST", "/api/admin/restart");
+    openSheet("Restarting the hub", `<p class="note">The hub is restarting. This page reloads when it's back.</p>`);
+    waitForHub();
+  } catch (err) { toast(err.message); b.disabled = false; }
+});
+
+// ---------- log viewer: the last 1000 lines, then follow new lines live ----------
+let logTimer = null, logEnd = 0, logLines = [];
+const LOG_MAX = 1000;
+view.addEventListener("click", (e) => { if (e.target.closest("[data-log-open]")) openLog(); });
+
+async function openLog() {
+  openSheet("Hub log", `
+    <div class="log-bar">
+      <input type="search" id="log-filter" placeholder="Filter, e.g. rainbird or ERROR" autocomplete="off">
+      <label class="inline"><span>Follow</span><span class="switch"><input type="checkbox" id="log-follow" checked><span></span></span></label>
+    </div>
+    <pre id="log-view" class="log-view">Loading…</pre>
+    <p class="note" id="log-info"></p>`);
+  logLines = []; logEnd = 0;
+  $("#log-filter", sheet).addEventListener("input", drawLog);
+  $("#log-follow", sheet).addEventListener("change", (e) => { if (e.target.checked) followLog(); else clearTimeout(logTimer); });
+  await loadLog(null);
+  followLog();
+}
+
+async function loadLog(after) {
+  try {
+    const r = await api("GET", `/api/admin/logfile?lines=${LOG_MAX}` + (after != null ? `&after=${after}` : ""));
+    if (r.missing) { $("#log-view", sheet).textContent = `No log file yet at ${r.path}.`; return; }
+    const fresh = r.text.split("\n");
+    if (fresh[fresh.length - 1] === "") fresh.pop();
+    logLines = r.reset ? fresh : logLines.concat(fresh);
+    if (logLines.length > LOG_MAX) logLines = logLines.slice(-LOG_MAX);
+    logEnd = r.end;
+    $("#log-info", sheet).textContent = `${r.path} · last ${logLines.length} lines`;
+    drawLog();
+  } catch (err) { const v = $("#log-view", sheet); if (v) v.textContent = err.message; }
+}
+
+function drawLog() {
+  const v = $("#log-view", sheet);
+  if (!v) return;
+  const q = ($("#log-filter", sheet)?.value || "").toLowerCase();
+  const atBottom = v.scrollHeight - v.scrollTop - v.clientHeight < 40;
+  const shown = q ? logLines.filter((l) => l.toLowerCase().includes(q)) : logLines;
+  v.innerHTML = shown.map((l) => `<span class="${/\b(ERROR|CRITICAL|Traceback)\b/.test(l) ? "log-err" : /\bWARNING\b/.test(l) ? "log-warn" : ""}">${esc(l)}</span>`).join("\n") || "(nothing matches)";
+  if (atBottom || !v.dataset.seen) { v.scrollTop = v.scrollHeight; v.dataset.seen = "1"; }
+}
+
+function followLog() {
+  clearTimeout(logTimer);
+  logTimer = setTimeout(async () => {
+    if (!sheet.open || !$("#log-view", sheet) || !$("#log-follow", sheet)?.checked) return;
+    if (!document.hidden) await loadLog(logEnd);
+    followLog();
+  }, 2000);
 }

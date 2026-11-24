@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import hmac
 import logging
 import sqlite3
@@ -1336,6 +1337,24 @@ async def backfill(request: Request):
     return await hub_of(request).collect_once(days=28)
 
 
+class WattsIn(BaseModel):
+    watts: float | None = Field(None, ge=1, le=20000)   # power when on; empty clears it
+
+
+@app.get("/api/energy/watts")
+async def energy_watts(request: Request):
+    return {"watts": hub_of(request).energy.watts()}
+
+
+@app.put("/api/energy/watts/{device_id}")
+async def set_energy_watts(request: Request, device_id: str, body: WattsIn):
+    hub = hub_of(request)
+    if hub.last_devices and device_id not in hub.last_devices and device_id not in hub.energy.watts():
+        raise HubError(404, "Unknown device")
+    hub.energy.set_watts(device_id, body.watts)
+    return {"ok": True}
+
+
 @app.get("/api/energy")
 async def energy(request: Request, days: int = 28):
     from datetime import date, timedelta
@@ -1472,7 +1491,7 @@ async def hvac(request: Request, days: int = 14):
     activity = hub.energy.activity(since)
     ids = {t["id"] for t in stats} | {a["device_id"] for a in activity if a["kind"] == "thermostat"}
     # kW per thermostat from the meter: solved with every tracked device, so the pool or dryer isn't blamed on the AC.
-    kw = {d: v["kw"] for d, v in device_power(hub.energy.intervals(since), activity).items() if d in ids}
+    kw = {d: v["kw"] for d, v in device_power(hub.energy.intervals(since), activity, known_watts=hub.energy.watts()).items() if d in ids}
     data = build_hvac(hub.hvac, stats, tariff_of(hub), _tmean(hub, 60), kw, datetime.now(), days)
     return {**data, "connected": {"nest": hub.nest.active, "lennox": hub.lennox.active}}
 
@@ -1807,6 +1826,33 @@ async def admin_update(request: Request, body: UpdateIn):
     who = _email(request)
     log.warning("%s started an update to %s", who, body.branch)
     return hub_of(request).updater.start(body.branch, body.restart)
+
+
+LOG_SECRETS = re.compile(r"(?i)((?:password|passwd|token|api[_-]?key|secret|authorization)[\"']?\s*[=:]\s*[\"']?(?:bearer\s+)?|bearer\s+)[^\s\"',&]+")
+LOG_TAIL_BYTES = 4 * 1024 * 1024
+
+
+@app.get("/api/admin/logfile")
+async def admin_logfile(request: Request, lines: int = 1000, after: int | None = None):
+    """The hub's log file. Without `after`: its last `lines` lines. With `after` (the `end` of the previous answer):
+    only what was written since, for following it live. Anything that looks like a password or token is masked."""
+    _email(request)
+    path = data_dir() / "logs" / "hub.log"
+    if not path.exists():
+        return {"text": "", "end": 0, "path": str(path), "missing": True}
+    lines = max(10, min(lines, 5000))
+
+    def read() -> tuple[str, int, bool]:
+        size = path.stat().st_size
+        with path.open("rb") as f:
+            if after is not None and 0 <= after <= size and size - after <= LOG_TAIL_BYTES:
+                f.seek(after)
+                return f.read().decode(errors="replace"), size, False
+            f.seek(max(0, size - LOG_TAIL_BYTES))
+            text = f.read().decode(errors="replace")
+            return "\n".join(text.splitlines()[-lines:]) + ("\n" if text.endswith("\n") else ""), size, True
+    text, end, whole = await asyncio.to_thread(read)
+    return {"text": LOG_SECRETS.sub(lambda m: m.group(1) + "•••", text), "end": end, "reset": whole, "path": str(path)}
 
 
 @app.post("/api/admin/restart")

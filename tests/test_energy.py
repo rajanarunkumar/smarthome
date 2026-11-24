@@ -142,3 +142,73 @@ def test_reconstructed_runs_need_the_meter_to_agree():
     hourly = {f"2026-11-{d:02d}T{h:02d}": 3.0 for d in range(14, 20) for h in range(24)}
     hourly["2026-11-16T05"] += 180  # the 16th really watered; the 18th was skipped (rain delay)
     assert confirm_with_meter(runs, hourly) == [runs[0]]
+
+
+def add_activity(s, device_id, name, kind, day, start, end):
+    s.db.execute("INSERT INTO device_activity (device_id, name, kind, start, end) VALUES (?,?,?,?,?)",
+                 (device_id, name, kind, f"{day}T{start}", f"{day}T{end}"))
+
+
+def test_lights_are_not_given_made_up_power():
+    """An LED office dimmer on 9-5 every weekday overlaps the AC's daytime load; it must not be blamed for it."""
+    s = store()
+    tmean = build(s)
+    for n in range(1, DAYS + 1):
+        add_activity(s, "leviton:office", "Office", "dimmer", (TODAY - timedelta(days=n)).isoformat(), "09:00", "17:00")
+    s.db.commit()
+    out = build_energy(s, tmean, days=DAYS, today=TODAY)
+    office = next(d for d in out["devices"] if d["id"] == "leviton:office")
+    assert office["kw"] is None and office["kwh"] is None and office["status"] == "small"
+    assert any(r["title"].startswith("Lights and small devices") for r in out["recommendations"])
+    assert not any("Office" in r["text"] for r in out["recommendations"] if r["title"] == "Still learning some devices")
+
+
+def test_entered_watts_count_and_dont_disturb_the_others():
+    s = store()
+    tmean = build(s)
+    intervals = s.intervals(TODAY - timedelta(days=40))
+    for n in range(1, DAYS + 1):                       # two incandescent chandeliers, 600 W together, 8-11 PM
+        d = (TODAY - timedelta(days=n)).isoformat()
+        add_activity(s, "leviton:chand", "Dining chandelier", "dimmer", d, "20:00", "23:00")
+        for h in (20, 21, 22):
+            for m in (0, 15, 30, 45):
+                intervals[f"{d}T{h:02d}:{m:02d}"] += 0.6 / 4
+    s.put_intervals(intervals.items())
+    s.set_watts("leviton:chand", 600)
+    out = build_energy(s, tmean, days=DAYS, today=TODAY)
+    chand = next(d for d in out["devices"] if d["id"] == "leviton:chand")
+    assert chand["status"] == "entered" and chand["kw"] == 0.6 and chand["kwh"] == round(0.6 * 3 * DAYS, 1)
+    power = device_power(s.intervals(TODAY - timedelta(days=40)), s.activity(TODAY - timedelta(days=40)), known_watts=s.watts())
+    assert power["thinq:d1"]["kw"] == 5.0 and power["pentair:p1"]["kw"] == 1.5
+    s.set_watts("leviton:chand", None)
+    assert s.watts() == {}
+
+
+def test_a_plug_with_no_real_load_gets_no_estimate():
+    import random
+    rng = random.Random(7)
+    s = store()
+    tmean = build(s)
+    intervals = s.intervals(TODAY - timedelta(days=40))
+    for k in intervals:                                  # realistic noise: ±0.4 kW swings
+        intervals[k] = max(intervals[k] + rng.uniform(-0.1, 0.1), 0)
+    s.put_intervals(intervals.items())
+    for n in range(1, DAYS + 1):
+        d = (TODAY - timedelta(days=n)).isoformat()
+        h = rng.randint(6, 21)
+        add_activity(s, "kasa:phone", "Phone charger", "plug", d, f"{h:02d}:00", f"{h + 1:02d}:00")
+    s.db.commit()
+    power = device_power(s.intervals(TODAY - timedelta(days=40)), s.activity(TODAY - timedelta(days=40)))
+    assert "kasa:phone" not in power
+    assert abs(power["thinq:d1"]["kw"] - 5.0) < 0.2
+
+
+def test_observe_records_lights_only_when_watts_were_entered():
+    s = store()
+    lamp = Device(id="hue:1", brand="hue", name="Chandelier", kind="light", on=True)
+    bulb = Device(id="hue:2", brand="hue", name="LED", kind="light", on=True)
+    s.set_watts("hue:1", 300)
+    t0 = datetime(2026, 11, 20, 20, 0)
+    s.observe([lamp, bulb], t0)
+    s.observe([], t0 + timedelta(minutes=30))
+    assert [a["device_id"] for a in s.activity(date(2026, 11, 19))] == ["hue:1"]

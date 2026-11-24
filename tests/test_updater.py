@@ -152,3 +152,44 @@ def test_routes_need_a_signed_in_person(tmp_path, monkeypatch):
         assert client.post("/api/admin/update", json={"branch": "main"}, headers=token).status_code == 403
         assert client.post("/api/admin/restart", headers=token).status_code == 403
         assert restarts == []
+
+
+def test_log_tail_follow_and_masking(tmp_path, monkeypatch):
+    monkeypatch.setenv("SMARTHOME_HOME", str(tmp_path))
+    from fastapi.testclient import TestClient
+    from hub import app as app_module
+    with TestClient(app_module.app) as client:
+        hub = app_module.app.state.hub
+        token = {"Authorization": f"Bearer {hub.secrets.access_token()}"}
+        assert client.get("/api/admin/logfile", headers=token).status_code == 403      # scripts can't read it
+        hub.secrets.set("auth", {**hub.auth.config, "allowed_emails": ["me@example.com"]})
+        client.cookies.set("hub_session", hub.auth.create_session("me@example.com", "google"))
+        log = tmp_path / "logs" / "hub.log"
+        log.parent.mkdir(exist_ok=True)
+        log.write_text("".join(f"line {i}\n" for i in range(1500)) + "login password=hunter2 ok\nAuthorization: Bearer abc.def\n")
+        r = client.get("/api/admin/logfile?lines=1000").json()
+        lines = r["text"].splitlines()
+        assert len(lines) == 1000 and lines[0] == "line 502" and r["reset"]
+        assert "hunter2" not in r["text"] and "abc.def" not in r["text"] and "password=•••" in r["text"]
+        with log.open("a") as f:
+            f.write("new 1\nnew 2\n")
+        more = client.get(f"/api/admin/logfile?after={r['end']}").json()
+        assert more["text"] == "new 1\nnew 2\n" and not more["reset"] and more["end"] > r["end"]
+        log.write_text("rotated\n")                                   # the file got smaller: start over
+        again = client.get(f"/api/admin/logfile?after={more['end']}").json()
+        assert again["reset"] and again["text"] == "rotated\n"
+
+
+def test_energy_watts_route(tmp_path, monkeypatch):
+    monkeypatch.setenv("SMARTHOME_HOME", str(tmp_path))
+    from fastapi.testclient import TestClient
+    from hub import app as app_module
+    with TestClient(app_module.app) as client:
+        hub = app_module.app.state.hub
+        token = {"Authorization": f"Bearer {hub.secrets.access_token()}"}
+        hub.last_devices = {}
+        assert client.put("/api/energy/watts/leviton:chand", json={"watts": 960}, headers=token).json() == {"ok": True}
+        assert client.get("/api/energy/watts", headers=token).json()["watts"] == {"leviton:chand": 960}
+        assert client.put("/api/energy/watts/leviton:chand", json={"watts": 50000}, headers=token).status_code == 422
+        client.put("/api/energy/watts/leviton:chand", json={"watts": None}, headers=token)
+        assert client.get("/api/energy/watts", headers=token).json()["watts"] == {}

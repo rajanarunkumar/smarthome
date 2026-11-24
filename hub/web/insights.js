@@ -429,8 +429,31 @@ async function renderEnergy(fetch = true) {
         <span class="sub-value">${fmtNum(e.peak_kw, 1)} kW · ${fmtNum(e.kwh, 1)} kWh</span></div>`).join("")}</div>`
       : `<p class="note">No spikes stand out yet.</p>`}
     <div class="section-title"><span>Devices</span></div>
-    ${en.devices.length ? `<div class="table-wrap"><table class="viz-table"><thead><tr><th>Device</th><th>Hours on</th><th>Power (kW)</th><th>kWh</th></tr></thead>
-      <tbody>${en.devices.map((d) => `<tr><td>${esc(d.name)}</td><td>${fmtNum(d.hours, 1)}</td><td>${d.kw == null ? `<span class="muted">learning</span>` : fmtNum(d.kw, 2)}</td><td>${fmtNum(d.kwh, 1)}</td></tr>`).join("")}</tbody></table></div>
+    ${en.devices.length ? `<div class="table-wrap"><table class="viz-table"><thead><tr><th>Device</th><th>Hours on</th><th>Power (kW)</th><th>kWh</th><th></th></tr></thead>
+      <tbody>${en.devices.map((d) => `<tr><td>${esc(d.name)}</td><td>${fmtNum(d.hours, 1)}</td><td>${
+        d.status === "entered" ? `${fmtNum(d.kw, 2)} <span class="muted">entered</span>`
+        : d.status === "measured" ? fmtNum(d.kw, 2)
+        : d.status === "small" ? `<span class="muted">too small to measure</span>` : `<span class="muted">learning</span>`}</td><td>${fmtNum(d.kwh, 1)}</td>
+        <td><button class="pill small" data-watts="${esc(d.id)}" data-watts-name="${esc(d.name)}" data-watts-now="${d.watts ?? ""}">${d.watts ? "Edit W" : "Set W"}</button></td></tr>`).join("")}</tbody></table></div>
       <p class="note">Power is worked out by matching when each device ran against the meter's 15-minute readings. The hub records device activity from now on; electricity arrives a day late from Smart Meter Texas.</p>`
       : `<p class="note">No device activity recorded yet. The hub notes every 2 minutes which devices are running (washer, dryer, pool pump, AC, plugs, TV) from now on.</p>`}`);
 }
+
+// Power when on, entered by the owner (e.g. an incandescent chandelier): counted exactly instead of guessed.
+async function editWatts(id, name, now) {
+  const answer = prompt(`Power used by ${name} when on, in watts (empty to clear).\nExample: 2 chandeliers with 8 × 60 W bulbs = 960`, now || "");
+  if (answer === null) return false;
+  const watts = answer.trim() ? Number(answer.trim()) : null;
+  if (watts !== null && !(watts >= 1 && watts <= 20000)) { toast("Enter a number of watts between 1 and 20000"); return false; }
+  try { await api("PUT", `/api/energy/watts/${encodeURIComponent(id)}`, { watts }); toast(watts ? `${name}: ${watts} W` : `${name}: cleared`); return { watts }; }
+  catch (err) { toast(err.message); return false; }
+}
+document.addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-watts]");
+  if (!b) return;
+  const done = await editWatts(b.dataset.watts, b.dataset.wattsName, b.dataset.wattsNow);
+  if (!done) return;
+  const label = b.id === "f-watts-btn" && $("#f-watts", sheet);
+  if (label) { label.textContent = done.watts ? `${done.watts} W` : "Not entered"; b.textContent = done.watts ? "Edit" : "Set watts"; b.dataset.wattsNow = done.watts ?? ""; }
+  else if (state.tab === "insights") render(true);
+});
