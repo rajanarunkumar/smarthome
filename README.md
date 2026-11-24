@@ -191,7 +191,10 @@ The speech-bubble button at the top opens a chat. Ask in your own words: "turn o
 
 - **Devices change straight away**, through the same path as tapping in the app. Unlocking is never possible from chat (locking is).
 - **Names, rooms and schedules come back as a plan.** Each change shows with its reason and a tick box; nothing changes until you tap **Apply**, and you can untick any you don't want.
-- Uses Claude through the Anthropic API key in **Settings → Photo analysis** (same key). The conversation is kept in the hub's memory for an hour, not on disk, and each message is sent to Anthropic with the device list it needs. Typical cost is a few cents per conversation.
+- **Which model answers** (Settings → **Ask Home**):
+  - **Google Gemini, free tier.** Get a key at aistudio.google.com → *Get API key* (no card needed). The default model is Flash-Lite, which has the largest free allowance; Flash is smarter but allows far fewer free requests a day. A command takes about 3 requests. When the free limit runs out, the chat says so; it resets daily (midnight Pacific). On the free tier Google may use what's sent, including your device names and rooms, to improve its products.
+  - **Claude**, using the Anthropic key in **Settings → Photo analysis**. Pay as you go: roughly 5–10¢ per command and 15–30¢ for a full review of names or schedules on Claude Opus 5.5.
+  - With both keys saved, pick one in Settings. The conversation is kept in the hub's memory for an hour, not on disk; switching models starts a new conversation.
 
 **Naming that works well everywhere** (the chat follows this when you ask it to review names): *Room + what it is* ("Kitchen Island Lights", "Primary Bedroom Fan"), 2–4 words, unique, no brand or model names, a plug named after what's plugged into it, and nothing that sounds like another device or a command. These names carry over to Alexa and Google Home once they're connected.
 

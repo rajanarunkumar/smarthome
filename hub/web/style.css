@@ -458,3 +458,4 @@ details.card > summary { cursor: pointer; line-height: 1.5; }
 .chat-ideas { display: flex; flex-wrap: wrap; gap: 8px; }
 .chat-form { display: flex; gap: 8px; margin-top: 8px; }
 .chat-form input { flex: 1; min-width: 0; }
+#chat-provider, #gemini-model { max-width: 60%; flex: none; }

@@ -878,6 +878,7 @@ function renderSettings() {
       "Sprinklers with the Rain Bird LNK Wi‑Fi module, controlled directly on your Wi‑Fi. Use the controller password from the Rain Bird app (not your account password). Find the IP in the Rain Bird app's controller settings or your router's device list.",
       `${rainbird.paused ? "Paused: " + esc(rainbird.watch_error || "") : `${esc(rainbird.host || "")} · ${rainbird.zones ?? 0} zone(s)`}`, "rainbird",
       `<button class="pill" id="rainbird-test">Test</button>`)}
+    ${chatSettingsCard()}
     <div class="section-title"><span>Photo analysis (optional)</span></div>
     <div class="card">${state.status?.claude?.connected ? `
       <div class="row"><div class="main"><span class="name">Claude is on</span>
@@ -1001,6 +1002,17 @@ function renderSettings() {
   });
   accountButton("#rainbird-on", () => api("POST", "/api/rainbird/account", { host: val("#rainbird-host"), password: $("#rainbird-pw").value }),
     (r) => `Rain Bird connected: ${r.zones} zone(s)`);
+  accountButton("#gemini-on", () => api("PUT", "/api/settings/chat", { gemini_key: val("#gemini-key"), provider: "gemini" }),
+    () => "Ask Home now uses Gemini");
+  accountButton("#gemini-off", () => api("DELETE", "/api/settings/gemini"), () => "Gemini key removed");
+  $("#chat-provider")?.addEventListener("change", async (e) => {
+    try { await api("PUT", "/api/settings/chat", { provider: e.target.value }); toast(`Ask Home now uses ${e.target.value === "gemini" ? "Gemini" : "Claude"}`); render(true); }
+    catch (err) { toast(err.message); }
+  });
+  $("#gemini-model")?.addEventListener("change", async (e) => {
+    try { await api("PUT", "/api/settings/chat", { model: e.target.value }); toast("Gemini model saved"); }
+    catch (err) { toast(err.message); }
+  });
   accountButton("#claude-on", () => api("PUT", "/api/settings/claude", { api_key: val("#claude-key") }), () => "Claude photo analysis is on");
   accountButton("#claude-off", () => api("DELETE", "/api/settings/claude"), () => "Claude photo analysis is off");
   accountButton("#ring-on", async () => {
@@ -1552,4 +1564,29 @@ async function loadRingEvents(d) {
       <div class="row"><span class="main"><span class="name small">${esc(e.label)}</span>${e.kind === "ding" ? `<span class="sub">${e.answered ? "Answered" : "Not answered"}</span>` : ""}</span>
         <span class="sub-value">${esc(e.when)}</span></div>`).join("") || `<div class="row"><span class="sub">No events in Ring's history.</span></div>`;
   } catch (err) { box.innerHTML = `<div class="row"><span class="sub wrap">${esc(err.message)}</span></div>`; }
+}
+
+// ---------- settings: Ask Home (chat) ----------
+const GEMINI_MODELS = [
+  ["gemini-flash-lite-latest", "Flash-Lite (most free use)"],
+  ["gemini-flash-latest", "Flash (smarter, less free use)"],
+];
+function chatSettingsCard() {
+  const c = state.status?.chat || {};
+  const claude = !!state.status?.claude?.connected;
+  const models = GEMINI_MODELS.some(([id]) => id === c.model) ? GEMINI_MODELS : [[c.model, c.model], ...GEMINI_MODELS];
+  return `
+    <div class="section-title"><span>Ask Home (chat)</span></div>
+    <div class="card">
+      <div class="row"><div class="main"><span class="name">${c.provider ? `Answers with ${c.provider === "gemini" ? "Google Gemini" : "Claude"}` : "Not set up"}</span>
+        <span class="sub wrap">${c.provider === "gemini" ? "Free tier: a few requests a minute and a daily total; a command uses about 3. On the free tier Google may use what's sent (your device names and rooms) to improve its products."
+          : c.provider === "claude" ? "Uses the Anthropic key below. Roughly 5–10¢ per command." : "Get a free Gemini key at <b>aistudio.google.com → Get API key</b>, or use the Anthropic key below."}</span></div></div>
+      ${c.gemini && claude ? `<label class="row"><span class="main"><span class="name small">Answers with</span></span>
+        <select id="chat-provider"><option value="gemini" ${c.provider === "gemini" ? "selected" : ""}>Gemini (free)</option><option value="claude" ${c.provider === "claude" ? "selected" : ""}>Claude</option></select></label>` : ""}
+      ${c.gemini ? `<label class="row"><span class="main"><span class="name small">Gemini model</span></span>
+        <select id="gemini-model">${models.map(([id, label]) => `<option value="${esc(id)}" ${id === c.model ? "selected" : ""}>${esc(label)}</option>`).join("")}</select></label>
+        <div class="row"><span class="sub">Gemini key saved.</span><button class="pill danger" id="gemini-off">Remove</button></div>` : `
+      <div class="row key-row"><input type="password" id="gemini-key" placeholder="Gemini API key (AIza…)" autocomplete="off" spellcheck="false">
+        <button class="pill primary" id="gemini-on">Use Gemini</button></div>`}
+    </div>`;
 }

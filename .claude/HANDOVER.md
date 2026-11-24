@@ -132,3 +132,4 @@ See `.claude/NEXT.md`.
 - Hub methods `rename_device`, `create_schedules`, `named_schedules` now back both the routes and the chat.
 - UI: `hub/web/chat.js`, header button `#chat-open`; plan card with tick boxes.
 - myQ: not built (Chamberlain blocks third parties). Waiting for the user's opener learn-button colour / model; plan is an ESPHome (ratgdo / Konnected blaQ) adapter with unlock-style protection for opening.
+- Ask Home also runs on **Google Gemini** (`google-genai`, default model alias `gemini-flash-lite-latest`, free tier): `Chat._gemini_loop` uses the same tools via function calling with automatic calling off; model turns are appended as returned (thought signatures). Provider: `secrets['chat'].provider`, else Gemini if a key exists, else Claude. Settings `PUT /api/settings/chat`, `DELETE /api/settings/gemini`. Not yet tried against a real Gemini key; if the alias 404s, pick another model in Settings.

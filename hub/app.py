@@ -10,6 +10,8 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from typing import Literal
+
 from fastapi import Body, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.gzip import GZipMiddleware
@@ -37,7 +39,7 @@ from .auth import SESSION_COOKIE, Auth
 from .cache import LoadingCache
 from .telemetry import Telemetry
 from . import backup as backup_mod
-from .chat import Chat
+from .chat import GEMINI_MODEL, Chat
 from .config import Secrets, data_dir
 from . import weather as weather_api
 from .energy import EnergyStore, build_energy, device_power
@@ -681,6 +683,9 @@ async def status(request: Request):
     return {
         **{a.brand: s for a, s in zip(hub.adapters, brands)},
         "claude": {"connected": bool(hub.secrets.get("anthropic_api_key"))},
+        "chat": {"provider": hub.chat.provider(), "gemini": bool((hub.secrets.get("gemini") or {}).get("api_key")),
+                 "model": (hub.secrets.get("gemini") or {}).get("model") or GEMINI_MODEL,
+                 "choice": (hub.secrets.get("chat") or {}).get("provider")},
         "user": (request.state.user or {}).get("email"),
     }
 
@@ -1560,6 +1565,34 @@ async def set_claude_key(request: Request, body: ApiKeyIn):
     return {"ok": True}
 
 
+class ChatSettingsIn(BaseModel):
+    provider: Literal["gemini", "claude"] | None = None
+    gemini_key: str | None = Field(None, min_length=20, max_length=200, pattern=r"^[A-Za-z0-9_\-]+$")
+    model: str | None = Field(None, min_length=3, max_length=60, pattern=r"^[a-z0-9.\-]+$")
+
+
+@app.put("/api/settings/chat")
+async def set_chat_settings(request: Request, body: ChatSettingsIn):
+    """Which model answers Ask Home, and the Gemini key and model."""
+    hub = hub_of(request)
+    gemini = dict(hub.secrets.get("gemini") or {})
+    if body.gemini_key:
+        gemini["api_key"] = body.gemini_key
+    if body.model:
+        gemini["model"] = body.model
+    if gemini:
+        hub.secrets.set("gemini", gemini)
+    if body.provider:
+        hub.secrets.set("chat", {"provider": body.provider})
+    return {"ok": True, "provider": hub.chat.provider()}
+
+
+@app.delete("/api/settings/gemini")
+async def clear_gemini_key(request: Request):
+    hub_of(request).secrets.set("gemini", None)
+    return {"ok": True}
+
+
 @app.delete("/api/settings/claude")
 async def clear_claude_key(request: Request):
     hub_of(request).secrets.set("anthropic_api_key", None)
@@ -1607,6 +1640,8 @@ STORED_SETTINGS = {
     "water": ("My Water Advisor email and password", "password"),
     "rainbird": ("Rain Bird controller address and password, zone names and sizes", "password"),
     "ring": ("Ring sign-in token (not the password)", "key"),
+    "gemini": ("Google Gemini API key (Ask Home)", "key"),
+    "chat": ("Ask Home: which model answers", "config"),
     "lennox": ("Lennox iComfort email and password (or thermostat address)", "password"),
     "nest": ("Nest (Google Device Access) client secret and refresh token", "key"),
     "anthropic_api_key": ("Anthropic API key (photo analysis)", "key"),

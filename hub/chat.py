@@ -1,14 +1,14 @@
 """Chat with the home: plain-language control, questions, and tidying up names, rooms and schedules.
 
-Claude (through the Anthropic API key saved in Settings → Photo analysis) gets a few tools that call the
-hub itself. Two kinds of action:
+The model, either Google Gemini (free tier, key in Settings → Ask Home) or Claude (the Anthropic key in
+Settings → Photo analysis), gets a few tools that call the hub itself. Two kinds of action:
 - Device control (lights, speakers, thermostats, sprinklers…) runs straight away, through the same path
   as tapping in the app. Unlocking a lock is never possible from chat.
 - Changes to the setup (renaming, moving to a room, creating, deleting or pausing schedules) come back
   as a plan. Nothing changes until the person taps Apply.
 
-The conversation stays in the hub's memory (not on disk) for an hour, and is sent to Anthropic for each
-reply. The loop runs here, on the Mac, because the tools act on the home network.
+The conversation stays in the hub's memory (not on disk) for an hour, and is sent to the chosen provider
+for each reply. The loop runs here, on the Mac, because the tools act on the home network.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from .models import DAYS, HubError, ScheduleIn, StateIn
 log = logging.getLogger(__name__)
 
 MODEL = "claude-opus-5-5"
+GEMINI_MODEL = "gemini-flash-lite-latest"   # Google's alias for the newest Flash-Lite: the largest free daily quota
 MAX_ROUNDS = 8            # tool rounds per message
 KEEP_SECONDS = 3600
 MAX_CONVERSATIONS = 20
@@ -68,6 +69,16 @@ or free-nights electricity plan; ask before assuming one.
 if relevant. Locks can't be scheduled.
 """
 
+STATE_PROPS = {
+    "on": {"type": "boolean"}, "brightness": {"type": "integer"}, "color": {"type": "string"},
+    "volume": {"type": "integer"}, "muted": {"type": "boolean"},
+    "playback": {"type": "string", "enum": ["play", "pause", "next", "previous"]}, "source": {"type": "string"},
+    "action": {"type": "string"}, "level": {"type": "integer"}, "locked": {"type": "boolean"},
+    "zone": {"type": "integer"}, "minutes": {"type": "integer"}, "rain_delay_days": {"type": "integer"},
+    "thermostat_mode": {"type": "string", "enum": ["HEAT", "COOL", "HEATCOOL", "OFF"]},
+    "heat_f": {"type": "number"}, "cool_f": {"type": "number"}, "eco": {"type": "boolean"}, "fan_minutes": {"type": "integer"},
+}
+
 TOOLS: list[dict] = [
     {
         "name": "list_devices",
@@ -91,7 +102,7 @@ TOOLS: list[dict] = [
                        "(HEAT|COOL|HEATCOOL|OFF), heat_f, cool_f (°F), eco (bool), fan_minutes (0-720).",
         "input_schema": {"type": "object", "properties": {
             "device_id": {"type": "string"},
-            "state": {"type": "object"}}, "required": ["device_id", "state"]},
+            "state": {"type": "object", "properties": STATE_PROPS}}, "required": ["device_id", "state"]},
     },
     {
         "name": "propose_changes",
@@ -106,7 +117,15 @@ TOOLS: list[dict] = [
             "changes": {"type": "array", "items": {"type": "object", "properties": {
                 "type": {"type": "string", "enum": ["rename", "move", "create_schedule", "delete_schedule",
                                                    "pause_schedule", "resume_schedule"]},
-                "reason": {"type": "string"}}, "required": ["type"]}}},
+                "reason": {"type": "string"},
+                "device_id": {"type": "string"}, "name": {"type": "string"}, "room": {"type": "string"},
+                "schedule_id": {"type": "string"},
+                "device_ids": {"type": "array", "items": {"type": "string"}},
+                "on": {"type": "boolean"}, "brightness": {"type": "integer"},
+                "trigger": {"type": "string", "enum": ["time", "sunrise", "sunset"]},
+                "time": {"type": "string", "description": "HH:MM, 24-hour"}, "offset_min": {"type": "integer"},
+                "days": {"type": "array", "items": {"type": "string", "enum": DAYS}}},
+                "required": ["type"]}}},
             "required": ["summary", "changes"]},
     },
 ]
@@ -145,16 +164,27 @@ def schedule_row(s: Any) -> dict:
 
 
 class Chat:
-    def __init__(self, hub: Any, client_factory=None) -> None:
+    def __init__(self, hub: Any, client_factory=None, gemini_factory=None) -> None:
         self.hub = hub
         self._client_factory = client_factory
+        self._gemini_factory = gemini_factory
         self._conversations: dict[str, dict] = {}
         self._plans: dict[str, dict] = {}
+
+    def provider(self) -> str | None:
+        """The chosen provider, or whichever one has a key (Gemini first: it has a free tier)."""
+        cfg = self.hub.secrets.get("chat") or {}
+        gemini = bool((self.hub.secrets.get("gemini") or {}).get("api_key"))
+        claude = bool(self.hub.secrets.get("anthropic_api_key"))
+        choice = cfg.get("provider")
+        if choice == "gemini" and gemini or choice == "claude" and claude:
+            return choice
+        return "gemini" if gemini else "claude" if claude else None
 
     def _client(self) -> Any:
         key = self.hub.secrets.get("anthropic_api_key")
         if not key:
-            raise HubError(409, "Chat uses Claude. Add an Anthropic API key in Settings → Photo analysis first.")
+            raise HubError(409, "Add a Gemini key in Settings → Ask Home (free), or an Anthropic key in Settings → Photo analysis.")
         if self._client_factory:
             return self._client_factory(key)
         import anthropic
@@ -310,22 +340,43 @@ class Chat:
     # ---- conversation ----
     async def send(self, text: str, conversation_id: str | None = None) -> dict:
         self._prune()
+        provider = self.provider()
+        if provider is None:
+            raise HubError(409, "Add a Gemini key in Settings → Ask Home (free), or an Anthropic key in Settings → Photo analysis.")
         conv = self._conversations.get(conversation_id or "")
-        if conv is not None and len(conv["messages"]) > MAX_MESSAGES:
+        if conv is not None and (len(conv["messages"]) > MAX_MESSAGES or conv.get("provider") != provider):
             del self._conversations[conversation_id]
             conv = None
         if conv is None:
             conversation_id = "c_" + pysecrets.token_hex(8)
-            conv = {"messages": [], "at": time.time(), "plan_ids": []}
+            conv = {"messages": [], "at": time.time(), "plan_ids": [], "provider": provider}
             self._conversations[conversation_id] = conv
         conv["at"] = time.time()
-        client = self._client()
         now = datetime.now().astimezone().strftime("%A %-d %B %Y, %-I:%M %p %Z")
         notes = "".join(f"\n[{n}]" for n in conv.pop("notes", []))
-        messages = conv["messages"]
-        start = len(messages)
-        messages.append({"role": "user", "content": f"[Now: {now}]{notes}\n{text.strip()}"})
+        prompt = f"[Now: {now}]{notes}\n{text.strip()}"
         turn: dict = {"done": [], "plan": None}
+        loop = self._gemini_loop if provider == "gemini" else self._claude_loop
+        reply = await loop(conv["messages"], prompt, turn)
+        if turn["plan"]:
+            conv["plan_ids"].append(turn["plan"]["id"])
+        plan = turn["plan"]
+        return {"conversation_id": conversation_id, "reply": reply or "Done.", "done": turn["done"], "provider": provider,
+                "plan": {k: plan[k] for k in ("id", "summary", "changes", "problems")} if plan else None}
+
+    async def _tool_result(self, name: str, args: dict, turn: dict) -> tuple[str, bool]:
+        try:
+            return await self._run_tool(name, args, turn), False
+        except HubError as exc:
+            return exc.message, True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("chat tool %s failed: %s", name, exc)
+            return f"{type(exc).__name__}: {exc}", True
+
+    async def _claude_loop(self, messages: list, prompt: str, turn: dict) -> str:
+        client = self._client()
+        start = len(messages)
+        messages.append({"role": "user", "content": prompt})
         import anthropic
         try:
             for _ in range(MAX_ROUNDS):
@@ -348,13 +399,7 @@ class Chat:
                     break
                 results = []
                 for use in uses:     # one at a time: device changes may depend on each other
-                    try:
-                        out, is_error = await self._run_tool(use.name, dict(use.input or {}), turn), False
-                    except HubError as exc:
-                        out, is_error = exc.message, True
-                    except Exception as exc:  # noqa: BLE001
-                        log.warning("chat tool %s failed: %s", use.name, exc)
-                        out, is_error = f"{type(exc).__name__}: {exc}", True
+                    out, is_error = await self._tool_result(use.name, dict(use.input or {}), turn)
                     results.append({"type": "tool_result", "tool_use_id": use.id, "content": out, "is_error": is_error})
                 messages.append({"role": "user", "content": results})
             else:
@@ -371,8 +416,62 @@ class Chat:
         except anthropic.APIConnectionError as exc:
             del messages[start:]
             raise HubError(504, "Couldn't reach Claude. Check the Mac's internet connection.") from exc
-        if turn["plan"]:
-            conv["plan_ids"].append(turn["plan"]["id"])
-        plan = turn["plan"]
-        return {"conversation_id": conversation_id, "reply": reply or "Done.", "done": turn["done"],
-                "plan": {k: plan[k] for k in ("id", "summary", "changes", "problems")} if plan else None}
+        return reply
+
+    def _gemini(self) -> tuple[Any, str]:
+        cfg = self.hub.secrets.get("gemini") or {}
+        model = cfg.get("model") or GEMINI_MODEL
+        if self._gemini_factory:
+            return self._gemini_factory(cfg["api_key"]), model
+        from google import genai
+        return genai.Client(api_key=cfg["api_key"]), model
+
+    async def _gemini_loop(self, contents: list, prompt: str, turn: dict) -> str:
+        """The same tools through Gemini's function calling. The model's turns are kept exactly as returned
+        (they carry thought signatures Gemini needs to see again)."""
+        from google.genai import errors, types
+        client, model = self._gemini()
+        decls = [types.FunctionDeclaration(name=t["name"], description=t["description"], parameters_json_schema=t["input_schema"])
+                 for t in TOOLS]
+        config = types.GenerateContentConfig(
+            system_instruction=SYSTEM, tools=[types.Tool(function_declarations=decls)],
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True))
+        start = len(contents)
+        contents.append(types.Content(role="user", parts=[types.Part.from_text(text=prompt)]))
+        try:
+            for _ in range(MAX_ROUNDS):
+                response = await client.aio.models.generate_content(model=model, contents=contents, config=config)
+                candidate = response.candidates[0] if response.candidates else None
+                if candidate is None or candidate.content is None or not candidate.content.parts:
+                    reason = getattr(candidate, "finish_reason", None) if candidate else None
+                    del contents[start:]
+                    return f"Gemini didn't answer{f' ({reason})' if reason else ''}. Try rephrasing."
+                contents.append(candidate.content)
+                calls = [p.function_call for p in candidate.content.parts if p.function_call]
+                if not calls:
+                    return "".join(p.text for p in candidate.content.parts if p.text and not p.thought).strip()
+                parts = []
+                for call in calls:
+                    out, is_error = await self._tool_result(call.name, dict(call.args or {}), turn)
+                    parts.append(types.Part(function_response=types.FunctionResponse(
+                        id=call.id, name=call.name, response={"error": out} if is_error else {"result": out})))
+                contents.append(types.Content(role="user", parts=parts))
+            return "That took too many steps. Try asking for one thing at a time."
+        except errors.APIError as exc:
+            del contents[start:]
+            raise HubError(*gemini_error(exc, model)) from exc
+
+
+def gemini_error(exc: Any, model: str) -> tuple[int, str]:
+    code = getattr(exc, "code", 0) or 0
+    detail = str(getattr(exc, "message", None) or exc)
+    if code == 429:
+        return 429, ("Gemini's free limit is used up for now (it allows a few requests a minute and a daily total that "
+                     "resets at midnight Pacific). Wait, switch Ask Home to Claude in Settings, or turn on billing for the key.")
+    if code in (400, 401, 403) and ("API key" in detail or "API_KEY" in detail or code in (401, 403)):
+        return 400, "Google rejected the Gemini API key. Check it in Settings → Ask Home."
+    if code == 404:
+        return 400, f"Gemini model {model} isn't available to this key. Choose another model in Settings → Ask Home."
+    if code >= 500:
+        return 502, "Gemini had a problem answering. Try again in a moment."
+    return 400, f"Gemini said: {detail[:200]}"

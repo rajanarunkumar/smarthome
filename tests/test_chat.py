@@ -193,3 +193,114 @@ def test_conversation_continues_and_history_is_only_appended():
     asyncio.run(chat.send("again", first["conversation_id"]))
     a, b = claude.requests
     assert b["messages"][:len(a["messages"])] == a["messages"]   # earlier turns sent back unchanged
+
+
+# ---------------- Gemini ----------------
+from google.genai import errors as genai_errors  # noqa: E402
+from google.genai import types as gt  # noqa: E402
+
+
+class GeminiHub(FakeHub):
+    def __init__(self, gemini=True, claude=False, choice=None):
+        super().__init__(key="sk-test" if claude else None)
+        data = {"gemini": {"api_key": "AIza-test-key-0000000000"} if gemini else None, "chat": {"provider": choice} if choice else None,
+                "anthropic_api_key": "sk-test" if claude else None}
+        self.secrets = SimpleNamespace(get=lambda k: data.get(k))
+
+
+class ScriptedGemini:
+    def __init__(self, replies):
+        self.replies, self.requests = list(replies), []
+        self.aio = SimpleNamespace(models=SimpleNamespace(generate_content=self.generate))
+
+    async def generate(self, model, contents, config):
+        self.requests.append({"model": model, "contents": list(contents), "config": config})
+        reply = self.replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return SimpleNamespace(candidates=[SimpleNamespace(content=gt.Content(role="model", parts=reply), finish_reason="STOP")])
+
+
+def call(name, args, id="g1"):
+    return gt.Part(function_call=gt.FunctionCall(id=id, name=name, args=args), thought_signature=b"sig")
+
+
+def test_provider_prefers_the_choice_then_gemini_then_claude():
+    assert Chat(GeminiHub(gemini=True, claude=True)).provider() == "gemini"
+    assert Chat(GeminiHub(gemini=True, claude=True, choice="claude")).provider() == "claude"
+    assert Chat(GeminiHub(gemini=False, claude=True, choice="gemini")).provider() == "claude"   # chosen one has no key
+    assert Chat(GeminiHub(gemini=False, claude=False)).provider() is None
+
+
+def test_gemini_controls_devices_with_the_same_tools():
+    hub = GeminiHub()
+    gem = ScriptedGemini([
+        [call("list_devices", {})],
+        [call("control_device", {"device_id": "hue:2", "state": {"brightness": 30}}, id="g2")],
+        [gt.Part(text="Dimmed the lamp to 30%.")],
+    ])
+    chat = Chat(hub, gemini_factory=lambda key: gem)
+    out = asyncio.run(chat.send("dim the lamp"))
+    assert out["reply"] == "Dimmed the lamp to 30%." and out["provider"] == "gemini"
+    assert hub.calls == [("state", "hue:2", {"brightness": 30})]
+    req = gem.requests[2]
+    assert req["model"] == "gemini-flash-lite-latest"
+    assert req["config"].automatic_function_calling.disable is True
+    names = [d.name for d in req["config"].tools[0].function_declarations]
+    assert names == ["list_devices", "list_schedules", "control_device", "propose_changes"]
+    model_turn, answer = req["contents"][-2], req["contents"][-1]
+    assert model_turn.parts[0].thought_signature == b"sig"            # the model's turn is sent back as returned
+    fr = answer.parts[0].function_response
+    assert fr.id == "g2" and fr.response == {"result": "Done."}
+
+
+def test_gemini_never_unlocks_either():
+    hub = GeminiHub()
+    gem = ScriptedGemini([[call("control_device", {"device_id": "schlage:3", "state": {"locked": False}})],
+                          [gt.Part(text="You'll need to unlock it in the app.")]])
+    asyncio.run(Chat(hub, gemini_factory=lambda key: gem).send("unlock the door"))
+    fr = gem.requests[1]["contents"][-1].parts[0].function_response
+    assert "Unlocking isn't possible" in fr.response["error"] and hub.calls == []
+
+
+def test_gemini_free_limit_is_explained_and_the_turn_is_dropped():
+    hub = GeminiHub()
+    gem = ScriptedGemini([genai_errors.ClientError(429, {"error": {"code": 429, "message": "Resource exhausted", "status": "RESOURCE_EXHAUSTED"}}),
+                          [gt.Part(text="Hi.")]])
+    chat = Chat(hub, gemini_factory=lambda key: gem)
+    with pytest.raises(HubError) as err:
+        asyncio.run(chat.send("hello"))
+    assert err.value.status == 429 and "free limit" in err.value.message
+    out = asyncio.run(chat.send("hello again"))
+    assert len(gem.requests[1]["contents"]) == 1 and out["reply"] == "Hi."   # the failed turn wasn't kept
+
+
+def test_switching_provider_starts_a_new_conversation():
+    hub = GeminiHub(gemini=True, claude=True)
+    gem = ScriptedGemini([[gt.Part(text="Gemini here.")]])
+    claude = ScriptedClaude([[text("Claude here.")]])
+    chat = Chat(hub, client_factory=lambda key: claude, gemini_factory=lambda key: gem)
+    first = asyncio.run(chat.send("hi"))
+    hub.secrets = SimpleNamespace(get=lambda k: {"gemini": {"api_key": "AIza-x"}, "chat": {"provider": "claude"}, "anthropic_api_key": "sk"}.get(k))
+    second = asyncio.run(chat.send("hi", first["conversation_id"]))
+    assert second["provider"] == "claude" and second["conversation_id"] != first["conversation_id"]
+    assert len(claude.requests[0]["messages"]) == 1
+
+
+def test_chat_settings_route(tmp_path, monkeypatch):
+    monkeypatch.setenv("SMARTHOME_HOME", str(tmp_path))
+    from fastapi.testclient import TestClient
+    from hub import app as app_module
+    with TestClient(app_module.app) as client:
+        hub = app_module.app.state.hub
+        token = {"Authorization": f"Bearer {hub.secrets.access_token()}"}
+        assert client.get("/api/status", headers=token).json()["chat"]["provider"] is None
+        assert client.put("/api/settings/chat", json={"gemini_key": "bad key!"}, headers=token).status_code == 422
+        r = client.put("/api/settings/chat", json={"gemini_key": "AIzaSyTestKey_0123456789abcdef", "provider": "gemini"}, headers=token)
+        assert r.json()["provider"] == "gemini"
+        chat = client.get("/api/status", headers=token).json()["chat"]
+        assert chat == {"provider": "gemini", "gemini": True, "model": "gemini-flash-lite-latest", "choice": "gemini"}
+        client.put("/api/settings/chat", json={"model": "gemini-flash-latest"}, headers=token)
+        assert hub.secrets.get("gemini")["model"] == "gemini-flash-latest" and hub.secrets.get("gemini")["api_key"].startswith("AIza")
+        client.delete("/api/settings/gemini", headers=token)
+        assert client.get("/api/status", headers=token).json()["chat"]["provider"] is None
