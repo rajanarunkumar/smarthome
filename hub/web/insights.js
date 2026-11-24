@@ -432,6 +432,7 @@ async function renderEnergy(fetch = true) {
     ${en.devices.length ? `<div class="table-wrap"><table class="viz-table"><thead><tr><th>Device</th><th>Hours on</th><th>Power (kW)</th><th>kWh</th><th></th></tr></thead>
       <tbody>${en.devices.map((d) => `<tr><td>${esc(d.name)}</td><td>${fmtNum(d.hours, 1)}</td><td>${
         d.status === "entered" ? `${fmtNum(d.kw, 2)} <span class="muted">entered</span>`
+        : d.status === "reported" ? `${fmtNum(d.kw, 2)} <span class="muted">from the device</span>`
         : d.status === "measured" ? fmtNum(d.kw, 2)
         : d.status === "small" ? `<span class="muted">too small to measure</span>` : `<span class="muted">learning</span>`}</td><td>${fmtNum(d.kwh, 1)}</td>
         <td><button class="pill small" data-watts="${esc(d.id)}" data-watts-name="${esc(d.name)}" data-watts-now="${d.watts ?? ""}">${d.watts ? "Edit W" : "Set W"}</button></td></tr>`).join("")}</tbody></table></div>

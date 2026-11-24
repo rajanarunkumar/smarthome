@@ -1491,7 +1491,7 @@ async def hvac(request: Request, days: int = 14):
     activity = hub.energy.activity(since)
     ids = {t["id"] for t in stats} | {a["device_id"] for a in activity if a["kind"] == "thermostat"}
     # kW per thermostat from the meter: solved with every tracked device, so the pool or dryer isn't blamed on the AC.
-    kw = {d: v["kw"] for d, v in device_power(hub.energy.intervals(since), activity, known_watts=hub.energy.watts()).items() if d in ids}
+    kw = {d: v["kw"] for d, v in device_power(hub.energy.intervals(since), activity, known_watts=hub.energy.known_watts()).items() if d in ids}
     data = build_hvac(hub.hvac, stats, tariff_of(hub), _tmean(hub, 60), kw, datetime.now(), days)
     return {**data, "connected": {"nest": hub.nest.active, "lennox": hub.lennox.active}}
 

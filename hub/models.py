@@ -51,6 +51,7 @@ class Device(BaseModel):
     rain_delay: int | None = None      # sprinklers: rain delay in days
     # Thermostats: {"current", "humidity", "mode", "modes", "hvac", "heat", "cool", "eco", "fan"} in °F
     thermostat: dict[str, Any] | None = None
+    watts: float | None = None        # power the device itself measures right now (energy-monitoring plugs, pool pump)
     capabilities: list[str] = []
 
 

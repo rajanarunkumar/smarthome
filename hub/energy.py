@@ -47,6 +47,8 @@ class EnergyStore:
                 start TEXT NOT NULL, end TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS device_activity_start ON device_activity(start);
             CREATE TABLE IF NOT EXISTS device_watts (device_id TEXT PRIMARY KEY, watts REAL NOT NULL); -- entered by the owner
+            CREATE TABLE IF NOT EXISTS device_reported (  -- average power the device itself reported while on
+                device_id TEXT PRIMARY KEY, watts REAL NOT NULL, samples INTEGER NOT NULL, updated TEXT NOT NULL);
             """
         )
         db.commit()
@@ -75,6 +77,25 @@ class EnergyStore:
         """Power the owner entered for devices (e.g. an incandescent chandelier), in watts."""
         return {r["device_id"]: r["watts"] for r in self.db.execute("SELECT device_id, watts FROM device_watts")}
 
+    def reported(self, min_samples: int = 3) -> dict[str, float]:
+        """Average watts devices measured themselves while on (smart plugs with energy monitoring, the pool pump)."""
+        return {r["device_id"]: r["watts"] for r in self.db.execute(
+            "SELECT device_id, watts FROM device_reported WHERE samples >= ?", (min_samples,))}
+
+    def known_watts(self) -> dict[str, float]:
+        """What's known without guessing: what devices report, overridden by anything the owner entered."""
+        return {**self.reported(), **self.watts()}
+
+    def _sample(self, device_id: str, watts: float, now: datetime) -> None:
+        row = self.db.execute("SELECT watts, samples FROM device_reported WHERE device_id = ?", (device_id,)).fetchone()
+        if row is None:
+            self.db.execute("INSERT INTO device_reported (device_id, watts, samples, updated) VALUES (?, ?, 1, ?)",
+                            (device_id, watts, now.isoformat(timespec="minutes")))
+            return
+        n = min(row["samples"], 500)     # running average that keeps following slow changes (pump speed programs)
+        self.db.execute("UPDATE device_reported SET watts = ?, samples = ?, updated = ? WHERE device_id = ?",
+                        ((row["watts"] * n + watts) / (n + 1), row["samples"] + 1, now.isoformat(timespec="minutes"), device_id))
+
     def set_watts(self, device_id: str, watts: float | None) -> None:
         if watts:
             self.db.execute("INSERT INTO device_watts (device_id, watts) VALUES (?, ?) "
@@ -93,6 +114,8 @@ class EnergyStore:
                 continue
             if d.on is not True:
                 continue
+            if d.watts is not None and d.watts >= 2:      # below that it's the plug's own standby, not the load
+                self._sample(d.id, float(d.watts), now)
             seen.add(d.id)
             if d.id not in self._open:
                 self._open[d.id] = (d.name, d.kind, now)
@@ -140,7 +163,7 @@ def local_idle(intervals: dict[str, float], busy: set[str], slot: str, hours: in
 
 
 def device_power(intervals: dict[str, float], activity: list[dict], min_slots: int = 6,
-                 known_watts: dict[str, float] | None = None) -> dict[str, dict]:
+                 known_watts: dict[str, float] | None = None, reported: set[str] | None = None) -> dict[str, dict]:
     """kW per device. Entered wattages are used as given and taken out of the meter readings first; the big loads
     (washer, dryer, pool pump, AC, plugs) are then solved by least squares over the slots where they ran. An
     estimate is kept only if it's clearly above zero (more than twice its standard error), at least MIN_KW, and
@@ -187,6 +210,9 @@ def device_power(intervals: dict[str, float], activity: list[dict], min_slots: i
     for i in range(n):
         ata[i][i] += 1e-6  # keeps nearly-identical schedules solvable without changing real answers
     out = {d: {"kw": round(w / 1000, 3), "slots": 0, "source": "entered"} for d, w in known_watts.items()}
+    for d in reported or {}:
+        if d in out:
+            out[d]["source"] = "reported"
     solution = _solve(ata, atb)
     if solution is None:
         return out
@@ -285,7 +311,8 @@ def build_energy(store: EnergyStore, tmean: dict[str, float], days: int = 28, to
     names = {a["device_id"]: a["name"] for a in activity}
     kinds = {a["device_id"]: a["kind"] for a in activity}
     entered = store.watts()
-    power = device_power(intervals, activity, known_watts=entered)
+    reported = store.reported()
+    power = device_power(intervals, activity, known_watts={**reported, **entered}, reported=set(reported) - set(entered))
     by_slot = activity_by_slot(activity)
 
     daily_total: dict[str, float] = defaultdict(float)
@@ -321,7 +348,7 @@ def build_energy(store: EnergyStore, tmean: dict[str, float], days: int = 28, to
         return "learning"
     devices = sorted(({"id": d, "name": names.get(d, d), "kind": kinds.get(d), "kw": power.get(d, {}).get("kw"),
                        "hours": round(device_hours[d], 1), "kwh": round(device_kwh[d], 1) if d in power else None,
-                       "status": status(d), "watts": entered.get(d)}
+                       "status": status(d), "watts": entered.get(d), "reported_w": round(reported[d]) if d in reported else None}
                       for d in device_hours), key=lambda x: -(x["kwh"] or 0))
     found_spikes = spikes(intervals, activity, names)
     recs = []

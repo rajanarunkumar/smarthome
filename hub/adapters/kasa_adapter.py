@@ -81,6 +81,16 @@ class KasaAdapter(Adapter):
 
     def _to_device(self, did: str, dev: KasaDevice) -> Device:
         dimmer = self._is_dimmer(dev)
+        energy = dev.modules.get(Module.Energy)     # only plugs with energy monitoring (KP115, KP125, EP25, HS110…)
+        watts = details = None
+        if energy is not None:
+            try:
+                watts = round(float(energy.current_consumption), 1) if energy.current_consumption is not None else None
+                today = energy.consumption_today
+                details = [x for x in ({"label": "Power now", "value": f"{watts:g} W"} if watts is not None else None,
+                                       {"label": "Today", "value": f"{today:.2f} kWh"} if today is not None else None) if x]
+            except Exception:  # noqa: BLE001 - a plug that hasn't reported yet
+                watts = None
         return Device(
             id=did,
             brand=self.brand,
@@ -90,6 +100,7 @@ class KasaAdapter(Adapter):
             online=self._online.get(did, True),
             on=dev.is_on,
             brightness=dev.modules[Module.Light].brightness if dimmer else None,
+            watts=watts, details=details or [],
             capabilities=["onoff", "brightness", "schedule"] if dimmer else ["onoff", "schedule"],
         )
 

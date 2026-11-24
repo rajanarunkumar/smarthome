@@ -143,11 +143,13 @@ class PentairAdapter(Adapter):
                 self._at = time.monotonic()
             except PentairAuthenticationError as exc:
                 raise HubError(401, "Pentair sign-in expired. Connect again in Settings.") from exc
+        from ..pool import parse_reading
         out = []
         for dev_id, d in self._devices.items():
             info = d.get("productInfo") or {}
             details = details_of(d)
             running = is_running(d)
+            watts = parse_reading(d["fields"]).get("watts") if d.get("deviceType") in RUNNING_FIELD and d.get("fields") else None
             out.append(Device(
                 id=f"pentair:{dev_id}", brand=self.brand, kind="pool",
                 name=info.get("nickName") or d.get("pname") or "Pentair device",
@@ -155,7 +157,7 @@ class PentairAdapter(Adapter):
                 online=bool(d.get("fields")), on=running,
                 media=("Running" if running else "Off") if running is not None else
                       (" · ".join(f"{x['label']} {x['value']}" for x in details[:2]) or None),
-                details=details, capabilities=["onoff"] if d.get("deviceType") in POWER_COMMAND else [],
+                details=details, watts=watts, capabilities=["onoff"] if d.get("deviceType") in POWER_COMMAND else [],
             ))
         return out
 

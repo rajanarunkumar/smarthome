@@ -212,3 +212,36 @@ def test_observe_records_lights_only_when_watts_were_entered():
     s.observe([lamp, bulb], t0)
     s.observe([], t0 + timedelta(minutes=30))
     assert [a["device_id"] for a in s.activity(date(2026, 11, 19))] == ["hue:1"]
+
+
+def test_watts_reported_by_a_device_are_used_instead_of_guessing():
+    s = store()
+    tmean = build(s)
+    heater = lambda w, on=True: Device(id="kasa:heater", brand="kasa", name="Space heater", kind="plug", on=on, watts=w)  # noqa: E731
+    t = datetime(2026, 11, 19, 7, 0)
+    for w in (1490, 1510, 1500, 1.0):          # the last is the plug's own standby while "on": ignored
+        s.observe([heater(w)], t)
+        t += timedelta(minutes=2)
+    s.observe([heater(0, on=False)], t)
+    assert s.reported() == {"kasa:heater": 1500.0}
+    s.set_watts("thinq:d1", 4800)               # the owner's number wins over anything else
+    assert s.known_watts() == {"kasa:heater": 1500.0, "thinq:d1": 4800}
+    out = build_energy(s, tmean, days=DAYS, today=TODAY)
+    heater_row = next(d for d in out["devices"] if d["id"] == "kasa:heater")
+    dryer = next(d for d in out["devices"] if d["id"] == "thinq:d1")
+    assert heater_row["status"] == "reported" and heater_row["kw"] == 1.5 and heater_row["reported_w"] == 1500
+    assert dryer["status"] == "entered" and dryer["kw"] == 4.8
+
+
+def test_kasa_plugs_with_energy_monitoring_report_watts():
+    from kasa import Module
+
+    from hub.adapters.kasa_adapter import KasaAdapter
+    energy = SimpleNamespace(current_consumption=61.24, consumption_today=0.83)
+    plug = SimpleNamespace(alias="TV corner", model="KP125M", is_on=True, modules={Module.Energy: energy})
+    plain = SimpleNamespace(alias="Lamp", model="HS103", is_on=True, modules={})
+    a = KasaAdapter()
+    a._is_dimmer = lambda dev: False
+    with_energy, without = a._to_device("kasa:1", plug), a._to_device("kasa:2", plain)
+    assert with_energy.watts == 61.2 and {"label": "Today", "value": "0.83 kWh"} in with_energy.details
+    assert without.watts is None and without.details == []
