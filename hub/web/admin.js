@@ -88,7 +88,7 @@ function drawAdmin() {
       <div class="adm-card"><div class="adm-label">${dot("ok")} Hub up</div><div class="adm-value">${fmtDur(p.uptime_s)}</div>
         <div class="adm-sub">${esc(p.commit || "")} · Python ${esc(p.python)} · pid ${p.pid}</div></div>
       <div class="adm-card"><div class="adm-label">${dot(lvl(p.cpu_pct, 50, 90))} CPU</div><div class="adm-value">${p.cpu_pct ?? "–"}%</div>
-        <div class="adm-sub">load ${h.load_avg.join(" · ")}</div>${spark(S, "cpu_pct")}</div>
+        <div class="adm-sub">${d.in_use ? "app in use: screens kept current" : `idle${d.idle_for_s != null ? ` for ${fmtDur(d.idle_for_s)}` : ""}: background work minimal`} · load ${h.load_avg.join(" · ")}</div>${spark(S, "cpu_pct")}</div>
       <div class="adm-card"><div class="adm-label">${dot(lvl(p.rss_mb, 600, 1200))} Memory</div><div class="adm-value">${p.rss_mb ?? "–"} MB</div>
         <div class="adm-sub">peak ${p.peak_rss_mb} MB</div>${spark(S, "rss_mb")}</div>
       <div class="adm-card"><div class="adm-label">${dot(lvl(L.lag_p95_ms, 50, 250))} Event loop lag</div><div class="adm-value">${fmtMs(L.lag_p95_ms)}</div>

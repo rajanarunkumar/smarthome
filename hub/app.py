@@ -663,8 +663,8 @@ async def authenticate(request: Request, call_next):
 
     if path not in PUBLIC_PATHS and request.state.user is None:
         return _deny(401, "Sign in required")
-    if request.state.user is not None:
-        hub.note_use()
+    if request.state.user is not None and not path.startswith("/api/admin/"):
+        hub.note_use()   # watching Admin (CPU, logs) doesn't count as using the app, or it would measure itself busy
     if request.method == "GET" and path in INSIGHT_TTL:
         return await _cached_insight(hub, request, call_next)
     return await call_next(request)
@@ -1998,6 +1998,7 @@ async def admin_telemetry(request: Request):
         pass
     return {
         "now": time.time(), "process": t.process(), "host": t.host(), "loop": t.loop(),
+        "in_use": hub.in_use(), "idle_for_s": None if hub.in_use() or hub.last_use == float("-inf") else round(time.monotonic() - hub.last_use),
         "requests": {"per_min": t.requests_per_minute(), "routes": t.routes_report(), "slow": list(t.slow)[::-1]},
         "brands": brands, "caches": [c.snapshot() for c in hub.caches.values()],
         "jobs": jobs, "series": list(t.series), "activity": list(t.activity),

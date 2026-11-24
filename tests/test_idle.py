@@ -25,6 +25,11 @@ def test_requests_mark_the_app_in_use(env):
     assert not hub.in_use()
     client.get("/api/health")                     # public, nobody signed in: not "use"
     assert not hub.in_use()
+    hub.secrets.set("auth", {**hub.auth.config, "allowed_emails": ["me@example.com"]})
+    client.cookies.set("hub_session", hub.auth.create_session("me@example.com", "google"))
+    client.get("/api/admin/telemetry")            # watching Admin isn't using the app
+    assert not hub.in_use()
+    client.cookies.clear()
     client.get("/api/rooms", headers=token)
     assert hub.in_use()
     hub.last_use = time.monotonic() - app_module.IN_USE_SECONDS - 1
