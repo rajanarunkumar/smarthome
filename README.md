@@ -393,4 +393,6 @@ Also check your router's "connected devices" list. Cloud-only gadgets (common wi
 - **Claude Code:** `claude mcp add --transport http smarthome https://<your-mac>.<tailnet>.ts.net/mcp --header "Authorization: Bearer <token>"`
 - **Claude Desktop:** Settings → Connectors → Add custom connector isn't for tailnet addresses; use the stdio setup above on the Mac, or on another computer run `npx mcp-remote https://<your-mac>.<tailnet>.ts.net/mcp --header "Authorization: Bearer <token>"` as the command.
 
+**Claude Desktop extension (one file to install):** `scripts/build-claude-extension.sh` packs `integrations/claude-desktop` into `dist/smarthome-hub.mcpb`. In Claude Desktop: **Settings → Extensions**, drag the file in, then enter the hub's `https://…ts.net/mcp` address and the API token (kept in the keychain). It relays Claude to the hub's `/mcp` using the python3 that comes with macOS, so the computer only needs Tailscale.
+
 Tools are marked read-only or destructive, so the client asks before deleting or restarting; unlocking a door is a device change the client also asks about.
