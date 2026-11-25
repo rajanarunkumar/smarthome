@@ -136,7 +136,7 @@ On the iPhone (Tailscale on), open the `https://…ts.net` address in Safari, **
 - **iPhone app** (planned, native): signs in through this page once (PKCE handoff), then keeps its own revocable token in the Keychain behind Face ID. See `docs/HANDOVER.md`.
 - Requests that change anything must come from one of the hub's own addresses (CSRF protection).
 
-Settings live in `~/.smarthome/secrets.json` under `auth`: `google_client_id`, `allowed_emails`, `origins` and `session_hours`. In Google Cloud, the OAuth client (type *Web application*) needs each origin as an **Authorized JavaScript origin** and each origin plus `/` as an **Authorized redirect URI**.
+Settings live in `~/.smarthome/secrets.json` under `auth`: `google_client_id`, `allowed_emails`, `origins` and `session_hours`. In Google Cloud, the OAuth client (type *Web application*) needs each origin plus `/` as an **Authorized redirect URI**. Sign-in is a full-page redirect to Google and back, so no Authorized JavaScript origin is needed.
 
 Private data lives in `~/.smarthome/` (sign-in settings, API token, Hue key, sessions, passkeys and the rooms database), never in this repo.
 
