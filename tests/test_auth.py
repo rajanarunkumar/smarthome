@@ -186,3 +186,37 @@ def test_app_handoff_issues_revocable_device_token(env):
     assert len(apps) == 1
     assert client.delete(f"/api/auth/apps/{apps[0]['id']}", headers=auth).status_code == 200
     assert client.get("/api/rooms", headers=auth).status_code == 401
+
+
+def test_mcp_needs_the_api_token(env):
+    hub, client = env
+    assert client.post("/mcp", json={}).status_code == 401
+    assert client.post("/mcp", json={}, headers={"Authorization": "Bearer nope"}).status_code == 401
+    # Token accepted: the MCP transport isn't running without the lifespan, so 503 rather than 401.
+    assert client.post("/mcp", json={}, headers={"Authorization": f"Bearer {hub.secrets.access_token()}"}).status_code == 503
+
+
+def test_mcp_over_http_lists_tools_and_calls_one(env):
+    import asyncio
+    import httpx
+    from hub import app as appmod
+
+    hub, _ = env
+    init = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}}
+    headers = {"Authorization": f"Bearer {hub.secrets.access_token()}", "Accept": "application/json, text/event-stream"}
+
+    async def run():
+        async with appmod.mcp_endpoint(appmod.app, hub):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=appmod.app), base_url=ORIGIN) as c:
+                r = await c.post("/mcp", json=init, headers=headers)
+                assert r.status_code == 200 and r.json()["result"]["serverInfo"]["name"] == "smarthome"
+                tools = await c.post("/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, headers=headers)
+                names = {t["name"] for t in tools.json()["result"]["tools"]}
+                assert {"control_device", "list_rooms", "bills_by_time_of_day"} <= names
+                call = await c.post("/mcp", json={"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                                                  "params": {"name": "list_rooms", "arguments": {}}}, headers=headers)
+                assert call.json()["result"]["isError"] is False
+                bad_host = await c.post("/mcp", json=init, headers={**headers, "Host": "evil.example"})
+                assert bad_host.status_code in (403, 421)
+    asyncio.run(run())

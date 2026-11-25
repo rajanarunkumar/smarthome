@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import httpx
 import re
 import hmac
 import logging
@@ -18,6 +19,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.routing import Route
 from pydantic import BaseModel, Field, field_validator
 
 from .adapters.base import Adapter
@@ -596,7 +598,8 @@ async def lifespan(app: FastAPI):
         except Exception as exc:  # noqa: BLE001 - one brand failing must not stop the hub
             log.warning("%s did not start: %s", adapter.label, exc)
     hub.start_background()
-    yield
+    async with mcp_endpoint(app, hub):
+        yield
     hub.irrigation.close()
     hub.flowtests.close()
     hub.backups.close()
@@ -610,6 +613,48 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Smart home hub", lifespan=lifespan)
+
+
+# MCP over HTTP at /mcp (streamable HTTP), for Claude Desktop, Claude Code and other MCP clients on the tailnet.
+# Same tools as `python -m hub.mcp_server`. Callers need the hub's API token (Bearer); the tools then run against
+# the hub's own API in-process, so they get the same checks, caches and logs as the app.
+@asynccontextmanager
+async def mcp_endpoint(app: FastAPI, hub: "Hub"):
+    from urllib.parse import urlparse
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+    from mcp.server.transport_security import TransportSecuritySettings
+    from .mcp_server import build_server
+
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://hub", timeout=120,
+                               headers={"Authorization": f"Bearer {hub.secrets.access_token()}"})
+    hosts = sorted({urlparse(o).netloc for o in hub.auth.origins if urlparse(o).netloc})
+    security = TransportSecuritySettings(          # DNS-rebinding protection: only the hub's own names
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=hosts + ["127.0.0.1:*", "localhost:*", "[::1]:*"],
+        allowed_origins=list(hub.auth.origins) + ["http://127.0.0.1:*", "http://localhost:*"])
+    manager = StreamableHTTPSessionManager(app=build_server(app.openapi(), client), stateless=True,
+                                           json_response=True, security_settings=security)
+    app.state.mcp = manager
+    try:
+        async with manager.run():
+            yield
+    finally:
+        app.state.mcp = None
+        await client.aclose()
+
+
+class McpApp:
+    """ASGI endpoint for /mcp (a class, so Starlette passes the raw request through to the MCP transport)."""
+
+    async def __call__(self, scope, receive, send):
+        manager = getattr(scope["app"].state, "mcp", None) if "app" in scope else None
+        if manager is None:
+            return await JSONResponse({"detail": "MCP isn't running"}, status_code=503)(scope, receive, send)
+        await manager.handle_request(scope, receive, send)
+
+
+def _is_mcp(path: str) -> bool:
+    return path == "/mcp" or path.startswith("/mcp/")
 
 
 def hub_of(request: Request) -> Hub:
@@ -639,10 +684,14 @@ def _deny(status: int, message: str) -> JSONResponse:
 async def authenticate(request: Request, call_next):
     """Web app: session cookie (Google or Face ID). Scripts: Bearer API token."""
     path = request.url.path
-    if not path.startswith("/api/"):
+    if not path.startswith("/api/") and not _is_mcp(path):
         return await call_next(request)
     hub: Hub = request.app.state.hub
     request.state.user = None
+    if _is_mcp(path) and not request.headers.get("authorization", "").startswith("Bearer "):
+        # MCP clients send the API token; a browser cookie alone is never enough here.
+        return JSONResponse({"detail": "Send the hub's API token: Authorization: Bearer <token>"}, status_code=401,
+                            headers={"WWW-Authenticate": 'Bearer realm="smarthome"'})
 
     authorization = request.headers.get("authorization", "")
     if authorization.startswith("Bearer "):
@@ -2138,4 +2187,5 @@ async def admin_cache_refresh(request: Request, body: CacheRefreshIn = Body(Cach
     return {"caches": out, "ms": round(ms)}
 
 
+app.router.routes.insert(0, Route("/mcp", endpoint=McpApp(), methods=["GET", "POST", "DELETE"], name="mcp"))
 app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")

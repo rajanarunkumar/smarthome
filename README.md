@@ -388,4 +388,9 @@ Also check your router's "connected devices" list. Cloud-only gadgets (common wi
   {"mcpServers": {"smarthome": {"command": "/path/to/smarthome/.venv/bin/python", "args": ["-m", "hub.mcp_server"], "cwd": "/path/to/smarthome"}}}
   ```
 
+**Over the tailnet (any of your computers):** the hub also serves the same tools at `https://<your-mac>.<tailnet>.ts.net/mcp` (streamable HTTP). It needs the hub's API token (`access_token` in `~/.smarthome/secrets.json`) as `Authorization: Bearer …`; a browser session alone isn't accepted. It's reachable only from devices on your tailnet, so claude.ai and ChatGPT (which connect from their own servers) can't use it.
+
+- **Claude Code:** `claude mcp add --transport http smarthome https://<your-mac>.<tailnet>.ts.net/mcp --header "Authorization: Bearer <token>"`
+- **Claude Desktop:** Settings → Connectors → Add custom connector isn't for tailnet addresses; use the stdio setup above on the Mac, or on another computer run `npx mcp-remote https://<your-mac>.<tailnet>.ts.net/mcp --header "Authorization: Bearer <token>"` as the command.
+
 Tools are marked read-only or destructive, so the client asks before deleting or restarting; unlocking a door is a device change the client also asks about.
