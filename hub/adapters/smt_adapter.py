@@ -81,7 +81,9 @@ class SmartMeterTexasAdapter(Adapter):
         self._read_at = 0.0
         self._daily_at = 0.0
         self._yesterday: dict[str, float | None] = {}
-        self._lock = asyncio.Lock()
+        self._lock = asyncio.Lock()          # one sign-in at a time
+        self._refresh: asyncio.Task | None = None
+        self._auth_failed = False
 
     @property
     def config(self) -> dict:
@@ -92,6 +94,10 @@ class SmartMeterTexasAdapter(Adapter):
         return AVAILABLE and bool(self.config.get("password"))
 
     async def _ensure(self, cfg: dict | None = None) -> None:
+        async with self._lock:
+            await self._login(cfg)
+
+    async def _login(self, cfg: dict | None = None) -> None:
         cfg = cfg or self.config
         if self._client is None:
             self._session = aiohttp.ClientSession()
@@ -105,6 +111,7 @@ class SmartMeterTexasAdapter(Adapter):
             raise HubError(501, "Smart Meter Texas support isn't installed. Run pip install -r requirements.txt.")
         cfg = {"username": username.strip(), "password": password}
         await self.close()
+        self._auth_failed = False
         try:
             await self._ensure(cfg)
         except SmartMeterTexasAuthError as exc:
@@ -122,31 +129,51 @@ class SmartMeterTexasAdapter(Adapter):
         self.secrets.set("smt", None)
 
     async def _update(self) -> None:
-        async with self._lock:
-            await self._ensure()
-            now = time.monotonic()
-            if now - self._read_at > READ_SECONDS or not self._read_at:
-                self._read_at = now
-                for meter in self._meters:
-                    try:
-                        await meter.read_meter(self._client)
-                    except SmartMeterTexasAPIError as exc:
-                        log.warning("Smart Meter Texas read failed: %s", exc)
-            if now - self._daily_at > DAILY_SECONDS or not self._daily_at:
-                self._daily_at = now
-                for meter in self._meters:
-                    try:
-                        await meter.get_15min(self._client)
-                        self._yesterday[meter.esiid] = day_total(meter.read_15min_consumption)
-                    except SmartMeterTexasAPIError as exc:
-                        log.warning("Smart Meter Texas daily usage failed: %s", exc)
+        """Meter reading and yesterday's total. An on-demand meter read makes Smart Meter Texas poll the meter
+        and can take minutes, so this runs in the background (see _kick), never inside a device list request,
+        whose time limit would cancel it every time."""
+        await self._ensure()
+        now = time.monotonic()
+        if now - self._read_at > READ_SECONDS or not self._read_at:
+            self._read_at = now
+            for meter in self._meters:
+                try:
+                    await meter.read_meter(self._client)
+                except SmartMeterTexasAPIError as exc:
+                    log.warning("Smart Meter Texas read failed: %s", exc)
+        if now - self._daily_at > DAILY_SECONDS or not self._daily_at:
+            self._daily_at = now
+            for meter in self._meters:
+                try:
+                    await meter.get_15min(self._client)
+                    self._yesterday[meter.esiid] = day_total(meter.read_15min_consumption)
+                except SmartMeterTexasAPIError as exc:
+                    log.warning("Smart Meter Texas daily usage failed: %s", exc)
 
-    async def devices(self) -> list[Device]:
+    def _kick(self) -> None:
+        """Start a background refresh if one isn't running."""
+        if self._refresh is None or self._refresh.done():
+            self._refresh = asyncio.create_task(self._refresh_safely())
+
+    async def _refresh_safely(self) -> None:
         try:
             await self._update()
+        except SmartMeterTexasAuthError:
+            self._auth_failed = True
+            await self.close()
+        except Exception as exc:  # noqa: BLE001 - keep the last good reading; try again next time
+            log.warning("Smart Meter Texas refresh failed: %s", exc)
+
+    async def devices(self) -> list[Device]:
+        if self._auth_failed:
+            raise HubError(401, "Smart Meter Texas sign-in failed. Connect again in Settings.")
+        try:
+            await self._ensure()   # sign-in and the meter list: quick; readings follow in the background
         except SmartMeterTexasAuthError as exc:
+            self._auth_failed = True
             await self.close()
             raise HubError(401, "Smart Meter Texas sign-in failed. Connect again in Settings.") from exc
+        self._kick()
         out = []
         for meter in self._meters:
             try:  # both raise until the first successful read
@@ -214,6 +241,9 @@ class SmartMeterTexasAdapter(Adapter):
         return {"connected": self.active, "available": AVAILABLE, "devices": len(self._meters)}
 
     async def close(self) -> None:
+        task, self._refresh = self._refresh, None
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
         if self._session is not None:
             await self._session.close()
         self._session = self._client = None
