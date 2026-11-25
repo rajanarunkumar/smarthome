@@ -76,7 +76,7 @@ async function api(method, path, body, { timeout = method === "GET" ? 12000 : 20
   }
   if (!res.ok) {
     const detail = data?.detail;
-    throw new Error(typeof detail === "string" ? detail : Array.isArray(detail) ? detail.map((d) => d.msg).join("; ") : `Error ${res.status}`);
+    throw new Error(typeof detail === "string" ? detail : Array.isArray(detail) ? detail.map((d) => String(d.msg).replace(/^Value error, /, "")).join("; ") : `Error ${res.status}`);
   }
   return data;
 }
@@ -989,7 +989,7 @@ function renderSettings() {
     }
     catch (err) { toast(err.message); e.target.disabled = false; }
   });
-  accountButton("#govee-on", () => api("POST", "/api/govee/account", { api_key: $("#govee-key").value.trim() }),
+  accountButton("#govee-on", () => api("POST", "/api/govee/account", { api_key: val("#govee-key") }),
     (r) => `Govee connected: ${r.devices} device(s)`);
   accountButton("#thinq-on", () => api("POST", "/api/thinq/account", { token: $("#thinq-token").value.trim(), country: $("#thinq-country").value.trim().toUpperCase() || "US" }),
     (r) => `LG ThinQ connected: ${r.devices} appliance(s)`);

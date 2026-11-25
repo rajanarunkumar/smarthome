@@ -17,7 +17,7 @@ from fastapi import Body, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .adapters.base import Adapter
 from .adapters.dyson_adapter import DysonAdapter
@@ -1035,8 +1035,49 @@ async def pair_lgtv(request: Request, body: LgPairIn = Body(LgPairIn())):
 
 
 # Brand accounts. Keys are saved in ~/.smarthome/secrets.json and never sent back.
+# Pasted keys often carry spaces, line breaks, quotes or invisible characters (from email, Notes or a PDF),
+# so keys are cleaned first and then checked with a message that says what's wrong.
+_KEY_JUNK = re.compile(r"[\s\u00a0\u200b-\u200f\u2028\u2029\u2060\ufeff\"'`<>]")
+_KEY_CHARS = re.compile(r"^[A-Za-z0-9._\-]+$")
+
+
+def clean_key(value):
+    if value is None:
+        return None
+    key = _KEY_JUNK.sub("", str(value))
+    key = re.sub(r"^(?:Bearer|bearer|BEARER)(?=[A-Za-z0-9])", "", key)
+    for prefix in ("api_key=", "API_KEY=", "GEMINI_API_KEY=", "OPENAI_API_KEY=", "ANTHROPIC_API_KEY=", "GOVEE_API_KEY="):
+        if key.startswith(prefix):
+            key = key[len(prefix):]
+    return key
+
+
+def check_key(key: str, name: str, where: str, *, prefix: str | None = None, min_len: int = 20, max_len: int = 300) -> str:
+    """Raise a plain-language error for a key that can't be right."""
+    if not key:
+        raise ValueError(f"Paste your {name} first.")
+    if key.startswith("sk-ant-") and prefix != "sk-ant-":
+        raise ValueError("That's an Anthropic (Claude) key. Add it under Settings → Photo analysis instead.")
+    if key.startswith("AIza") and name != "Gemini key":
+        raise ValueError("That's a Google Gemini key. Add it with “Add Gemini” instead.")
+    if prefix and not key.startswith(prefix):
+        raise ValueError(f"A {name} starts with “{prefix}”. Copy it again from {where}.")
+    if not _KEY_CHARS.match(key):
+        raise ValueError(f"That {name} has characters keys don't use. Copy it again from {where}.")
+    if len(key) < min_len:
+        raise ValueError(f"That {name} is too short ({len(key)} characters); part of it may be missing. Copy it again from {where}.")
+    if len(key) > max_len:
+        raise ValueError(f"That's longer than a {name}. Paste only the key, from {where}.")
+    return key
+
+
 class GoveeKeyIn(BaseModel):
-    api_key: str = Field(min_length=20, max_length=128, pattern=r"^[A-Za-z0-9-]+$")
+    api_key: str
+
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def _key(cls, v):
+        return check_key(clean_key(v), "Govee API key", "the email Govee sent", min_len=20, max_len=128)
 
 
 @app.post("/api/govee/account")
@@ -1674,7 +1715,12 @@ async def reassess_photo(request: Request, photo_id: int):
 
 
 class ApiKeyIn(BaseModel):
-    api_key: str = Field(min_length=20, max_length=300, pattern=r"^sk-ant-[A-Za-z0-9_-]+$")
+    api_key: str
+
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def _key(cls, v):
+        return check_key(clean_key(v), "Anthropic API key", "console.anthropic.com → API keys", prefix="sk-ant-")
 
 
 @app.put("/api/settings/claude")
@@ -1685,12 +1731,26 @@ async def set_claude_key(request: Request, body: ApiKeyIn):
 
 class ChatSettingsIn(BaseModel):
     provider: Literal["gemini", "claude"] | None = None
-    gemini_key: str | None = Field(None, min_length=20, max_length=200, pattern=r"^[A-Za-z0-9_\-]+$")
+    gemini_key: str | None = None
     model: str | None = Field(None, min_length=3, max_length=60, pattern=r"^[a-z0-9.\-]+$")
-    openai_key: str | None = Field(None, min_length=20, max_length=300, pattern=r"^[A-Za-z0-9_\-]+$")
+    openai_key: str | None = None
     quick: str | None = Field(None, max_length=60)      # "provider:model" for everyday commands
     thorough: str | None = Field(None, max_length=60)   # "provider:model" for reviews and questions
     photo_model: str | None = Field(None, max_length=40)
+
+    @field_validator("gemini_key", mode="before")
+    @classmethod
+    def _gemini(cls, v):
+        if v is None:
+            return None
+        return check_key(clean_key(v), "Gemini key", "aistudio.google.com → Get API key", max_len=200)
+
+    @field_validator("openai_key", mode="before")
+    @classmethod
+    def _openai(cls, v):
+        if v is None:
+            return None
+        return check_key(clean_key(v), "OpenAI key", "platform.openai.com → API keys", prefix="sk-")
 
 
 @app.put("/api/settings/chat")
