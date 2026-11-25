@@ -377,3 +377,15 @@ python3 scanner/smart_scan.py   # run twice; some devices answer slowly
 ```
 
 Also check your router's "connected devices" list. Cloud-only gadgets (common with Smart Life) often don't answer local discovery.
+
+## MCP (Claude Desktop, Claude Code and other MCP clients)
+
+`python -m hub.mcp_server` is an MCP server that runs on the Mac and drives the hub through its own API, with the API token in `~/.smarthome/secrets.json`. Every action on the home is a tool (58 in all): devices (including thermostats, sprinklers and locks), rooms, scenes, schedules, sprinkler programs, maintenance logs, prices and the savings goal, backups and restarts, plus read-only tools for every insight (electricity, bills by time of day, pool, HVAC, water). Signing in, passwords, API keys and linking accounts are left out; those stay in the app. Tool inputs come from the hub's own request models, so they stay in step with the API.
+
+- **Claude Code:** `claude mcp add smarthome -- "$PWD/.venv/bin/python" -m hub.mcp_server` (run from this folder).
+- **Claude Desktop:** in `~/Library/Application Support/Claude/claude_desktop_config.json`:
+  ```json
+  {"mcpServers": {"smarthome": {"command": "/path/to/smarthome/.venv/bin/python", "args": ["-m", "hub.mcp_server"], "cwd": "/path/to/smarthome"}}}
+  ```
+
+Tools are marked read-only or destructive, so the client asks before deleting or restarting; unlocking a door is a device change the client also asks about.

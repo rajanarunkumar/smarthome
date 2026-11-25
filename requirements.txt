@@ -22,3 +22,4 @@ pillow>=10  # zone photo analysis
 boto3>=1.27  # S3 backups
 cryptography>=42  # backup encryption
 pypdf>=5.0
+mcp>=2.3  # MCP server (python -m hub.mcp_server) for Claude and other MCP clients
