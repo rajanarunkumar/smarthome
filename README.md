@@ -395,4 +395,6 @@ Also check your router's "connected devices" list. Cloud-only gadgets (common wi
 
 **Claude Desktop extension (one file to install):** `scripts/build-claude-extension.sh` packs `integrations/claude-desktop` into `dist/smarthome-hub.mcpb`. In Claude Desktop: **Settings → Extensions**, drag the file in, then enter the hub's `https://…ts.net/mcp` address and the API token (kept in the keychain). It relays Claude to the hub's `/mcp` using the python3 that comes with macOS, so the computer only needs Tailscale.
 
+**Admin → MCP clients** lists who uses these tools: each client's name and version (from its `initialize`), the tailnet device it came from (via `tailscale whois`) or "this Mac" for the stdio server, tool calls and the last tool. A stdio client counts as connected while its process runs; an HTTP client for 10 minutes after its last request (`/mcp` is stateless). Kept in memory only. Every Admin section folds; they start closed and remember which you opened, per device.
+
 Tools are marked read-only or destructive, so the client asks before deleting or restarting; unlocking a door is a device change the client also asks about.

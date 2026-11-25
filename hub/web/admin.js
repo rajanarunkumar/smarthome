@@ -6,6 +6,8 @@ let adminResult = null;          // { ok, text } from the last manual action
 let adminLogBrand = "";
 const adminBusy = new Map();     // action key -> start time (ms)
 let touching = false;            // don't redraw under a finger
+// Sections start folded so the page fits on a screen; the ones you open stay open (per device).
+const adminOpen = new Set((() => { try { return JSON.parse(localStorage.getItem("adminOpen") || "[]"); } catch { return []; } })());
 
 document.addEventListener("pointerdown", () => { touching = true; }, { passive: true });
 ["pointerup", "pointercancel"].forEach((t) => document.addEventListener(t, () => { setTimeout(() => { touching = false; }, 150); }, { passive: true }));
@@ -42,6 +44,29 @@ function busyButton(key, label, attrs, cls = "pill") {
   return `<button class="${cls}" ${attrs}>${label}</button>`;
 }
 
+// A folded section: the header line keeps a one-line summary so a closed section still says how it's doing.
+function fold(key, title, sub, body) {
+  return `<details class="adm-fold" data-fold="${key}" ${adminOpen.has(key) ? "open" : ""}>
+    <summary class="adm-section"><h2>${title}</h2>${sub ? `<span class="adm-sub">${sub}</span>` : ""}</summary>${body}</details>`;
+}
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+function mcpClientsHtml(m) {
+  if (!m?.clients.length) {
+    return `<div class="card"><div class="adm-row"><span class="adm-sub">No MCP client has used the hub since it started.
+      Claude Code and Claude Desktop appear here once they connect (on this Mac or over the tailnet at /mcp).</span></div></div>`;
+  }
+  return `<div class="card">${m.clients.map((c) => `<div class="adm-row">
+      ${dot(c.connected ? "ok" : "off", c.connected ? "connected" : "not connected")}
+      <div class="main"><div class="name">${esc(c.client || c.user_agent || "Unknown client")}${c.version ? ` <span class="adm-sub">${esc(c.version)}</span>` : ""}</div>
+        <div class="adm-sub">${[
+          c.transport === "stdio" ? `this Mac · stdio · pid ${c.pid}` : `${esc(c.device || c.ip || "unknown device")} · HTTP /mcp`,
+          c.user ? esc(c.user) : "",
+          c.connected ? (c.transport === "stdio" ? "running" : `active ${ago(c.last_seen)}`) : `last seen ${ago(c.last_seen)}`,
+          c.tool_calls ? `${plural(c.tool_calls, "tool call")}, last ${esc(c.last_tool)}` : "no tool calls yet",
+        ].filter(Boolean).join(" · ")}</div></div></div>`).join("")}</div>`;
+}
+
 async function renderAdmin({ fetch = true, signal, live = () => true } = {}) {
   if (adminData) drawAdmin(); else setView(skeleton(6));
   if (!fetch) return;
@@ -70,6 +95,9 @@ function drawAdmin() {
   const label = Object.fromEntries(d.brands.map((b) => [b.brand, b.label]));
   const logBrands = [...new Set(d.logs.map((l) => l.logger.split(".").pop().replace(/_adapter$/, "")))].sort();
   const logs = d.logs.filter((l) => !adminLogBrand || l.logger.includes(adminLogBrand));
+  const mcp = d.mcp;
+  const staleCaches = d.caches.filter((c) => c.entries.some((e) => e.stale)).length;
+  const failedJobs = Object.values(d.jobs).filter((j) => j.ok === false).length;
 
   setView(`
     <div class="adm-actions">
@@ -107,8 +135,9 @@ function drawAdmin() {
         <div class="adm-sub">${p.asyncio_tasks ?? "–"} tasks · ${p.open_fds ?? "–"} files open</div></div>
     </div>
 
-    <div class="adm-section"><h2>Brands</h2><span class="adm-sub">tap Refresh to read one brand directly</span></div>
-    <div class="card">${d.brands.filter((b) => b.brand !== "hub").map((b) => {
+    ${fold("mcp", "MCP clients", mcp?.clients.length ? `${mcp.connected} connected · ${mcp.clients.length} seen` : "none yet", mcpClientsHtml(mcp))}
+
+    ${fold("brands", "Brands", badBrands ? `${badBrands} with problems` : `${activeBrands.length} answering`, `<div class="card">${d.brands.filter((b) => b.brand !== "hub").map((b) => {
       const op = b.ops.devices || {}, set = b.ops.set_state;
       const health = brandHealth(b);
       const err = b.cache?.stale ? b.cache.error : (op.last_error_at && (!op.last_ok || op.last_error_at > op.last_ok)) ? op.last_error : null;
@@ -124,10 +153,9 @@ function drawAdmin() {
           ${err ? `<div class="adm-err">${esc(err)}</div>` : ""}</div>
         ${b.active ? busyButton(`brand:${b.brand}`, "Refresh", `data-adm="brand" data-brand="${esc(b.brand)}"`, "pill small") : ""}
       </div>`;
-    }).join("")}</div>
+    }).join("")}</div>`)}
 
-    <div class="adm-section"><h2>Caches</h2><span class="adm-sub">in memory, refreshed in the background</span></div>
-    <div class="card">${d.caches.map((c) => `<div class="adm-row">
+    ${fold("caches", "Caches", `${d.caches.length} in memory${staleCaches ? ` · ${staleCaches} stale` : ""}`, `<div class="card">${d.caches.map((c) => `<div class="adm-row">
         ${dot(c.load_failures && c.entries.some((e) => e.stale) ? "warn" : "ok")}
         <div class="main"><div class="name">${esc(c.name)}</div>
           <div class="adm-sub">${c.size} entr${c.size === 1 ? "y" : "ies"} · hit rate ${c.hit_rate == null ? "–" : Math.round(c.hit_rate * 100) + "%"}
@@ -135,40 +163,36 @@ function drawAdmin() {
             · refresh ${c.refresh_after_s} s / expire ${fmtDur(c.expire_after_s)}${c.timeouts ? ` · ${c.timeouts} timeouts` : ""}${c.stale_serves ? ` · ${c.stale_serves} stale serves` : ""}</div></div>
         ${busyButton(`cache:${c.name}:1`, "Reload", `data-adm="cache" data-cache="${esc(c.name)}" data-reload="1"`, "pill small")}
         ${busyButton(`cache:${c.name}:0`, "Clear", `data-adm="cache" data-cache="${esc(c.name)}" data-reload="0"`, "pill small")}
-      </div>`).join("")}</div>
+      </div>`).join("")}</div>`)}
 
-    <div class="adm-section"><h2>Background jobs</h2></div>
-    <div class="card">${Object.keys(d.jobs).length ? Object.entries(d.jobs).map(([name, j]) => `<div class="adm-row">
+    ${fold("jobs", "Background jobs", failedJobs ? `${failedJobs} failing` : `${Object.keys(d.jobs).length} ok`, `<div class="card">${Object.keys(d.jobs).length ? Object.entries(d.jobs).map(([name, j]) => `<div class="adm-row">
         ${dot(j.ok === false ? "bad" : "ok")}
         <div class="main"><div class="name">${esc(name)}</div>
           <div class="adm-sub">${[j.last_start ? `ran ${ago(j.last_start)}` : j.last_at ? `ran ${ago(j.last_at)}` : "",
             j.last_ms != null ? `took ${fmtMs(j.last_ms)}` : "", j.runs ? `${j.runs} runs${j.failures ? `, ${j.failures} failed` : ""}` : "",
             j.next_run ? `next ${ago(j.next_run)}` : ""].filter(Boolean).join(" · ")}</div>
           ${j.detail ? `<div class="${j.ok === false ? "adm-err" : "adm-sub"}">${esc(j.detail)}</div>` : ""}</div></div>`).join("")
-      : `<div class="adm-row"><span class="adm-sub">No runs yet since the hub started.</span></div>`}</div>
+      : `<div class="adm-row"><span class="adm-sub">No runs yet since the hub started.</span></div>`}</div>`)}
 
-    <div class="adm-section"><h2>Requests</h2><span class="adm-sub">since start · slowest first</span></div>
-    <div class="adm-scroll"><table class="adm-table">
+    ${fold("requests", "Requests", `${d.requests.routes.length} routes since start`, `<div class="adm-scroll"><table class="adm-table">
       <thead><tr><th>Route</th><th>Calls</th><th>p50</th><th>p95</th><th>Max</th><th>Errors</th></tr></thead>
       <tbody>${d.requests.routes.slice(0, 25).map((r) => `<tr><td>${esc(r.route)}</td><td>${r.count}</td><td>${fmtMs(r.p50_ms)}</td>
         <td>${fmtMs(r.p95_ms)}</td><td>${fmtMs(r.max_ms)}</td><td>${r.err5 ? `<b class="adm-err">${r.err5}</b>` : ""}${r.err5 && r.err4 ? " / " : ""}${r.err4 || (r.err5 ? "" : "0")}</td></tr>`).join("")}</tbody>
-    </table></div>
-    ${d.requests.slow.length ? `<div class="adm-section"><h2>Slow requests</h2></div>
-    <div class="card">${d.requests.slow.slice(0, 10).map((r) => `<div class="adm-row"><div class="main">
-      <div class="adm-log">${esc(r.route)} → ${r.status}</div><div class="adm-sub">${ago(r.t)}</div></div><b>${fmtMs(r.ms)}</b></div>`).join("")}</div>` : ""}
+    </table></div>`)}
+    ${d.requests.slow.length ? fold("slow", "Slow requests", `${d.requests.slow.length} over 1 s`, `<div class="card">${d.requests.slow.slice(0, 10).map((r) => `<div class="adm-row"><div class="main">
+      <div class="adm-log">${esc(r.route)} → ${r.status}</div><div class="adm-sub">${ago(r.t)}</div></div><b>${fmtMs(r.ms)}</b></div>`).join("")}</div>`) : ""}
 
-    <div class="adm-section"><h2>Recent activity</h2><span class="adm-sub">manual refreshes</span></div>
-    <div class="card">${d.activity.length ? d.activity.map((a) => `<div class="adm-row">${dot(a.ok ? "ok" : "bad")}
+    ${fold("activity", "Recent activity", d.activity.length ? `${plural(d.activity.length, "manual refresh", "manual refreshes")}` : "none", `<div class="card">${d.activity.length ? d.activity.map((a) => `<div class="adm-row">${dot(a.ok ? "ok" : "bad")}
       <div class="main"><div class="name small">${esc(a.what)}</div><div class="adm-sub">${ago(a.t)} · ${fmtMs(a.ms)} · ${esc(a.result)}</div></div></div>`).join("")
-      : `<div class="adm-row"><span class="adm-sub">Nothing yet.</span></div>`}</div>
+      : `<div class="adm-row"><span class="adm-sub">Nothing yet.</span></div>`}</div>`)}
 
-    <div class="adm-section"><h2>Warnings and errors</h2>
-      <select id="adm-log-brand" aria-label="Filter by source" class="adm-sub">
-        <option value="">All sources</option>${logBrands.map((b) => `<option value="${esc(b)}" ${b === adminLogBrand ? "selected" : ""}>${esc(label[b] || b)}</option>`).join("")}
-      </select></div>
+    ${fold("logs", "Warnings and errors", d.logs.length ? plural(d.logs.length, "entry", "entries") : "none", `
+    <select id="adm-log-brand" aria-label="Filter by source" class="adm-sub adm-filter">
+      <option value="">All sources</option>${logBrands.map((b) => `<option value="${esc(b)}" ${b === adminLogBrand ? "selected" : ""}>${esc(label[b] || b)}</option>`).join("")}
+    </select>
     <div class="card">${logs.length ? logs.slice(0, 50).map((l) => `<div class="adm-row"><div class="main adm-log">
       <span class="lv ${esc(l.level)}">${esc(l.level)}</span> ${esc(l.logger)} · <span class="adm-sub">${ago(l.t)}</span><br>${esc(l.msg)}</div></div>`).join("")
-      : `<div class="adm-row"><span class="adm-sub">No warnings since the hub started.</span></div>`}</div>
+      : `<div class="adm-row"><span class="adm-sub">No warnings since the hub started.</span></div>`}</div>`)}
     <p class="note">Telemetry lives in memory and starts over when the hub restarts. Raw refresh reads each brand directly (at most once every 10 s per brand).</p>`);
 }
 
@@ -177,6 +201,14 @@ setInterval(() => {
   if (state.tab !== "admin") return;
   view.querySelectorAll(".elapsed[data-since]").forEach((el) => { el.textContent = `${Math.round((Date.now() - Number(el.dataset.since)) / 1000)} s`; });
 }, 1000);
+
+// Remember which sections are open ("toggle" doesn't bubble, so listen in the capture phase).
+view.addEventListener("toggle", (e) => {
+  const key = e.target.dataset?.fold;
+  if (!key) return;
+  if (e.target.open) adminOpen.add(key); else adminOpen.delete(key);
+  try { localStorage.setItem("adminOpen", JSON.stringify([...adminOpen])); } catch { /* private mode */ }
+}, true);
 
 view.addEventListener("change", (e) => {
   if (e.target.id !== "adm-log-brand") return;

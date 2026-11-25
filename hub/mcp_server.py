@@ -179,7 +179,21 @@ def load_spec() -> dict:
     return app.openapi()
 
 
-def build_server(spec: dict, client: httpx.AsyncClient):
+def who(ctx: Any, tool: str | None = None) -> dict[str, str]:
+    """X-MCP-Client header: tells the hub which client this stdio server serves (Admin → MCP clients)."""
+    try:
+        info = ctx.session.client_params.client_info
+        name, version = info.name, info.version
+    except AttributeError:
+        name = version = None
+    data = {"pid": os.getpid(), "name": name, "version": version}
+    if tool:
+        data["tool"] = tool
+    return {"X-MCP-Client": json.dumps(data, ensure_ascii=True)}
+
+
+def build_server(spec: dict, client: httpx.AsyncClient, identify: bool = False):
+    """identify: send X-MCP-Client with each call (the stdio server; /mcp notes its callers itself)."""
     from mcp import types
     from mcp.server.lowlevel import Server
 
@@ -191,6 +205,11 @@ def build_server(spec: dict, client: httpx.AsyncClient):
              for op in ops.values()]
 
     async def list_tools(ctx, params) -> types.ListToolsResult:
+        if identify:   # clients list tools as soon as they connect: let Admin see it
+            try:
+                await client.get("/api/auth/me", headers=who(ctx))
+            except httpx.HTTPError:
+                pass
         return types.ListToolsResult(tools=tools)
 
     async def call_tool(ctx, params: types.CallToolRequestParams) -> types.CallToolResult:
@@ -202,7 +221,8 @@ def build_server(spec: dict, client: httpx.AsyncClient):
             return result(f"Unknown tool {params.name}", True)
         try:
             path, query, body = split_args(op, spec, dict(params.arguments or {}))
-            r = await client.request(op.method, path, params=query, json=body)
+            r = await client.request(op.method, path, params=query, json=body,
+                                     headers=who(ctx, op.name) if identify else None)
         except (ValueError, httpx.HTTPError) as exc:
             return result(f"Couldn't reach the hub: {exc}" if isinstance(exc, httpx.HTTPError) else str(exc), True)
         try:
@@ -228,7 +248,7 @@ async def main() -> None:
 
     spec = load_spec()
     async with httpx.AsyncClient(base_url=HUB_URL, timeout=90, headers={"Authorization": f"Bearer {token()}"}) as client:
-        server = build_server(spec, client)
+        server = build_server(spec, client, identify=True)
         async with stdio_server() as (read, write):
             await server.run(read, write, server.create_initialization_options())
 

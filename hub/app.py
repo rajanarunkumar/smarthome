@@ -42,6 +42,7 @@ from .adapters.water_adapter import WaterAdvisorAdapter
 from .auth import SESSION_COOKIE, Auth
 from .cache import LoadingCache
 from .telemetry import Telemetry
+from .mcp_clients import McpClients
 from . import backup as backup_mod
 from .chat import GEMINI_MODEL, Chat
 from .updater import Updater
@@ -134,6 +135,7 @@ class Hub:
         self._warmer: asyncio.Task | None = None
         self._by_brand = {a.brand: a for a in self.adapters}
         self.telemetry = Telemetry(data_dir())
+        self.mcp_clients = McpClients()
         # L1 caches (see hub/cache.py): a slow brand never holds up the others.
         self.device_cache = LoadingCache("devices", self._load_brand_devices, max_size=64,
                                          refresh_after=10, expire_after=120, timeout=DEVICE_TIMEOUT)
@@ -650,7 +652,26 @@ class McpApp:
         manager = getattr(scope["app"].state, "mcp", None) if "app" in scope else None
         if manager is None:
             return await JSONResponse({"detail": "MCP isn't running"}, status_code=503)(scope, receive, send)
-        await manager.handle_request(scope, receive, send)
+        # Read the request body once to note who's calling (Admin → MCP clients), then hand it on unchanged.
+        messages = []
+        while True:
+            message = await receive()
+            messages.append(message)
+            if message["type"] != "http.request" or not message.get("more_body"):
+                break
+        try:
+            headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+            body = b"".join(m.get("body", b"") for m in messages if m["type"] == "http.request")
+            ip = headers.get("x-forwarded-for", "").split(",")[0] or (scope.get("client") or [None])[0]
+            scope["app"].state.hub.mcp_clients.note_http(ip, headers.get("user-agent"), headers.get("tailscale-user-login"),
+                                                         body if len(body) < 1_000_000 else b"")
+        except Exception:  # noqa: BLE001 - tracking must never break MCP
+            log.debug("Couldn't note the MCP client", exc_info=True)
+
+        async def replay():
+            return messages.pop(0) if messages else await receive()
+
+        await manager.handle_request(scope, replay, send)
 
 
 def _is_mcp(path: str) -> bool:
@@ -698,6 +719,8 @@ async def authenticate(request: Request, call_next):
         bearer = authorization[7:].strip()
         if hmac.compare_digest(bearer, hub.secrets.access_token()):
             request.state.user = {"email": None, "method": "api-token"}
+            if mcp_client := request.headers.get("x-mcp-client"):
+                hub.mcp_clients.note_stdio(mcp_client)   # the stdio MCP server on this Mac
         elif bearer.startswith("app_") and (app_user := hub.auth.app_user(bearer)):
             request.state.user = app_user  # iPhone app, unlocked with Face ID on the phone
         else:
@@ -2120,6 +2143,7 @@ async def admin_telemetry(request: Request):
         "brands": brands, "caches": [c.snapshot() for c in hub.caches.values()],
         "jobs": jobs, "series": list(t.series), "activity": list(t.activity),
         "logs": t.log_report("WARNING", 50),
+        "mcp": await hub.mcp_clients.report(),
     }
 
 
