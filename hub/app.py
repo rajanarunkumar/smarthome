@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import Body, FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -736,6 +737,13 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 @app.exception_handler(HubError)
 async def hub_error(_: Request, exc: HubError):
     return JSONResponse({"detail": exc.message}, status_code=exc.status)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(_: Request, exc: RequestValidationError):
+    """Say what's wrong without sending the rejected value back: it may be a password or key."""
+    errors = [{"loc": list(e.get("loc", [])), "msg": e.get("msg", "Invalid value"), "type": e.get("type")} for e in exc.errors()]
+    return JSONResponse({"detail": errors}, status_code=422)
 
 
 @app.exception_handler(sqlite3.IntegrityError)

@@ -39,3 +39,16 @@ def test_wrong_keys_say_why(model, field, value, expect):
     with pytest.raises(ValidationError) as exc:
         model(**{field: value})
     assert expect in msg(exc)
+
+
+def test_rejected_key_is_not_echoed():
+    import asyncio
+    from fastapi.exceptions import RequestValidationError
+    from hub.app import validation_error
+    secret = "sk-ant-api03-" + "q" * 40
+    try:
+        ChatSettingsIn(openai_key=secret)
+    except ValidationError as exc:
+        err = RequestValidationError(exc.errors())
+    r = asyncio.run(validation_error(None, err))
+    assert r.status_code == 422 and secret not in r.body.decode() and "Anthropic" in r.body.decode()
