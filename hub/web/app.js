@@ -14,9 +14,9 @@ const view = $("#view");
 const sheet = $("#sheet");
 const DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const DAY_LABEL = { mon: "Mon", tue: "Tue", wed: "Wed", thu: "Thu", fri: "Fri", sat: "Sat", sun: "Sun" };
-const BRAND = { kasa: "Kasa", hue: "Hue", sonos: "Sonos", lg: "LG", govee: "Govee", thinq: "LG ThinQ", dyson: "Dyson", ecovacs: "Ecovacs", pentair: "Pentair", schlage: "Schlage", smt: "Smart Meter Texas", water: "My Water Advisor", rainbird: "Rain Bird", ring: "Ring", nest: "Nest", lennox: "Lennox", hub: "Hub" };
+const BRAND = { kasa: "Kasa", hue: "Hue", sonos: "Sonos", lg: "LG", govee: "Govee", thinq: "LG ThinQ", dyson: "Dyson", ecovacs: "Ecovacs", pentair: "Pentair", schlage: "Schlage", smt: "Smart Meter Texas", water: "My Water Advisor", rainbird: "Rain Bird", ring: "Ring", nest: "Nest", lennox: "Lennox", tuya: "Smart Life", hub: "Hub" };
 // These brands have no rename API, so the hub keeps the name.
-const HUB_NAMED = new Set(["govee", "lg", "thinq", "dyson", "ecovacs", "pentair", "schlage", "smt", "water", "rainbird", "ring", "nest", "lennox"]);
+const HUB_NAMED = new Set(["govee", "lg", "thinq", "dyson", "ecovacs", "pentair", "schlage", "smt", "water", "rainbird", "ring", "nest", "lennox", "tuya"]);
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -208,6 +208,7 @@ function deviceSub(d) {
   if (!d.online) parts.push("Not responding");
   else if (d.kind === "speaker") parts.push(d.playing ? (d.media ? `Playing ${d.media}` : "Playing") : "Paused");
   else if (d.kind === "tv") parts.push(d.on ? (d.media ? `On · ${d.media}` : "On") : "Off");
+  else if (d.kind === "blind") parts.push(d.media || (d.on ? "Open" : "Closed"));
   else if (["doorbell", "camera"].includes(d.kind)) parts.push([d.media, d.battery != null && d.battery <= 25 ? `battery ${d.battery}%` : ""].filter(Boolean).join(" · "));
   else if (["appliance", "purifier", "pool", "meter", "sprinkler", "thermostat"].includes(d.kind)) parts.push(d.media || (d.on == null ? "Idle" : d.on ? "On" : "Off"));
   else if (d.kind === "lock") parts.push([d.media, d.battery != null && d.battery <= 25 ? `battery ${d.battery}%` : ""].filter(Boolean).join(" · "));
@@ -231,6 +232,7 @@ const ICON_PATHS = {
   unlock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.6-1.8"/>',
   meter: '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>',
   sprinkler: '<path d="M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11z"/>',
+  blind: '<path d="M4 4h16M5 4v13M19 4v13M5 8h14M5 12h14M5 16h14M12 17v3"/>',
   thermostat: '<circle cx="12" cy="12" r="8.5"/><path d="M12 8v4l2.5 2.5"/>',
   doorbell: '<rect x="7" y="2.5" width="10" height="19" rx="5"/><circle cx="12" cy="14" r="2.5"/><circle cx="12" cy="7" r="1"/>',
   camera: '<rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10 5-3v10l-5-3z"/>',
@@ -473,7 +475,11 @@ function openDevice(id) {
     ${caps.has("snapshot") ? `<div class="field"><span>Camera</span>
       <button class="pill" id="f-snap">Take a snapshot</button><div id="f-snap-img"></div></div>` : ""}
     ${caps.has("events") ? `<div class="field"><span>Recent events</span><div class="card" id="f-events"><div class="row"><span class="sub">Loading…</span></div></div></div>` : ""}
-    ${caps.has("level") ? `<label class="field"><span>Fan speed <b id="f-level-v">${d.level ?? "Auto"}</b></span>
+    ${caps.has("position") ? `<label class="field"><span>Position <b id="f-pos-v">${d.level ?? 0}% open</b></span>
+      <input type="range" id="f-pos" min="0" max="100" step="5" value="${d.level ?? 0}"></label>
+      <label class="field inline"><span>Reversed (open shows as closed)</span>
+        <span class="switch"><input type="checkbox" id="f-rev"><span></span></span></label>` : ""}
+    ${caps.has("level") && !caps.has("blind") ? `<label class="field"><span>Fan speed <b id="f-level-v">${d.level ?? "Auto"}</b></span>
       <input type="range" id="f-level" min="1" max="${d.level_max ?? 10}" value="${d.level ?? 5}"></label>` : ""}
     ${d.details.length ? `<div class="field"><span>${d.kind === "sprinkler" ? "Programs on the controller" : "Readings"}</span><div class="card">${d.details.map((x) => `
       <div class="row"><span class="main"><span class="name small">${esc(x.label)}</span></span><span class="sub-value">${esc(x.value)}</span></div>`).join("")}</div></div>` : ""}
@@ -520,6 +526,12 @@ function openDevice(id) {
     send({ volume: Number(e.target.value) });
   });
   $("#f-mute", sheet)?.addEventListener("change", (e) => send({ muted: e.target.checked }));
+  $("#f-pos", sheet)?.addEventListener("input", (e) => { $("#f-pos-v", sheet).textContent = `${e.target.value}% open`; });
+  $("#f-pos", sheet)?.addEventListener("change", (e) => send({ position: Number(e.target.value) }));
+  $("#f-rev", sheet)?.addEventListener("change", async (e) => {
+    try { await api("PUT", `/api/tuya/${encodeURIComponent(id)}/reversed`, { reversed: e.target.checked }); toast("Saved: the position will refresh in a moment"); }
+    catch (err) { toast(err.message); }
+  });
   $("#f-level", sheet)?.addEventListener("input", (e) => {
     $("#f-level-v", sheet).textContent = e.target.value;
     send({ level: Number(e.target.value) });
@@ -779,6 +791,7 @@ function renderSettings() {
   const ring = state.status?.ring || {};
   const nest = state.status?.nest || {};
   const lennox = state.status?.lennox || {};
+  const tuya = state.status?.tuya || {};
   const accountCard = (name, st, form, about, connectedText, key = name.toLowerCase(), extra = "") => `
     <div class="section-title"><span>${esc(name)}</span></div>
     <div class="card">${st.available === false ? `
@@ -878,6 +891,14 @@ function renderSettings() {
         <button class="pill primary" id="ring-on">Continue</button></div>`,
       "Doorbells and cameras: latest ring and motion, event history, snapshots, motion detection, lights and siren. Ring then texts or emails a code. The hub keeps Ring's token, not your password.",
       `${count("ring")} doorbell(s) and camera(s)${ring.error ? ` · ${esc(ring.error)}` : ""}`)}
+    ${accountCard("Smart Life", tuya, `
+      <div class="row key-row"><input type="text" id="tuya-id" placeholder="Access ID" autocomplete="off" spellcheck="false">
+        <input type="password" id="tuya-secret" placeholder="Access Secret" autocomplete="off">
+        <select id="tuya-region" aria-label="Data center"><option value="us">Western America</option><option value="us-e">Eastern America</option>
+          <option value="eu">Central Europe</option><option value="eu-w">Western Europe</option><option value="in">India</option><option value="cn">China</option></select>
+        <button class="pill primary" id="tuya-on">Connect</button></div>`,
+      "Blinds and curtains (open, close, stop, position), plus Smart Life plugs, switches and lights. Uses your own free Tuya developer project linked to your Smart Life account; see README → Smart Life for the 10-minute setup. No password is stored.",
+      `${count("tuya")} device(s)${tuya.blinds ? `, ${tuya.blinds} blind(s)` : ""}${tuya.error ? ` · ${esc(tuya.error)}` : ""}`, "tuya")}
     ${accountCard("Lennox iComfort", lennox, `
       <div class="row key-row"><input type="email" id="lennox-email" placeholder="iComfort email" autocomplete="off">
         <input type="password" id="lennox-pw" placeholder="Password" autocomplete="off">
@@ -1056,6 +1077,8 @@ function renderSettings() {
     const r = await api("POST", "/api/ring/account", { email: val("#ring-email"), password: $("#ring-pw").value });
     return r;
   }, (r) => r.needs_code ? "Enter the code Ring sent you" : `Ring connected: ${r.devices} device(s)`);
+  accountButton("#tuya-on", () => api("POST", "/api/tuya/account", { access_id: val("#tuya-id"), access_secret: $("#tuya-secret").value.trim(), region: $("#tuya-region").value }),
+    (r) => `Smart Life connected: ${r.devices} device(s)`);
   accountButton("#lennox-on", () => api("POST", "/api/lennox/account", { email: val("#lennox-email"), password: $("#lennox-pw").value, ip: val("#lennox-ip") || null }),
     (r) => `Lennox connected: ${r.devices} zone(s)`);
   accountButton("#ring-verify", () => api("POST", "/api/ring/account", { code: val("#ring-code") }),
@@ -1072,7 +1095,7 @@ function renderSettings() {
     try { location.href = (await api("POST", "/api/nest/link")).url; }
     catch (err) { toast(err.message); e.target.disabled = false; }
   });
-  for (const b of ["dyson", "ecovacs", "pentair", "schlage", "smt", "water", "rainbird", "ring", "nest", "lennox"]) accountButton(`#${b}-off`, () => api("DELETE", `/api/${b}/account`), () => `${BRAND[b]} disconnected`);
+  for (const b of ["dyson", "ecovacs", "pentair", "schlage", "smt", "water", "rainbird", "ring", "nest", "lennox", "tuya"]) accountButton(`#${b}-off`, () => api("DELETE", `/api/${b}/account`), () => `${BRAND[b]} disconnected`);
   accountButton("#govee-off", () => api("DELETE", "/api/govee/account"), () => "Govee account disconnected");
   accountButton("#thinq-off", () => api("DELETE", "/api/thinq/account"), () => "LG ThinQ disconnected");
   $("#lg-pair")?.addEventListener("click", async (e) => {

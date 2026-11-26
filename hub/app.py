@@ -38,6 +38,7 @@ from .adapters.schlage_adapter import SchlageAdapter
 from .adapters.smt_adapter import SmartMeterTexasAdapter
 from .adapters.sonos_adapter import SonosAdapter
 from .adapters.thinq_adapter import ThinQAdapter
+from .adapters.tuya_adapter import TuyaAdapter
 from .adapters.water_adapter import WaterAdvisorAdapter
 from .auth import SESSION_COOKIE, Auth
 from .cache import LoadingCache
@@ -70,7 +71,7 @@ IN_USE_SECONDS = 600
 COLLECT_SECONDS = 4 * 3600
 RECORD_SECONDS = 120          # thermostats (in memory, no network) and, while in use, everything cached
 IDLE_RECORD_SECONDS = 600     # other brands that feed insights, while nobody uses the app
-CLOUD_BRANDS = {"thinq", "ecovacs", "pentair", "schlage", "smt", "water", "ring", "nest", "govee"}
+CLOUD_BRANDS = {"thinq", "ecovacs", "pentair", "schlage", "smt", "water", "ring", "nest", "govee", "tuya"}
 CLOUD_WARM_SECONDS = 60
 INSIGHT_BRANDS = {"kasa", "hue", "govee", "thinq", "pentair", "dyson", "ecovacs", "lgtv", "lennox", "nest"}
 FREE_BRANDS = {"lennox"}      # state already in memory (Lennox keeps its own connection): reading it costs nothing
@@ -108,9 +109,10 @@ class Hub:
         self.ring = RingAdapter(self.secrets)
         self.nest = NestAdapter(self.secrets)
         self.lennox = LennoxAdapter(self.secrets)
+        self.tuya = TuyaAdapter(self.secrets)
         self.adapters: list[Adapter] = [self.kasa, self.hue, self.sonos, self.govee, self.lgtv, self.thinq,
                                         self.dyson, self.ecovacs, self.pentair, self.schlage, self.smt, self.water,
-                                        self.rainbird, self.ring, self.nest, self.lennox]
+                                        self.rainbird, self.ring, self.nest, self.lennox, self.tuya]
         self.scheduler = HubScheduler(self.store.db, self._apply)
         self.adapters.append(self.scheduler)
         self.last_devices: dict[str, Device] = {}
@@ -907,9 +909,10 @@ async def delete_room(request: Request, room_id: int):
 @app.post("/api/rooms/{room_id}/state")
 async def set_room_state(request: Request, room_id: int, state: StateIn):
     hub = hub_of(request)
-    # Locks are never part of "All on / All off".
+    # Locks and blinds are never part of "All on / All off" (turning the lights off shouldn't close the blinds).
+    blinds = {d.id for d in hub.last_devices.values() if d.kind == "blind"}
     targets = [d for d, r in hub.store.room_map().items()
-               if r == room_id and not d.startswith("schlage:")]
+               if r == room_id and not d.startswith("schlage:") and d not in blinds]
     results = await asyncio.gather(
         *(hub.set_state(d, state) for d in targets), return_exceptions=True
     )
@@ -1409,6 +1412,35 @@ async def chat_send(request: Request, body: ChatIn):
 @app.post("/api/chat/plans/{plan_id}/apply")
 async def chat_apply(request: Request, plan_id: str, body: PlanApplyIn = Body(PlanApplyIn())):
     return await hub_of(request).chat.apply_plan(plan_id, body.only)
+
+
+# Smart Life (Tuya): the owner's own Tuya IoT project, linked to their Smart Life account
+class TuyaIn(BaseModel):
+    access_id: str = Field(min_length=10, max_length=64, pattern=r"^[A-Za-z0-9]+$")
+    access_secret: str = Field(min_length=16, max_length=128, pattern=r"^[A-Za-z0-9]+$")
+    region: Literal["us", "us-e", "eu", "eu-w", "in", "cn"] = "us"
+
+
+@app.post("/api/tuya/account")
+async def tuya_connect(request: Request, body: TuyaIn):
+    return await hub_of(request).tuya.connect(body.access_id, body.access_secret, body.region)
+
+
+@app.delete("/api/tuya/account")
+async def tuya_disconnect(request: Request):
+    await hub_of(request).tuya.disconnect()
+    return {"ok": True}
+
+
+class ReversedIn(BaseModel):
+    reversed: bool
+
+
+@app.put("/api/tuya/{device_id}/reversed")
+async def tuya_reversed(request: Request, device_id: str, body: ReversedIn):
+    hub_of(request).tuya.set_reversed(device_id, body.reversed)
+    hub_of(request).invalidate_brand("tuya")
+    return {"ok": True}
 
 
 @app.delete("/api/rainbird/account")
@@ -1929,6 +1961,7 @@ STORED_SETTINGS = {
     "chat": ("Ask Home: which models answer", "config"),
     "photo_model": ("Photo analysis: which Claude model", "config"),
     "lennox": ("Lennox iComfort email and password (or thermostat address)", "password"),
+    "tuya": ("Smart Life (Tuya project) Access ID and Secret", "key"),
     "nest": ("Nest (Google Device Access) client secret and refresh token", "key"),
     "anthropic_api_key": ("Anthropic API key (photo analysis)", "key"),
     "s3_backup": ("S3 backup bucket and AWS access key", "password"),

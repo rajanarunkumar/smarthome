@@ -15,6 +15,7 @@ smart-meter-texas>=0.5  # TXU / Smart Meter Texas
 pyrainbird>=6.10; python_version >= "3.13"  # Rain Bird (6.1+ needed for controllers that only speak HTTPS)
 ring-doorbell>=0.9  # Ring doorbells and cameras
 lennoxs30api>=0.2.26  # Lennox iComfort S30/E30/M30/S40
+tinytuya>=1.17  # Smart Life / Tuya (blinds, plugs, lights) via your own Tuya IoT project
 anthropic>=2.0  # optional Claude photo analysis and Ask Home
 google-genai>=1.30  # optional Gemini for Ask Home (free tier)
 openai>=2.0  # optional OpenAI models for Ask Home

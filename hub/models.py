@@ -24,7 +24,7 @@ class Device(BaseModel):
     name: str
     model: str | None = None
     model_id: str | None = None        # the maker's model code (Hue "LCA001"), when it differs from the display model
-    kind: Literal["plug", "dimmer", "light", "speaker", "tv", "appliance", "vacuum", "purifier", "pool", "lock", "meter", "sprinkler", "thermostat", "doorbell", "camera"]
+    kind: Literal["plug", "dimmer", "light", "speaker", "tv", "appliance", "vacuum", "purifier", "pool", "lock", "meter", "sprinkler", "thermostat", "doorbell", "camera", "blind"]
     room_id: int | None = None
     online: bool = True
     on: bool | None = None
@@ -77,6 +77,7 @@ class StateIn(BaseModel):
     cool_f: float | None = Field(None, ge=50, le=95)       # thermostats: cool to (°F)
     eco: bool | None = None
     fan_minutes: int | None = Field(None, ge=0, le=720)    # thermostats: run the fan; 0 stops the timer
+    position: int | None = Field(None, ge=0, le=100)       # blinds: 0 closed, 100 open
 
 
 class DevicePatch(BaseModel):

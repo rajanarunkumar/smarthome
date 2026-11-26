@@ -100,7 +100,7 @@ Scanned from a Mac on the home Wi-Fi on 2026-11-21 (two passes plus the ARP tabl
 | Nest thermostat | Temperature, humidity, heating/cooling now, mode (Heat, Cool, Heat·Cool, Off), set temperatures, Eco, fan timer. Google's official Smart Device Management API. Thermostat run time also feeds the Electricity insights. | See **Nest thermostat** below (one-time US$5 Google fee). |
 | Atmos Energy | Not supported yet: Atmos has no API, no library, and isn't on Opower. | See "Atmos Energy" below. |
 
-Govee, LG TV, LG ThinQ, Dyson, Ecovacs, Pentair, Schlage, Ring, Nest and Lennox have no way to rename a device from outside their apps, so names you give those in the hub are kept in the hub. Account keys are saved only in `~/.smarthome/secrets.json` on the Mac and are never sent back to the web app.
+Govee, LG TV, LG ThinQ, Dyson, Ecovacs, Pentair, Schlage, Ring, Nest, Lennox and Smart Life have no way to rename a device from outside their apps, so names you give those in the hub are kept in the hub. Account keys are saved only in `~/.smarthome/secrets.json` on the Mac and are never sent back to the web app.
 
 
 - **Rooms tab:** every device grouped by room, power switches, "all on/off" per room. Tap a device to rename it (the name is written back to the brand), move it to a room, or set brightness, color and white temperature.
@@ -237,6 +237,19 @@ The speech-bubble button at the top opens a chat. Ask in your own words: "turn o
 ## Garage door (myQ)
 
 Chamberlain closed myQ to other apps in 2023, and the workarounds keep breaking, so the hub doesn't use the myQ cloud. The reliable route is a small board wired to the opener that the hub controls on your Wi‑Fi: **ratgdo** (about $40–60) or **Konnected GDO blaQ**. They work with Security+ 2.0 (yellow learn button) and older Chamberlain/LiftMaster openers, not Security+ 3.0. Planned: open/close/light/obstruction, opening protected like unlocking (second tap, signed-in person, never from scripts or chat).
+
+## Smart Life (blinds, plugs, lights)
+
+Smart Life devices run on Tuya's cloud. The hub uses **your own free Tuya developer project** linked to your Smart Life account (Tuya's official route for personal use; it doesn't borrow another app's registration). About 10 minutes, once:
+
+1. Sign up at **iot.tuya.com** (a developer account, separate from Smart Life; any email).
+2. **Cloud → Development → Create Cloud Project**: any name, industry *Smart Home*, development method *Smart Home*, data center **Western America** (US). Accept the default API services (IoT Core and Authorization are the ones needed).
+3. In the project: **Devices → Link App Account → Add App Account**. A QR code appears; in the **Smart Life** app tap **Me → the scan icon** (top right) and scan it. All your Smart Life devices now appear under the project's devices.
+4. **Overview** tab: copy the **Access ID** and **Access Secret** into the hub: **Settings → Smart Life**, choose the same data center, **Connect**.
+
+Blinds and curtains appear in Rooms with **Open / Stop / Close** and a **position** slider (0 % closed, 100 % open); the tile button opens or closes. If a motor counts the other way (shows closed when open), turn on **Reversed** in its panel. A room's *All on / All off* leaves blinds alone. Smart Life plugs, switches and lights can be switched (and dimmed) too. Schedules work through the hub (on = open, off = close).
+
+Tuya's free *IoT Core* trial has to be renewed every few months: **Cloud → Cloud Services → IoT Core → Extend Trial Period**. If it lapses, the hub says so in Settings. The hub reads the device list at most once a minute and only while the app is in use, which is well within the free quota.
 
 ## Nest thermostat
 
