@@ -97,6 +97,68 @@ Each phase leaves everything working; old adapters stay until HA is proven for t
 6. **Voice and one app:** HomeKit Bridge for Siri; Alexa/Google if wanted; add the hub to HA's sidebar
    (a panel showing the hub's page) so the HA app opens Insights too.
 
+## Onboarding: moving each connection, step by step
+
+Every brand is connected once in HA, checked, and only then disconnected from the hub. Nothing is moved by copying
+secrets between the two: HA asks for its own sign-in, which keeps each side revocable on its own.
+
+### In the hub: Settings → Move to Home Assistant
+
+A checklist page, one row per brand, so it's always clear where each connection lives:
+
+| Column | What it shows |
+|---|---|
+| Brand | with the number of devices the hub has for it today |
+| In Home Assistant | *not yet* / *found: 5 of 6 devices* (matched to HA entities by name and model, unmatched ones listed) |
+| You'll need | what HA will ask for, and anything the hub can show that isn't secret (Rain Bird IP, Lennox thermostat IP, Nest project ID, country) |
+| Steps | the steps below for that brand, with links to the HA page |
+| Source | *hub* / *Home Assistant*, switchable both ways for a week |
+| Finish | **Remove from hub**: deletes that brand's stored login from `secrets.json`, then the row shows ✓ *moved* |
+
+Passwords and tokens are never displayed; where HA wants the same one (Rain Bird controller password), the page says
+which one and where it was set. Brands that stay in the hub (My Water Advisor, Smart Meter Texas, Pentair until
+confirmed) are listed as *stays in the hub*, so nothing is left ambiguous. First row: **Home Assistant itself**
+(address + long-lived access token, with a test button).
+
+### What each brand needs in HA
+
+In HA: **Settings → Devices & services → Add integration**, unless it appears there by itself (*Discovered*).
+
+| Brand | How it connects in HA | What you need | Reused from today |
+|---|---|---|---|
+| Hue | discovered | press the bridge button | — |
+| Kasa | discovered | newer plugs ask for the TP-Link (Kasa app) email and password once | — |
+| Sonos | discovered | nothing | — |
+| LG TV | discovered | accept the prompt on the TV | — |
+| Govee | *Govee Lights Local* (discovered) | LAN Control on in the Govee app, as today | — |
+| Govee cloud-only devices | HACS Govee integration | the Govee API key | the key you already have (Govee app → Profile → Apply for API Key shows it again) |
+| LG ThinQ | *LG ThinQ* | a personal access token and country | make a new token at connect-pat.lgthinq.com (keep the hub's working until the switch) |
+| Dyson | HACS *Dyson Local* | either the MyDyson sign-in, or each device's serial, credential and type | for Google-sign-in accounts the hub shows each purifier's serial and type; the Wi‑Fi sticker gives the rest, as today |
+| Ecovacs | *Ecovacs* | Ecovacs email, password, country | — |
+| Schlage | *Schlage* | Schlage email and password | the second account the hub uses, if you made one |
+| Ring | *Ring* | Ring email and password, then the code Ring sends | — |
+| Nest | *Google Nest* | the Device Access project ID, an OAuth client ID and secret, and a Google Cloud Pub/Sub topic HA's setup walks you through | the same Device Access project and Cloud project; add HA's redirect address to the OAuth client (HA shows it) |
+| Lennox E30 | HACS *Lennox S30* | iComfort email and password, or the thermostat's IP | same choice as today; the hub shows the IP if you used local |
+| Smart Life blinds | *Tuya* | the Smart Life **User Code** (Smart Life app → Me → ⚙ → Account and Security → User Code), then scan HA's QR code with the Smart Life app | no developer project needed; the hub's Tuya project can be deleted afterwards |
+| Rain Bird | *Rain Bird* | controller IP and controller password | the same IP and password as the hub (the hub shows the IP) |
+| Pentair Home | (to be confirmed) | — | stays in the hub for now |
+| My Water Advisor, Smart Meter Texas | — | — | stay in the hub |
+
+### Order
+
+1. Home Assistant itself (install, then the hub's first row).
+2. The discovered ones: Hue, Kasa, Sonos, LG TV, Govee local. Nothing to type, quickest to check.
+3. Sign-in brands: Ring, Schlage, Ecovacs, ThinQ, Tuya (blinds), Rain Bird.
+4. The involved ones: Nest (Pub/Sub), Lennox and Dyson (HACS).
+5. For each: check the devices in the HA app, switch the hub's *Source* to Home Assistant, live with it a week,
+   then **Remove from hub**.
+
+### Done means
+
+- Every row reads ✓ *moved* or *stays in the hub*.
+- `secrets.json` holds only: Home Assistant token, My Water Advisor, Smart Meter Texas, Pentair, the AI keys, S3 backup.
+- The deleted adapters' code and tests are gone (phase 5).
+
 ## Decisions for you
 
 1. **Where HA runs:** Home Assistant Green (recommended), a Raspberry Pi 5, or a VM on the Mac.
