@@ -1,6 +1,10 @@
 # Plan: Home Assistant runs the devices, the hub keeps the insights
 
-Status: proposal, nothing changed yet. Written 2026-11-26.
+Status: decided 2026-11-26, being built. Decisions:
+1. **HA runs in a virtual machine on the Mac** (setup below).
+2. **Alexa and Google: the free manual setup** (what it needs is below).
+3. **Combo:** the HA app and HA Assist for controlling devices; the hub for insights, Ask Home's reviews and
+   questions, and the migration checklist. The hub's Rooms, Scenes and Schedules tabs go once every brand has moved.
 
 ## The idea
 
@@ -96,6 +100,29 @@ Each phase leaves everything working; old adapters stay until HA is proven for t
    cards, scheduler, scene code, Rooms and Schedules tabs. The hub's app becomes Insights, Ask Home and Admin.
 6. **Voice and one app:** HomeKit Bridge for Siri; Alexa/Google if wanted; add the hub to HA's sidebar
    (a panel showing the hub's page) so the HA app opens Insights too.
+
+## Home Assistant in a virtual machine on the Mac
+
+- **UTM** (free, utm.app) running **Home Assistant OS**: the *aarch64 / Generic ARM* image (`.qcow2`) for Apple
+  silicon Macs, the *generic x86-64* image for Intel Macs, from home-assistant.io → Installation → macOS.
+- VM settings: 2 CPUs, 4 GB memory, the image as the boot disk (32 GB is plenty), **network mode Bridged** (so HA
+  is a device on the home network and can discover Hue, Sonos, Kasa, Matter; Shared/NAT mode breaks discovery).
+- Start it at login: UTM → the VM → *Start automatically* (and keep the Mac from sleeping, as the hub already needs).
+- HA is then at `http://homeassistant.local:8123` (or the address shown in the VM window). In HA: create the owner
+  account, then Settings → Add-ons → **Tailscale** for remote access, and Profile → Security → **Long-lived access
+  token** for the hub.
+- Cost on the Mac: about 2 GB of memory and a few percent of one core when idle.
+
+## Alexa and Google: the free manual setup
+
+Both reach HA from the internet, so HA needs a public **HTTPS** address first: Tailscale **Funnel** on HA's Tailscale
+add-on is the simplest (only the paths Alexa/Google call need to be open; the HA login protects the rest).
+- **Alexa:** HA docs → *Amazon Alexa Smart Home Skill*: a private skill in the Alexa developer console plus a small
+  AWS Lambda function (free tier) that forwards to HA. About an hour, once.
+- **Google Home:** HA docs → *Google Assistant* (manual): a project in the Google Home developer console with
+  account linking to HA, and `google_assistant:` in HA's configuration. About an hour, once.
+- Siri needs none of this: HA's **HomeKit Bridge** works on the home network.
+- Which devices each one sees is chosen in HA (*expose* per entity), so locks and blinds can stay off voice if wanted.
 
 ## Onboarding: moving each connection, step by step
 
