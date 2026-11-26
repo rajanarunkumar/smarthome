@@ -1,0 +1,41 @@
+{
+  "manifest_version": "0.3",
+  "name": "smarthome-hub",
+  "display_name": "Smart Home Hub",
+  "version": "1.0.0",
+  "description": "Control and ask about your home through your own smart home hub: devices, rooms, scenes, schedules, sprinklers, thermostats, and insights on electricity, bills, pool, HVAC and water.",
+  "long_description": "Connects Claude to the hub's MCP endpoint on your tailnet. Every action the hub can take is a tool (58 in all). Signing in, passwords, API keys and account linking stay in the hub's app. Needs Tailscale on this computer and the hub's API token.",
+  "author": { "name": "Smart home hub" },
+  "server": {
+    "type": "python",
+    "entry_point": "server/proxy.py",
+    "mcp_config": {
+      "command": "python3",
+      "args": ["${__dirname}/server/proxy.py"],
+      "env": {
+        "SMARTHOME_URL": "${user_config.hub_url}",
+        "SMARTHOME_TOKEN": "${user_config.api_token}"
+      }
+    }
+  },
+  "user_config": {
+    "hub_url": {
+      "type": "string",
+      "title": "Hub MCP address",
+      "description": "Your hub's address with /mcp at the end, e.g. https://your-mac.your-tailnet.ts.net/mcp",
+      "required": true
+    },
+    "api_token": {
+      "type": "string",
+      "title": "Hub API token",
+      "description": "access_token from ~/.smarthome/secrets.json on the hub's Mac. Kept in the keychain.",
+      "sensitive": true,
+      "required": true
+    }
+  },
+  "tools_generated": true,
+  "compatibility": {
+    "platforms": ["darwin", "win32"],
+    "runtimes": { "python": ">=3.9" }
+  }
+}
