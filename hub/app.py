@@ -39,6 +39,8 @@ from .adapters.smt_adapter import SmartMeterTexasAdapter
 from .adapters.sonos_adapter import SonosAdapter
 from .adapters.thinq_adapter import ThinQAdapter
 from .adapters.tuya_adapter import TuyaAdapter
+from .adapters.ha_adapter import HomeAssistant
+from . import migration
 from .adapters.water_adapter import WaterAdvisorAdapter
 from .auth import SESSION_COOKIE, Auth
 from .cache import LoadingCache
@@ -74,7 +76,7 @@ IDLE_RECORD_SECONDS = 600     # other brands that feed insights, while nobody us
 CLOUD_BRANDS = {"thinq", "ecovacs", "pentair", "schlage", "smt", "water", "ring", "nest", "govee", "tuya"}
 CLOUD_WARM_SECONDS = 60
 INSIGHT_BRANDS = {"kasa", "hue", "govee", "thinq", "pentair", "dyson", "ecovacs", "lgtv", "lennox", "nest"}
-FREE_BRANDS = {"lennox"}      # state already in memory (Lennox keeps its own connection): reading it costs nothing
+FREE_BRANDS = {"lennox", "ha"}      # state already in memory (Lennox keeps its own connection): reading it costs nothing
 INSIGHT_TTL = {"/api/insights": COLLECT_SECONDS, "/api/energy": COLLECT_SECONDS, "/api/tou": COLLECT_SECONDS,
                "/api/reconcile": COLLECT_SECONDS, "/api/hvac": 120, "/api/pool": 120}
 LOAD_CAP = 60.0            # a brand's load is abandoned after this long
@@ -110,13 +112,16 @@ class Hub:
         self.nest = NestAdapter(self.secrets)
         self.lennox = LennoxAdapter(self.secrets)
         self.tuya = TuyaAdapter(self.secrets)
+        self.ha = HomeAssistant(self.secrets)
         self.adapters: list[Adapter] = [self.kasa, self.hue, self.sonos, self.govee, self.lgtv, self.thinq,
                                         self.dyson, self.ecovacs, self.pentair, self.schlage, self.smt, self.water,
-                                        self.rainbird, self.ring, self.nest, self.lennox, self.tuya]
+                                        self.rainbird, self.ring, self.nest, self.lennox, self.tuya, self.ha]
         self.scheduler = HubScheduler(self.store.db, self._apply)
         self.adapters.append(self.scheduler)
         self.last_devices: dict[str, Device] = {}
         self.chat = Chat(self)
+        self.ha.on_change = lambda eid, old, new: self.device_cache.invalidate("ha")
+        self.apply_migration()
         self.lennox.idle = lambda: not self.in_use()
         self.rainbird.idle = lambda: not self.in_use()
         self.updater = Updater()
@@ -478,7 +483,15 @@ class Hub:
         return adapter
 
     def active_adapters(self) -> list[Adapter]:
-        return [a for a in self.adapters if a.active]
+        """Connected brands; a brand moved to Home Assistant is served by the HA adapter instead of its own."""
+        return [a for a in self.adapters if a.active and a.brand not in self.ha.moved]
+
+    def apply_migration(self) -> None:
+        state = self.secrets.get("ha_migration") or {}
+        self.ha.moved = {b for b, st in state.items() if (st or {}).get("source") == "ha"}
+        if hasattr(self, "device_cache"):          # not yet during start-up
+            for b in list(self.ha.moved) + ["ha"]:
+                self.invalidate_brand(b)
 
     async def _load_brand_devices(self, brand: str) -> list[Device]:
         """Cache loader: ask one brand for its devices, timed for the Admin tab."""
@@ -1443,6 +1456,62 @@ async def tuya_reversed(request: Request, device_id: str, body: ReversedIn):
     return {"ok": True}
 
 
+# Home Assistant: the device layer, and the move of each brand to it (docs/PLAN-HOME-ASSISTANT.md)
+class HaIn(BaseModel):
+    url: str = Field(min_length=8, max_length=200, pattern=r"^https?://[^\s/]+(:\d+)?/?$")
+    token: str = Field(min_length=20, max_length=600, pattern=r"^[A-Za-z0-9._\-]+$")
+
+
+@app.put("/api/ha/account")
+async def ha_connect(request: Request, body: HaIn):
+    return await hub_of(request).ha.connect(body.url, body.token)
+
+
+@app.delete("/api/ha/account")
+async def ha_disconnect(request: Request):
+    hub = hub_of(request)
+    await hub.ha.disconnect()
+    hub.secrets.set("ha_migration", None)
+    hub.apply_migration()
+    return {"ok": True}
+
+
+@app.get("/api/migration")
+async def migration_report(request: Request):
+    hub = hub_of(request)
+    if not hub.last_devices:
+        await hub.devices()
+    return migration.report(hub)
+
+
+class SourceIn(BaseModel):
+    source: Literal["hub", "ha"]
+
+
+@app.put("/api/migration/{brand}")
+async def migration_source(request: Request, brand: str, body: SourceIn):
+    hub = hub_of(request)
+    if brand not in migration.GUIDE or brand in migration.STAYS:
+        raise HubError(400, "That brand stays in the hub.")
+    if body.source == "ha" and not hub.ha.connected:
+        raise HubError(409, "Connect Home Assistant first.")
+    migration.set_source(hub, brand, body.source)
+    return {"ok": True}
+
+
+@app.post("/api/migration/{brand}/remove")
+async def migration_remove(request: Request, brand: str):
+    who = _email(request)          # deleting a stored login needs a person, not a script
+    hub = hub_of(request)
+    if brand not in migration.GUIDE or brand in migration.STAYS:
+        raise HubError(400, "That brand stays in the hub.")
+    if brand not in hub.ha.moved or not hub.ha.entities_for(brand):
+        raise HubError(409, "Switch this brand to Home Assistant, and check its devices there, before removing it from the hub.")
+    await migration.remove_from_hub(hub, brand)
+    log.warning("%s removed %s from the hub (now in Home Assistant)", who, brand)
+    return {"ok": True}
+
+
 @app.delete("/api/rainbird/account")
 async def rainbird_disconnect(request: Request):
     await hub_of(request).rainbird.disconnect()
@@ -1962,6 +2031,8 @@ STORED_SETTINGS = {
     "photo_model": ("Photo analysis: which Claude model", "config"),
     "lennox": ("Lennox iComfort email and password (or thermostat address)", "password"),
     "tuya": ("Smart Life (Tuya project) Access ID and Secret", "key"),
+    "home_assistant": ("Home Assistant address and long-lived access token", "key"),
+    "ha_migration": ("Which brands come from Home Assistant", "config"),
     "nest": ("Nest (Google Device Access) client secret and refresh token", "key"),
     "anthropic_api_key": ("Anthropic API key (photo analysis)", "key"),
     "s3_backup": ("S3 backup bucket and AWS access key", "password"),

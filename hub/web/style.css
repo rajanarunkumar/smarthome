@@ -480,3 +480,9 @@ details.card > summary { cursor: pointer; line-height: 1.5; }
 .log-err { color: var(--danger); }
 .log-warn { color: var(--accent); }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow-wrap: anywhere; }
+.card.mig { margin-bottom: 10px; }
+.card.mig.done, .card.mig.stays, .card.mig.idle { opacity: .7; }
+.card.mig.trial { box-shadow: inset 3px 0 0 var(--accent), var(--shadow); }
+.mig-help { display: block; padding: 10px 16px; border-top: 1px solid var(--line); }
+.mig-help summary { cursor: pointer; }
+.mig-help > div { margin-top: 6px; line-height: 1.45; }

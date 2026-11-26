@@ -1,6 +1,9 @@
 # Plan: Home Assistant runs the devices, the hub keeps the insights
 
-Status: decided 2026-11-26, being built. Decisions:
+Status: decided 2026-11-26, being built. **Built so far:** the hub's Home Assistant connection
+(`hub/adapters/ha_adapter.py`: WebSocket, registries, live state changes, service calls) and the checklist
+(`hub/migration.py`, Settings → Home Assistant → Move to Home Assistant…). **Next:** Rain Bird run logging from HA
+events, matching history across the id change (`kasa:…` → `ha:light.…`), then deleting moved adapters. Decisions:
 1. **HA runs in a virtual machine on the Mac** (setup below).
 2. **Alexa and Google: the free manual setup** (what it needs is below).
 3. **Combo:** the HA app and HA Assist for controlling devices; the hub for insights, Ask Home's reviews and

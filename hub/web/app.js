@@ -820,7 +820,7 @@ function renderSettings() {
         <span class="sub">${hint.get() ? "Turned on" : "Sign in with one tap next time"}</span></div>
         ${hint.get() ? "" : `<button class="pill primary" id="add-passkey">Turn on</button>`}</div>
     </div>` : "";
-  view.innerHTML = account + `
+  view.innerHTML = account + haSettingsCard() + `
     <div class="section-title"><span>Philips Hue</span></div>
     <div class="card"><div class="row"><div class="main">
       <span class="name">${hue.paired ? "Hue Bridge paired" : "Hue Bridge not paired"}</span>
@@ -1077,6 +1077,7 @@ function renderSettings() {
     const r = await api("POST", "/api/ring/account", { email: val("#ring-email"), password: $("#ring-pw").value });
     return r;
   }, (r) => r.needs_code ? "Enter the code Ring sent you" : `Ring connected: ${r.devices} device(s)`);
+  bindHaSettings(accountButton);
   accountButton("#tuya-on", () => api("POST", "/api/tuya/account", { access_id: val("#tuya-id"), access_secret: $("#tuya-secret").value.trim(), region: $("#tuya-region").value }),
     (r) => `Smart Life connected: ${r.devices} device(s)`);
   accountButton("#lennox-on", () => api("POST", "/api/lennox/account", { email: val("#lennox-email"), password: $("#lennox-pw").value, ip: val("#lennox-ip") || null }),
