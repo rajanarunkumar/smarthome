@@ -1839,7 +1839,8 @@ async def set_chat_settings(request: Request, body: ChatSettingsIn):
     hub = hub_of(request)
     gemini = dict(hub.secrets.get("gemini") or {})
     if body.gemini_key:
-        gemini["api_key"] = body.gemini_key
+        await hub.chat.connect_gemini(body.gemini_key)
+        gemini = dict(hub.secrets.get("gemini") or {})
     if body.model:
         gemini["model"] = body.model
     if gemini:

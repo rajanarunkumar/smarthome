@@ -289,12 +289,20 @@ def test_switching_provider_carries_a_recap_over():
     assert "Earlier — you: Gemini here." in only["content"]      # ...but a plain recap is
 
 
+def fake_gemini_models(hub, monkeypatch, ids=("gemini-flash-lite-latest", "gemini-flash-latest")):
+    async def connect(key):
+        hub.secrets.set("gemini", {"api_key": key, "models": list(ids), "names": {}})
+        return list(ids)
+    monkeypatch.setattr(hub.chat, "connect_gemini", connect)
+
+
 def test_chat_settings_route(tmp_path, monkeypatch):
     monkeypatch.setenv("SMARTHOME_HOME", str(tmp_path))
     from fastapi.testclient import TestClient
     from hub import app as app_module
     with TestClient(app_module.app) as client:
         hub = app_module.app.state.hub
+        fake_gemini_models(hub, monkeypatch)
         token = {"Authorization": f"Bearer {hub.secrets.access_token()}"}
         assert client.get("/api/status", headers=token).json()["chat"]["provider"] is None
         assert client.put("/api/settings/chat", json={"gemini_key": "bad key!"}, headers=token).status_code == 422
@@ -348,6 +356,7 @@ def test_model_settings_route(tmp_path, monkeypatch):
     from hub import app as app_module
     with TestClient(app_module.app) as client:
         hub = app_module.app.state.hub
+        fake_gemini_models(hub, monkeypatch)
         token = {"Authorization": f"Bearer {hub.secrets.access_token()}"}
         client.put("/api/settings/chat", json={"gemini_key": "AIzaSyTestKey_0123456789abcdef"}, headers=token)
         hub.secrets.set("anthropic_api_key", "sk-ant-test")
@@ -444,3 +453,76 @@ def test_a_removed_openai_model_falls_back():
     hub = OpenAIHub(models=("gpt-9",))
     hub.data["chat"] = {"models": {"quick": "openai:gpt-8-mini"}}
     assert Chat(hub).model_for("quick") == "openai:gpt-9"
+
+
+# ---------------- Gemini: the key's own model list ----------------
+from hub.chat import gemini_chat_models, pick_gemini  # noqa: E402
+
+
+def gm(name, actions=("generateContent",), display=None):
+    return SimpleNamespace(name=f"models/{name}", supported_actions=list(actions), display_name=display or name)
+
+
+GOOGLE_MODELS = [gm("gemini-2.5-flash", display="Gemini 2.5 Flash"), gm("gemini-2.5-flash-lite", display="Gemini 2.5 Flash-Lite"),
+                 gm("gemini-3.1-flash-lite-preview"), gm("gemini-2.0-flash"), gm("gemini-2.5-pro"),
+                 gm("text-embedding-004", ("embedContent",)), gm("gemini-embedding-001", ("embedContent",)),
+                 gm("gemini-2.5-flash-image"), gm("gemini-2.5-flash-preview-tts"), gm("gemma-3-27b-it"), gm("imagen-4.0")]
+
+
+def test_gemini_models_come_from_the_key():
+    ids, names = gemini_chat_models(GOOGLE_MODELS)
+    assert ids == ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-3.1-flash-lite-preview"]
+    assert pick_gemini(ids, "lite") == "gemini-2.5-flash-lite" and pick_gemini(ids, "flash") == "gemini-2.5-flash"
+    assert names["gemini-2.5-flash-lite"] == "Gemini 2.5 Flash-Lite"
+
+
+class ListingGemini(ScriptedGemini):
+    def __init__(self, replies, models=GOOGLE_MODELS, missing=()):
+        super().__init__(replies)
+        self._models, self.missing = models, set(missing)
+        self.aio.models.list = self.list_models
+
+    async def list_models(self):
+        async def gen():
+            for m in self._models:
+                yield m
+        return gen()
+
+    async def generate(self, model, contents, config):
+        if model in self.missing:
+            raise genai_errors.ClientError(404, {"error": {"code": 404, "message": f"models/{model} is not found", "status": "NOT_FOUND"}})
+        return await super().generate(model, contents, config)
+
+
+def test_an_old_key_learns_its_models_and_an_unavailable_model_is_replaced():
+    hub = GeminiHub()
+    data = {"gemini": {"api_key": "AIza-old", "model": "gemini-flash-lite-latest"}}
+    hub.secrets = SimpleNamespace(get=lambda k: data.get(k), set=lambda k, v: data.__setitem__(k, v))
+    gem = ListingGemini([[gt.Part(text="Done.")]], missing={"gemini-flash-lite-latest"})
+    chat = Chat(hub, gemini_factory=lambda key: gem)
+    out = asyncio.run(chat.send("turn on the porch light"))
+    assert data["gemini"]["models"][0] == "gemini-2.5-flash" and "model" not in data["gemini"]   # stale pick dropped
+    assert out["model"] == "gemini:gemini-2.5-flash-lite" and gem.requests[0]["model"] == "gemini-2.5-flash-lite"
+    labels = {m["id"]: m["label"] for m in chat.choices()["available"]}
+    assert labels["gemini:gemini-2.5-flash-lite"].startswith("Gemini 2.5 Flash-Lite · free, most free use")
+
+
+def test_a_model_that_disappears_mid_use_is_swapped_for_the_same_tier():
+    hub = GeminiHub()
+    data = {"gemini": {"api_key": "AIza-x", "models": ["gemini-9-flash-lite", "gemini-9-flash"], "names": {}}}
+    hub.secrets = SimpleNamespace(get=lambda k: data.get(k), set=lambda k, v: data.__setitem__(k, v))
+    gem = ListingGemini([[gt.Part(text="Hi.")]], missing={"gemini-9-flash-lite"})
+    out = asyncio.run(Chat(hub, gemini_factory=lambda key: gem).send("hello"))
+    assert out["model"] == "gemini:gemini-2.5-flash-lite" and "isn't available to this key" in out["reply"]
+    assert data["gemini"]["models"][0] == "gemini-2.5-flash"
+
+
+def test_a_rejected_gemini_key_says_so():
+    hub = GeminiHub()
+
+    class Bad(ListingGemini):
+        async def list_models(self):
+            raise genai_errors.ClientError(400, {"error": {"code": 400, "message": "API key not valid", "status": "INVALID_ARGUMENT"}})
+    with pytest.raises(HubError) as err:
+        asyncio.run(Chat(hub, gemini_factory=lambda key: Bad([])).connect_gemini("AIza-bad"))
+    assert "rejected" in err.value.message

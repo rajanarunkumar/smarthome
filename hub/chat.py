@@ -27,7 +27,33 @@ from .models import DAYS, HubError, ScheduleIn, StateIn
 log = logging.getLogger(__name__)
 
 MODEL = "claude-opus-5-5"
-GEMINI_MODEL = "gemini-flash-lite-latest"   # Google's alias for the newest Flash-Lite: the largest free daily quota
+GEMINI_MODEL = "gemini-flash-lite-latest"   # only until the key's own model list is known (see connect_gemini)
+GEMINI_SKIP = ("embedding", "image", "tts", "audio", "live", "native", "computer", "robotics", "learnlm", "gemma", "aqa", "veo")
+
+
+def gemini_chat_models(models: list) -> tuple[list[str], dict[str, str]]:
+    """Model ids the key can chat with (generateContent), newest first, stable before preview, and display names."""
+    import re
+    rows = []
+    for m in models:
+        mid = (getattr(m, "name", "") or "").removeprefix("models/")
+        actions = getattr(m, "supported_actions", None) or []
+        if not mid.startswith("gemini") or (actions and "generateContent" not in actions) or any(w in mid for w in GEMINI_SKIP):
+            continue
+        v = re.search(r"gemini-(\d+(?:\.\d+)?)", mid)
+        unstable = any(w in mid for w in ("preview", "exp"))
+        rows.append((unstable, -(float(v.group(1)) if v else 0), mid, getattr(m, "display_name", None) or mid))
+    rows.sort()
+    return [r[2] for r in rows][:20], {r[2]: r[3] for r in rows}
+
+
+def pick_gemini(ids: list[str], tier: str) -> str | None:
+    """Newest stable model of a tier: "lite" (Flash-Lite, the largest free allowance) or "flash"."""
+    if tier == "lite":
+        found = next((m for m in ids if "flash-lite" in m), None)
+    else:
+        found = next((m for m in ids if "flash" in m and "lite" not in m), None)
+    return found or (ids[0] if ids else None)
 
 # Models the person can pick, per kind of request. "provider:model".
 MODEL_CHOICES = {
@@ -213,9 +239,22 @@ class Chat:
     def _openai_models(self) -> list[str]:
         return list((self.hub.secrets.get("openai") or {}).get("models") or [])
 
+    def _gemini_models(self) -> list[str]:
+        return list((self.hub.secrets.get("gemini") or {}).get("models") or [])
+
     def catalog(self) -> dict[str, str]:
-        """Every model that can be chosen now: the fixed Gemini and Claude list plus the OpenAI models the key can use."""
-        out = dict(MODEL_CHOICES)
+        """Every model that can be chosen now: Claude, plus the Gemini and OpenAI models each key can use."""
+        out: dict[str, str] = {}
+        gm = self._gemini_models()
+        names = (self.hub.secrets.get("gemini") or {}).get("names") or {}
+        if gm:
+            lite, flash = pick_gemini(gm, "lite"), pick_gemini(gm, "flash")
+            for m in gm:
+                note = " · free, most free use" if m == lite else " · free" if "preview" not in m and "exp" not in m else " · preview"
+                out[f"gemini:{m}"] = f"{names.get(m, m)}{note}"
+        else:
+            out.update({k: v for k, v in MODEL_CHOICES.items() if k.startswith("gemini:")})
+        out.update({k: v for k, v in MODEL_CHOICES.items() if not k.startswith("gemini:")})
         for m in self._openai_models():
             out[f"openai:{m}"] = f"OpenAI {m} · paid"
         return out
@@ -238,6 +277,32 @@ class Chat:
         self.hub.secrets.set("openai", {"api_key": key, "models": ids})
         return ids
 
+    async def connect_gemini(self, key: str) -> list[str]:
+        """Check the key by asking Google which models it can use; remember the ones that can chat."""
+        from google.genai import errors
+        client = self._gemini_factory(key) if self._gemini_factory else __import__("google.genai", fromlist=["Client"]).Client(api_key=key)
+        try:
+            models = [m async for m in await client.aio.models.list()]
+        except errors.APIError as exc:
+            code = getattr(exc, "code", 0)
+            raise HubError(400 if code in (400, 401, 403) else 502,
+                           "Google rejected the Gemini API key." if code in (400, 401, 403) else f"Google said {code} when listing models.") from exc
+        except Exception as exc:  # noqa: BLE001 - network
+            raise HubError(504, "Couldn't reach Google. Check the Mac's internet connection.") from exc
+        ids, names = gemini_chat_models(models)
+        if not ids:
+            raise HubError(400, "This Gemini key can't use any chat models.")
+        old = self.hub.secrets.get("gemini") or {}
+        cfg = {"api_key": key, "models": ids, "names": {m: names[m] for m in ids}}
+        if old.get("model") in ids:
+            cfg["model"] = old["model"]
+        self.hub.secrets.set("gemini", cfg)
+        return ids
+
+    def _gemini_ok(self, model_id: str) -> bool:
+        gm = self._gemini_models()
+        return not gm or model_id in gm
+
     def model_for(self, mode: str) -> str | None:
         """The "provider:model" for quick commands or thorough reviews: the person's choice if its key is saved,
         otherwise the best default for what's available (free Gemini for quick, Claude Opus for thorough)."""
@@ -245,21 +310,32 @@ class Chat:
         cfg = self.hub.secrets.get("chat") or {}
         chosen = (cfg.get("models") or {}).get(mode)
         if not chosen and cfg.get("provider"):               # "use this provider": its quick or thorough model
-            chosen = {("gemini", "quick"): "gemini:" + self._gemini_model(), ("gemini", "thorough"): "gemini:gemini-flash-latest",
+            chosen = {("gemini", "quick"): "gemini:" + self._gemini_model(), ("gemini", "thorough"): "gemini:" + self._gemini_thorough(),
                       ("claude", "quick"): "claude:claude-haiku-5-5", ("claude", "thorough"): f"claude:{MODEL}"}.get((cfg["provider"], mode))
-        if chosen and keys.get(chosen.split(":", 1)[0]) and not (chosen.startswith("openai:") and chosen[7:] not in self._openai_models()):
+        if chosen and keys.get(chosen.split(":", 1)[0]) and not (chosen.startswith("openai:") and chosen[7:] not in self._openai_models()) \
+                and not (chosen.startswith("gemini:") and not self._gemini_ok(chosen[7:])):
             return chosen
+        if chosen and chosen.startswith("gemini:") and not self._gemini_ok(chosen[7:]):
+            chosen = None
         if chosen and chosen.startswith("openai:") and chosen[7:] not in self._openai_models():
             chosen = None
         oa = self._openai_models()
         oa_quick = next((m for m in oa if "mini" in m), oa[0] if oa else None)
         oa_thorough = next((m for m in oa if "mini" not in m and "nano" not in m), oa[0] if oa else None)
         order = (["gemini:" + self._gemini_model(), "claude:claude-haiku-5-5", f"openai:{oa_quick}"] if mode == "quick"
-                 else [f"claude:{MODEL}", f"openai:{oa_thorough}", "gemini:gemini-flash-latest"])
+                 else [f"claude:{MODEL}", f"openai:{oa_thorough}", "gemini:" + self._gemini_thorough()])
         return next((m for m in order if keys[m.split(":", 1)[0]] and not m.endswith(":None")), None)
 
     def _gemini_model(self) -> str:
-        return (self.hub.secrets.get("gemini") or {}).get("model") or GEMINI_MODEL
+        """Gemini for quick commands: the one picked in Settings if the key still has it, else the newest Flash-Lite."""
+        cfg = self.hub.secrets.get("gemini") or {}
+        gm = cfg.get("models") or []
+        if cfg.get("model") and (not gm or cfg["model"] in gm):
+            return cfg["model"]
+        return pick_gemini(gm, "lite") or GEMINI_MODEL
+
+    def _gemini_thorough(self) -> str:
+        return pick_gemini(self._gemini_models(), "flash") or "gemini-flash-latest"
 
     def provider(self) -> str | None:
         """Which provider answers quick commands (shown in Settings)."""
@@ -432,6 +508,12 @@ class Chat:
                    model: str | None = None) -> dict:
         """mode: quick | thorough | auto (guessed from the words). model: a "provider:model" for this message only."""
         self._prune()
+        gcfg = self.hub.secrets.get("gemini") or {}
+        if gcfg.get("api_key") and not gcfg.get("models"):
+            try:                       # a key saved before the hub learned its model list
+                await self.connect_gemini(gcfg["api_key"])
+            except HubError as exc:
+                log.info("Gemini model list: %s", exc.message)
         mode = mode if mode in MODES else pick_mode(text)
         if model:
             if model not in self.catalog() and not model.startswith("gemini:gemini-"):
@@ -463,6 +545,8 @@ class Chat:
         turn: dict = {"done": [], "plan": None}
         if provider == "gemini":
             reply = await self._gemini_loop(conv["messages"], prompt, turn, model_id)
+            if turn.get("model_used"):
+                spec, model_id = "gemini:" + turn["model_used"], turn["model_used"]
         elif provider == "openai":
             reply = await self._openai_loop(conv["messages"], prompt, turn, model_id, EFFORT[mode])
         else:
@@ -472,6 +556,8 @@ class Chat:
         if turn["plan"]:
             conv["plan_ids"].append(turn["plan"]["id"])
         plan = turn["plan"]
+        if turn.get("model_note"):
+            reply += f"\n\n({turn['model_note']})"
         return {"conversation_id": conversation_id, "reply": reply, "done": turn["done"], "provider": provider,
                 "model": spec, "model_label": self.catalog().get(spec, model_id).split(" · ")[0], "mode": mode,
                 "plan": {k: plan[k] for k in ("id", "summary", "changes", "problems")} if plan else None}
@@ -551,9 +637,28 @@ class Chat:
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True))
         start = len(contents)
         contents.append(types.Content(role="user", parts=[types.Part.from_text(text=prompt)]))
+        async def generate():
+            nonlocal model
+            try:
+                return await client.aio.models.generate_content(model=model, contents=contents, config=config)
+            except errors.APIError as exc:
+                if getattr(exc, "code", 0) != 404:
+                    raise
+                # The model is gone or not offered to this key: learn the key's models again and use the same tier.
+                key = (self.hub.secrets.get("gemini") or {}).get("api_key")
+                ids = await self.connect_gemini(key)
+                replacement = pick_gemini(ids, "lite" if "lite" in model else "flash")
+                if not replacement or replacement == model:
+                    raise
+                log.info("Gemini model %s unavailable; using %s", model, replacement)
+                turn["model_note"] = f"{model} isn't available to this key, so {replacement} answered."
+                turn["model_used"] = replacement
+                model = replacement
+                return await client.aio.models.generate_content(model=model, contents=contents, config=config)
+
         try:
             for _ in range(MAX_ROUNDS):
-                response = await client.aio.models.generate_content(model=model, contents=contents, config=config)
+                response = await generate()
                 candidate = response.candidates[0] if response.candidates else None
                 if candidate is None or candidate.content is None or not candidate.content.parts:
                     reason = getattr(candidate, "finish_reason", None) if candidate else None
