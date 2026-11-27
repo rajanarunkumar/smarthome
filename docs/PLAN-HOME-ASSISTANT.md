@@ -106,8 +106,10 @@ Each phase leaves everything working; old adapters stay until HA is proven for t
 
 ## Home Assistant in a virtual machine on the Mac
 
-- **UTM** (free, utm.app) running **Home Assistant OS**: the *aarch64 / Generic ARM* image (`.qcow2`) for Apple
-  silicon Macs, the *generic x86-64* image for Intel Macs, from home-assistant.io → Installation → macOS.
+- **UTM** (free, mac.getutm.app) running **Home Assistant OS**: `haos_generic-aarch64-<version>.qcow2.xz` for Apple
+  silicon Macs, `haos_ova-<version>.qcow2.xz` for Intel Macs. Not every release has them: Raspberry-Pi-only
+  releases (such as 18.5) don't, so take the newest release whose assets include them (18.4 at the time of writing).
+  HA's own macOS page uses VirtualBox with the `.vdi.zip` of the same images; either works.
 - VM settings: 2 CPUs, 4 GB memory, the image as the boot disk (32 GB is plenty), **network mode Bridged** (so HA
   is a device on the home network and can discover Hue, Sonos, Kasa, Matter; Shared/NAT mode breaks discovery).
 - Start it at login: UTM has no autostart setting; a login item runs `/Applications/UTM.app/Contents/MacOS/utmctl start "Home Assistant"` (steps in the install guide). Keep the Mac from sleeping, as the hub already needs.
