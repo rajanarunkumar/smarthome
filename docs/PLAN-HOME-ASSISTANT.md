@@ -110,7 +110,7 @@ Each phase leaves everything working; old adapters stay until HA is proven for t
   silicon Macs, the *generic x86-64* image for Intel Macs, from home-assistant.io → Installation → macOS.
 - VM settings: 2 CPUs, 4 GB memory, the image as the boot disk (32 GB is plenty), **network mode Bridged** (so HA
   is a device on the home network and can discover Hue, Sonos, Kasa, Matter; Shared/NAT mode breaks discovery).
-- Start it at login: UTM → the VM → *Start automatically* (and keep the Mac from sleeping, as the hub already needs).
+- Start it at login: UTM has no autostart setting; a login item runs `/Applications/UTM.app/Contents/MacOS/utmctl start "Home Assistant"` (steps in the install guide). Keep the Mac from sleeping, as the hub already needs.
 - HA is then at `http://homeassistant.local:8123` (or the address shown in the VM window). In HA: create the owner
   account, then Settings → Add-ons → **Tailscale** for remote access, and Profile → Security → **Long-lived access
   token** for the hub.
